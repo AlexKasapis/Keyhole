@@ -1,5 +1,5 @@
 ---
-source: src/ui/mod.rs
+source: src/ui.rs
 expression: "render_lines(&mut app, 90, 20)"
 ---
  BrokerTUI   prod (db0)  · dashboard                                         12:34:56 UTC
