@@ -1,0 +1,3 @@
+- Each new change should be accompanied with adequate and proper testing coverage.
+- All the codebase must be adequately and properly covered by tests.
+- If something is ambiguous, ask questions.
