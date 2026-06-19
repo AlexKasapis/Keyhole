@@ -4,9 +4,10 @@
 default:
     @just --list
 
-# Install the pinned Rust toolchain + components.
+# Install the pinned Rust toolchain + components (clippy, rustfmt).
 setup:
-    rustup toolchain install stable --component clippy rustfmt
+    # One --component per component: a bare second name is read as a toolchain.
+    rustup toolchain install stable --component clippy --component rustfmt
 
 # Run the TUI (forwards extra args: `just run -- --log-level debug`).
 run *ARGS:
