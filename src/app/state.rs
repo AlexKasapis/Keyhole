@@ -1,9 +1,15 @@
 //! UI-facing application state types owned by [`crate::app::App`].
 
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
 use ratatui::widgets::TableState;
+use time::OffsetDateTime;
 
 use crate::broker::actor::ConnHandle;
-use crate::broker::{Capabilities, ConnId, EntryMeta, ServerStats, ValueView};
+use crate::broker::{
+    BrokerEvent, Capabilities, ConnId, EntryMeta, ServerStats, SubSpec, ValueView,
+};
 
 /// Which top-level screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +17,10 @@ pub enum Screen {
     Connections,
     Browser,
     Dashboard,
+    /// Live tails (pub/sub + streams) for the active connection.
+    Realtime,
+    /// On-disk recordings.
+    Recordings,
 }
 
 /// Keyboard input mode (text-entry modes capture raw keys).
@@ -19,12 +29,103 @@ pub enum InputMode {
     Normal,
     Filter,
     Form,
+    /// Entering a subscription spec (`pubsub:ch`, `psub:ch.*`, `stream:key`).
+    Subscribe,
 }
 
 /// A transient status-bar message.
 pub struct Status {
     pub message: String,
     pub is_error: bool,
+}
+
+/// Lifecycle of a subscription/tail tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubState {
+    /// Tail requested; waiting for the actor to confirm.
+    Connecting,
+    /// Tail established and receiving.
+    Active,
+    /// Tail stopped (source closed, failed, or stopped by the user).
+    Ended(Option<String>),
+}
+
+/// UI-side recording state for a tail, mirrored from `RecordingUpdate` events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordState {
+    Off,
+    On {
+        records: u64,
+        bytes: u64,
+        path: PathBuf,
+    },
+}
+
+impl RecordState {
+    pub fn is_on(&self) -> bool {
+        matches!(self, RecordState::On { .. })
+    }
+}
+
+/// One live tail: a capped scrollback ring buffer plus recording state.
+pub struct Subscription {
+    pub sub_id: u32,
+    pub spec: SubSpec,
+    pub label: String,
+    pub state: SubState,
+    /// Newest-last ring buffer of received events (older ones are evicted).
+    pub events: VecDeque<BrokerEvent>,
+    /// Ring-buffer capacity.
+    pub capacity: usize,
+    /// Total events received (including ones evicted from the ring).
+    pub received: u64,
+    pub recording: RecordState,
+    /// Stick to the newest event; disabled while the user scrolls up.
+    pub follow: bool,
+    /// How many events back from the newest the viewport bottom sits
+    /// (`0` == following the newest event).
+    pub offset: usize,
+}
+
+impl Subscription {
+    pub fn new(sub_id: u32, spec: SubSpec, capacity: usize) -> Self {
+        let label = spec.label();
+        Self {
+            sub_id,
+            spec,
+            label,
+            state: SubState::Connecting,
+            events: VecDeque::new(),
+            capacity: capacity.max(1),
+            received: 0,
+            recording: RecordState::Off,
+            follow: true,
+            offset: 0,
+        }
+    }
+
+    /// Append an event, evicting the oldest if at capacity.
+    pub fn push(&mut self, event: BrokerEvent) {
+        if self.events.len() == self.capacity {
+            self.events.pop_front();
+        }
+        self.events.push_back(event);
+        self.received += 1;
+        // When scrolled up, keep the viewport anchored on the same older events
+        // as newer ones arrive (offset is measured from the newest end).
+        if !self.follow {
+            let max = self.events.len().saturating_sub(1);
+            self.offset = (self.offset + 1).min(max);
+        }
+    }
+}
+
+/// A recording file on disk, listed in the Recordings view. The full path is
+/// `recordings_dir / name`, so only the leaf name is retained here.
+pub struct RecordingFile {
+    pub name: String,
+    pub size: u64,
+    pub modified: Option<OffsetDateTime>,
 }
 
 /// An open connection plus its per-connection browse/inspect/dashboard state.
@@ -43,6 +144,10 @@ pub struct Connection {
     pub value_scroll: u16,
     pub stats: Option<ServerStats>,
     pub stat_ticks: u32,
+    /// Live tails for this connection (Realtime screen tabs).
+    pub subs: Vec<Subscription>,
+    /// Index into `subs` of the focused tail.
+    pub active_sub: Option<usize>,
     pub handle: ConnHandle,
 }
 
@@ -65,6 +170,8 @@ impl Connection {
             value_scroll: 0,
             stats: None,
             stat_ticks: 0,
+            subs: Vec::new(),
+            active_sub: None,
             handle,
         }
     }
@@ -72,6 +179,24 @@ impl Connection {
     /// The currently highlighted key, if any.
     pub fn selected(&self) -> Option<&EntryMeta> {
         self.table.selected().and_then(|i| self.keys.get(i))
+    }
+
+    /// The focused tail, if any.
+    pub fn active_subscription(&self) -> Option<&Subscription> {
+        self.active_sub.and_then(|i| self.subs.get(i))
+    }
+
+    /// The focused tail (mutable), if any.
+    pub fn active_subscription_mut(&mut self) -> Option<&mut Subscription> {
+        match self.active_sub {
+            Some(i) => self.subs.get_mut(i),
+            None => None,
+        }
+    }
+
+    /// Find a tail by id (mutable).
+    pub fn sub_by_id_mut(&mut self, sub_id: u32) -> Option<&mut Subscription> {
+        self.subs.iter_mut().find(|s| s.sub_id == sub_id)
     }
 
     /// A short `name (dbN)` label for the status bar.
@@ -128,5 +253,61 @@ impl ConnForm {
 impl Default for ConnForm {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::broker::Payload;
+
+    fn ev(tag: &str) -> BrokerEvent {
+        BrokerEvent {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            source: tag.to_string(),
+            payload: Payload::Utf8(tag.to_string()),
+            meta: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ring_buffer_caps_and_counts() {
+        let mut s = Subscription::new(1, SubSpec::Channel("c".into()), 3);
+        for i in 0..5 {
+            s.push(ev(&format!("m{i}")));
+        }
+        assert_eq!(s.events.len(), 3, "capped at capacity");
+        assert_eq!(s.received, 5, "received counts every event");
+        let sources: Vec<&str> = s.events.iter().map(|e| e.source.as_str()).collect();
+        assert_eq!(sources, vec!["m2", "m3", "m4"], "oldest evicted");
+        // Following by default keeps the viewport pinned to newest.
+        assert!(s.follow);
+        assert_eq!(s.offset, 0);
+    }
+
+    #[test]
+    fn paused_viewport_anchors_on_new_events() {
+        let mut s = Subscription::new(1, SubSpec::Channel("c".into()), 10);
+        for i in 0..5 {
+            s.push(ev(&format!("m{i}")));
+        }
+        // Scroll up two events (offset measured back from the newest).
+        s.follow = false;
+        s.offset = 2;
+        s.push(ev("m5"));
+        // To keep the same older events in view, offset grows with new arrivals.
+        assert_eq!(s.offset, 3);
+        assert!(!s.follow);
+    }
+
+    #[test]
+    fn record_state_is_on() {
+        assert!(!RecordState::Off.is_on());
+        assert!(RecordState::On {
+            records: 1,
+            bytes: 2,
+            path: std::path::PathBuf::from("x")
+        }
+        .is_on());
     }
 }

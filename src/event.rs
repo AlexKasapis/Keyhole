@@ -11,7 +11,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::broker::actor::ConnHandle;
-use crate::broker::{BrowsePage, ConnId, ServerStats, ValueView};
+use crate::broker::{BrokerEvent, BrowsePage, ConnId, ServerStats, ValueView};
+use crate::recording::RecordingStatus;
 
 /// Everything the render loop reacts to.
 #[derive(Debug)]
@@ -39,6 +40,26 @@ pub enum AppEvent {
         id: ConnId,
         context: String,
         error: String,
+    },
+    /// A live event from a subscription/tail (lossy: high-rate path).
+    Realtime {
+        id: ConnId,
+        sub_id: u32,
+        event: BrokerEvent,
+    },
+    /// A subscription's tail is established and receiving.
+    SubscriptionStarted { id: ConnId, sub_id: u32 },
+    /// A subscription's tail stopped (source closed, failed, or was stopped).
+    SubscriptionEnded {
+        id: ConnId,
+        sub_id: u32,
+        reason: Option<String>,
+    },
+    /// A change in a tail's recording (started/progress/stopped/failed).
+    RecordingUpdate {
+        id: ConnId,
+        sub_id: u32,
+        status: RecordingStatus,
     },
 }
 

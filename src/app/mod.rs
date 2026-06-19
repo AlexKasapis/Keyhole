@@ -5,7 +5,10 @@
 mod action;
 mod state;
 
-pub use state::{ConnForm, Connection, InputMode, Screen, Status};
+pub use state::{
+    ConnForm, Connection, InputMode, RecordState, RecordingFile, Screen, Status, SubState,
+    Subscription,
+};
 
 use std::path::PathBuf;
 
@@ -20,10 +23,12 @@ use crate::app::action::Action;
 use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle};
 use crate::broker::redis::RedisConnection;
 use crate::broker::{
-    BrokerConnection, BrowsePage, BrowseReq, ConnId, InspectReq, ServerStats, ValueView,
+    BrokerConnection, BrokerEvent, BrowsePage, BrowseReq, ConnId, InspectReq, ServerStats, SubSpec,
+    ValueType, ValueView,
 };
 use crate::config::{self, Config, ConnectionConfig, RedisProfile};
 use crate::event::AppEvent;
+use crate::recording::RecordingStatus;
 
 /// How many ticks (~250ms each) between automatic dashboard stat refreshes.
 const STATS_REFRESH_TICKS: u32 = 8;
@@ -45,7 +50,10 @@ pub struct App {
     config_path: PathBuf,
     preview_bytes: usize,
     scan_count: usize,
+    tail_scrollback: usize,
+    recordings_dir: PathBuf,
     next_id: u32,
+    next_sub_id: u32,
     pending_connect: Option<String>,
 
     // UI state (read by `crate::ui`).
@@ -56,16 +64,21 @@ pub struct App {
     pub(crate) screen: Screen,
     pub(crate) mode: InputMode,
     pub(crate) filter: String,
+    pub(crate) subscribe_buf: String,
     pub(crate) form: Option<ConnForm>,
     pub(crate) status: Option<Status>,
     pub(crate) show_help: bool,
+    pub(crate) recordings: Vec<RecordingFile>,
+    pub(crate) recordings_state: ListState,
     pub(crate) now: OffsetDateTime,
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         config_path: PathBuf,
+        recordings_dir: PathBuf,
         events: Sender<AppEvent>,
         tracker: TaskTracker,
         cancel: CancellationToken,
@@ -80,6 +93,7 @@ impl App {
             .collect();
         let preview_bytes = config.settings.value_preview_bytes;
         let scan_count = config.settings.scan_count;
+        let tail_scrollback = config.settings.tail_scrollback;
         let mut profile_state = ListState::default();
         if !profiles.is_empty() {
             profile_state.select(Some(0));
@@ -94,7 +108,10 @@ impl App {
             config_path,
             preview_bytes,
             scan_count,
+            tail_scrollback,
+            recordings_dir,
             next_id: 1,
+            next_sub_id: 1,
             pending_connect: connect_on_start,
             profiles,
             profile_state,
@@ -103,9 +120,12 @@ impl App {
             screen: Screen::Connections,
             mode: InputMode::Normal,
             filter: String::new(),
+            subscribe_buf: String::new(),
             form: None,
             status: None,
             show_help: false,
+            recordings: Vec::new(),
+            recordings_state: ListState::default(),
             now: OffsetDateTime::now_utc(),
         }
     }
@@ -151,6 +171,14 @@ impl App {
             AppEvent::ValueLoaded { id, key, value } => self.on_value(id, key, value),
             AppEvent::StatsUpdated { id, stats } => self.on_stats(id, stats),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
+            AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
+            AppEvent::SubscriptionStarted { id, sub_id } => self.on_sub_started(id, sub_id),
+            AppEvent::SubscriptionEnded { id, sub_id, reason } => {
+                self.on_sub_ended(id, sub_id, reason)
+            }
+            AppEvent::RecordingUpdate { id, sub_id, status } => {
+                self.on_recording_update(id, sub_id, status)
+            }
         }
     }
 
@@ -229,6 +257,89 @@ impl App {
         self.set_status(format!("[{}] {context}: {error}", id.0), true);
     }
 
+    // -- realtime events -----------------------------------------------------
+
+    fn on_realtime(&mut self, id: ConnId, sub_id: u32, event: BrokerEvent) {
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            if let Some(sub) = conn.sub_by_id_mut(sub_id) {
+                // First event implicitly confirms the tail is live.
+                if sub.state == SubState::Connecting {
+                    sub.state = SubState::Active;
+                }
+                sub.push(event);
+            }
+        }
+    }
+
+    fn on_sub_started(&mut self, id: ConnId, sub_id: u32) {
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            if let Some(sub) = conn.sub_by_id_mut(sub_id) {
+                if sub.state == SubState::Connecting {
+                    sub.state = SubState::Active;
+                }
+            }
+        }
+    }
+
+    fn on_sub_ended(&mut self, id: ConnId, sub_id: u32, reason: Option<String>) {
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            if let Some(sub) = conn.sub_by_id_mut(sub_id) {
+                sub.state = SubState::Ended(reason.clone());
+                sub.recording = RecordState::Off;
+            }
+        }
+        if let Some(reason) = reason {
+            self.set_status(format!("tail ended: {reason}"), true);
+        }
+    }
+
+    fn on_recording_update(&mut self, id: ConnId, sub_id: u32, status: RecordingStatus) {
+        let mut note: Option<(String, bool)> = None;
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            if let Some(sub) = conn.sub_by_id_mut(sub_id) {
+                match status {
+                    RecordingStatus::Started { path } => {
+                        note = Some((format!("recording → {}", path.display()), false));
+                        sub.recording = RecordState::On {
+                            records: 0,
+                            bytes: 0,
+                            path,
+                        };
+                    }
+                    RecordingStatus::Progress { records, bytes } => {
+                        if let RecordState::On {
+                            records: r,
+                            bytes: b,
+                            ..
+                        } = &mut sub.recording
+                        {
+                            *r = records;
+                            *b = bytes;
+                        }
+                    }
+                    RecordingStatus::Stopped {
+                        records,
+                        bytes,
+                        path,
+                    } => {
+                        note = Some((
+                            format!("recorded {records} events ({bytes} B) → {}", path.display()),
+                            false,
+                        ));
+                        sub.recording = RecordState::Off;
+                    }
+                    RecordingStatus::Failed { error } => {
+                        note = Some((format!("recording failed: {error}"), true));
+                        sub.recording = RecordState::Off;
+                    }
+                }
+            }
+        }
+        if let Some((message, is_error)) = note {
+            self.set_status(message, is_error);
+        }
+    }
+
     // -- input ---------------------------------------------------------------
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -243,6 +354,7 @@ impl App {
             }
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::Form => self.handle_form_key(key),
+            InputMode::Subscribe => self.handle_subscribe_key(key),
         }
     }
 
@@ -276,14 +388,49 @@ impl App {
                     self.request_stats(id);
                 }
             }
+            Action::GotoRealtime => {
+                if self.active.is_some() {
+                    self.screen = Screen::Realtime;
+                }
+            }
+            Action::GotoRecordings => {
+                self.screen = Screen::Recordings;
+                self.scan_recordings();
+            }
             Action::StartFilter => {
                 if self.screen == Screen::Browser && self.active.is_some() {
                     self.filter.clear();
                     self.mode = InputMode::Filter;
                 }
             }
-            Action::DbPrev => self.change_db(-1),
-            Action::DbNext => self.change_db(1),
+            Action::Subscribe => self.open_subscribe_prompt(),
+            Action::TailKey => self.tail_selected_key(),
+            Action::PrevTab => {
+                if self.screen == Screen::Realtime {
+                    self.focus_tab(-1);
+                }
+            }
+            Action::NextTab => {
+                if self.screen == Screen::Realtime {
+                    self.focus_tab(1);
+                }
+            }
+            Action::StopTail => {
+                if self.screen == Screen::Realtime {
+                    self.stop_active_tail();
+                }
+            }
+            // `[`/`]`: change DB in the Browser, switch tail tabs in Realtime.
+            Action::DbPrev => match self.screen {
+                Screen::Browser => self.change_db(-1),
+                Screen::Realtime => self.focus_tab(-1),
+                _ => {}
+            },
+            Action::DbNext => match self.screen {
+                Screen::Browser => self.change_db(1),
+                Screen::Realtime => self.focus_tab(1),
+                _ => {}
+            },
             Action::LoadMore => {
                 if self.screen == Screen::Browser {
                     if let Some(id) = self.active_id() {
@@ -291,12 +438,22 @@ impl App {
                     }
                 }
             }
-            Action::Refresh => {
-                if let Some(id) = self.active_id() {
-                    self.start_browse(id, true);
-                    self.request_stats(id);
+            // `r`: refresh data (Browser/Dashboard), toggle recording (Realtime),
+            // rescan files (Recordings).
+            Action::Refresh => match self.screen {
+                Screen::Browser | Screen::Dashboard => {
+                    if let Some(id) = self.active_id() {
+                        self.start_browse(id, true);
+                        self.request_stats(id);
+                    }
                 }
-            }
+                Screen::Realtime => self.toggle_recording(),
+                Screen::Recordings => {
+                    self.scan_recordings();
+                    self.set_status("recordings refreshed".to_string(), false);
+                }
+                Screen::Connections => {}
+            },
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Dismiss => self.show_help = false,
         }
@@ -312,6 +469,20 @@ impl App {
             KeyCode::Char(c) => self.filter.push(c),
             KeyCode::Backspace => {
                 self.filter.pop();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_subscribe_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = InputMode::Normal,
+            KeyCode::Enter => {
+                self.submit_subscribe();
+            }
+            KeyCode::Char(c) => self.subscribe_buf.push(c),
+            KeyCode::Backspace => {
+                self.subscribe_buf.pop();
             }
             _ => {}
         }
@@ -376,6 +547,12 @@ impl App {
                     self.maybe_load_more(id);
                 }
             }
+            Screen::Realtime => self.scroll_tail(delta),
+            Screen::Recordings => {
+                let len = self.recordings.len();
+                let next = move_selection(self.recordings_state.selected(), len, delta);
+                self.recordings_state.select(next);
+            }
             Screen::Dashboard => {}
         }
     }
@@ -400,6 +577,25 @@ impl App {
                 if let Some(id) = self.active_id() {
                     self.request_selected_value(id);
                     self.maybe_load_more(id);
+                }
+            }
+            Screen::Realtime => {
+                if let Some(sub) = self.active_sub_mut() {
+                    if top {
+                        sub.follow = false;
+                        sub.offset = 0;
+                    } else {
+                        // G: jump to newest and resume following.
+                        sub.follow = true;
+                        sub.offset = 0;
+                    }
+                }
+            }
+            Screen::Recordings => {
+                let len = self.recordings.len();
+                if len > 0 {
+                    self.recordings_state
+                        .select(Some(if top { 0 } else { len - 1 }));
                 }
             }
             Screen::Dashboard => {}
@@ -447,6 +643,7 @@ impl App {
         let tracker = self.tracker.clone();
         let cancel = self.cancel.clone();
         let preview = self.preview_bytes;
+        let recordings_dir = self.recordings_dir.clone();
         let name = profile.name.clone();
         self.set_status(format!("Connecting to {name}…"), false);
 
@@ -469,7 +666,17 @@ impl App {
             };
             let conn: Box<dyn BrokerConnection> =
                 Box::new(RedisConnection::new(profile, password, preview));
-            match spawn_connection(id, name, conn, events.clone(), &tracker, &cancel).await {
+            match spawn_connection(
+                id,
+                name,
+                conn,
+                events.clone(),
+                &tracker,
+                &cancel,
+                recordings_dir,
+            )
+            .await
+            {
                 Ok(handle) => {
                     let _ = events.send(AppEvent::Connected { handle }).await;
                 }
@@ -629,6 +836,205 @@ impl App {
         if let Some(id) = self.active_id() {
             self.start_browse(id, true);
         }
+    }
+
+    // -- realtime / recordings -----------------------------------------------
+
+    fn active_sub_mut(&mut self) -> Option<&mut Subscription> {
+        self.active_conn_mut()
+            .and_then(|c| c.active_subscription_mut())
+    }
+
+    fn open_subscribe_prompt(&mut self) {
+        if self.active.is_none() {
+            self.set_status("connect first, then subscribe".to_string(), true);
+            return;
+        }
+        self.subscribe_buf.clear();
+        self.mode = InputMode::Subscribe;
+    }
+
+    fn submit_subscribe(&mut self) {
+        let raw = self.subscribe_buf.trim().to_string();
+        self.mode = InputMode::Normal;
+        if raw.is_empty() {
+            return;
+        }
+        let default_db = self.active_conn().map(|c| c.db).unwrap_or(0);
+        match SubSpec::parse(&raw, default_db) {
+            Ok(spec) => self.start_subscribe(spec),
+            Err(e) => self.set_status(format!("bad spec: {e}"), true),
+        }
+    }
+
+    fn start_subscribe(&mut self, spec: SubSpec) {
+        let Some(id) = self.active_id() else {
+            self.set_status("no active connection".to_string(), true);
+            return;
+        };
+        let capacity = self.tail_scrollback;
+        let label = spec.label();
+
+        // Focus an existing live tail for the same spec rather than duplicating.
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            if let Some(pos) = conn
+                .subs
+                .iter()
+                .position(|s| s.spec == spec && !matches!(s.state, SubState::Ended(_)))
+            {
+                conn.active_sub = Some(pos);
+                self.screen = Screen::Realtime;
+                self.set_status(format!("already tailing {label}"), false);
+                return;
+            }
+        }
+
+        let sub_id = self.next_sub_id;
+        self.next_sub_id += 1;
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            conn.handle.send(ConnCommand::Subscribe {
+                sub_id,
+                spec: spec.clone(),
+                record: false,
+            });
+            conn.subs.push(Subscription::new(sub_id, spec, capacity));
+            conn.active_sub = Some(conn.subs.len() - 1);
+        }
+        self.screen = Screen::Realtime;
+        self.set_status(format!("subscribing to {label}…"), false);
+    }
+
+    fn tail_selected_key(&mut self) {
+        if self.screen != Screen::Browser {
+            return;
+        }
+        let selected = self
+            .active_conn()
+            .and_then(|c| c.selected().map(|e| (e.key.clone(), e.vtype, c.db)));
+        let Some((key, vtype, db)) = selected else {
+            self.set_status("no key selected".to_string(), true);
+            return;
+        };
+        if vtype != ValueType::Stream {
+            self.set_status(
+                format!(
+                    "'{key}' is a {} — only streams can be tailed (press s for pub/sub)",
+                    vtype.label()
+                ),
+                true,
+            );
+            return;
+        }
+        self.start_subscribe(SubSpec::Stream { key, db });
+    }
+
+    fn toggle_recording(&mut self) {
+        let info = self.active_conn().and_then(|c| {
+            c.active_subscription()
+                .map(|s| (c.id, s.sub_id, s.recording.is_on(), &s.state))
+                .map(|(id, sub, on, st)| (id, sub, on, matches!(st, SubState::Ended(_))))
+        });
+        let Some((id, sub_id, on, ended)) = info else {
+            self.set_status("no active tail to record".to_string(), true);
+            return;
+        };
+        if ended {
+            self.set_status("tail has ended; start a new one".to_string(), true);
+            return;
+        }
+        let turn_on = !on;
+        if let Some(conn) = self.conn_by_id(id) {
+            conn.handle.send(ConnCommand::SetRecording {
+                sub_id,
+                on: turn_on,
+            });
+        }
+        let msg = if turn_on {
+            "starting recording…"
+        } else {
+            "stopping recording…"
+        };
+        self.set_status(msg.to_string(), false);
+    }
+
+    fn stop_active_tail(&mut self) {
+        let label = {
+            let Some(conn) = self.active_conn_mut() else {
+                return;
+            };
+            let Some(pos) = conn.active_sub else {
+                return;
+            };
+            let sub = conn.subs.remove(pos);
+            conn.handle
+                .send(ConnCommand::StopSubscription { sub_id: sub.sub_id });
+            conn.active_sub = if conn.subs.is_empty() {
+                None
+            } else {
+                Some(pos.min(conn.subs.len() - 1))
+            };
+            sub.label
+        };
+        self.set_status(format!("stopped {label}"), false);
+    }
+
+    fn focus_tab(&mut self, delta: i32) {
+        if let Some(conn) = self.active_conn_mut() {
+            let len = conn.subs.len();
+            if len == 0 {
+                return;
+            }
+            let cur = conn.active_sub.unwrap_or(0) as i32;
+            let next = (cur + delta).rem_euclid(len as i32) as usize;
+            conn.active_sub = Some(next);
+        }
+    }
+
+    fn scroll_tail(&mut self, delta: i32) {
+        if let Some(sub) = self.active_sub_mut() {
+            let max = sub.events.len().saturating_sub(1) as i32;
+            // Up (delta < 0) scrolls back into history (larger offset from newest).
+            let next = (sub.offset as i32 - delta).clamp(0, max) as usize;
+            sub.offset = next;
+            sub.follow = next == 0;
+        }
+    }
+
+    fn scan_recordings(&mut self) {
+        let dir = self.recordings_dir.clone();
+        let mut files = Vec::new();
+        if let Ok(read) = std::fs::read_dir(&dir) {
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                let meta = entry.metadata().ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let modified = meta
+                    .as_ref()
+                    .and_then(|m| m.modified().ok())
+                    .map(OffsetDateTime::from);
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                files.push(RecordingFile {
+                    name,
+                    size,
+                    modified,
+                });
+            }
+        }
+        // Newest first.
+        files.sort_by_key(|f| std::cmp::Reverse(f.modified));
+        self.recordings = files;
+        let sel = match self.recordings.len() {
+            0 => None,
+            len => Some(self.recordings_state.selected().unwrap_or(0).min(len - 1)),
+        };
+        self.recordings_state.select(sel);
     }
 
     // -- helpers -------------------------------------------------------------

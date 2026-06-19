@@ -79,6 +79,9 @@ pub struct Settings {
     /// Max bytes of a value to fetch for the viewer before truncating.
     #[serde(default = "default_value_preview_bytes")]
     pub value_preview_bytes: usize,
+    /// Max events retained per live tail (scrollback ring buffer size).
+    #[serde(default = "default_tail_scrollback")]
+    pub tail_scrollback: usize,
 }
 
 impl Default for Settings {
@@ -86,6 +89,7 @@ impl Default for Settings {
         Self {
             scan_count: default_scan_count(),
             value_preview_bytes: default_value_preview_bytes(),
+            tail_scrollback: default_tail_scrollback(),
         }
     }
 }
@@ -96,6 +100,10 @@ fn default_scan_count() -> usize {
 
 fn default_value_preview_bytes() -> usize {
     64 * 1024
+}
+
+fn default_tail_scrollback() -> usize {
+    2000
 }
 
 // ---------------------------------------------------------------------------

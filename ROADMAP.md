@@ -8,27 +8,31 @@ Single self-contained binary, usable locally or over SSH.
 
 ## 📍 Current status — you are here
 
-**Phase 1 complete and committed.** The app connects to Redis and is fully usable
-for browsing. v1 = Phases 0–2; **Phase 2 (realtime + recording) is next.**
+**Phase 2 complete.** The app connects to Redis, browses, **tails live pub/sub &
+streams, and records them to disk** — plus headless `record`/`export`.
+v1 = Phases 0–2, so **v1 is feature-complete; Phase 3 (monitoring & polish) is next.**
 
 | | |
 |---|---|
 | Branch | `main` |
-| Commits | `a5c9e30` Phase 0 scaffold · `2d83f33` Phase 1 (Redis browse + UI) |
-| Tests | 18 pass (15 unit + 3 integration) |
-| Quality gate | `clippy -D warnings` clean · `rustfmt` clean |
-| Verified | End-to-end through a PTY harness (connect → browse → dashboard → quit) |
+| Commits | `a5c9e30` Phase 0 · `2d83f33` Phase 1 · Phase 2 (this commit) |
+| Tests | 42 pass (35 unit + 7 integration) |
+| Quality gate | `clippy --all-targets --all-features -D warnings` clean · `rustfmt` clean |
+| Verified | PTY harness: connect → subscribe → live tail → record → recordings; pub/sub + stream tails; headless `record`/`export` against live Redis |
 
 ### What works today
 - Connect to Redis (saved TOML profiles or `--connect`), auto-reconnect, liveness ping → disconnect detection.
 - **Browse**: non-blocking `SCAN` with `MATCH`/`COUNT` paging + pipelined `TYPE`/`TTL`; server-side filter (`/`); DB switching (`[`/`]`); load-more.
 - **Value viewers** for every type: string (JSON pretty-print, binary→base64, size-capped), list, set, hash, zset, stream — auto-loaded into a detail pane as you move the selection.
 - **Dashboard** from `INFO`: memory & hit-ratio gauges, version/uptime/clients/ops-sec, per-DB key counts (auto-refresh).
+- **Realtime tails** (`w`): pub/sub (`SUBSCRIBE`/`PSUBSCRIBE`) and stream (`XREAD BLOCK … $`) tails on dedicated sockets, each a tab with a capped scrollback ring buffer. Start with `s` (spec prompt: `pubsub:ch` · `psub:ch.*` · `stream:key`) or `t` on a stream key in the Browser. `Tab`/`[`/`]` switch tabs, `↑↓`/`G` scroll/follow, `x` stops a tail.
+- **Recording** (`r` on any tail): lossless append-only **JSONL** envelopes under the recordings dir, with live counters; the **Recordings** view (`R`) lists files.
+- **Headless CLI**: `record --connect <p> --source <spec> --out <dir>` (Ctrl-C to stop) and `export <file.jsonl> --csv` — reuse the broker + recording stack with no UI.
 - **Add-connection modal** (`a`): saves profiles to the config file; passwords stay as *specs* (`env:VAR`/`keyring`/`prompt`) or session-only — never written as plaintext.
-- Screen-based TUI (Connections / Browser / Dashboard) + help overlay (`?`), vim + arrow keys, panic-safe terminal restore, file-only logging.
+- Screen-based TUI (Connections / Browser / Dashboard / Realtime / Recordings) + help overlay (`?`), vim + arrow keys, panic-safe terminal restore, file-only logging.
 
-### Not done yet (Phase 2+)
-Realtime tailing (pub/sub, streams), recording to disk, keyspace-notification monitor, read-only command console, AMQP, write/destructive ops.
+### Not done yet (Phase 3+)
+Keyspace-notification monitor, `MONITOR` tab, read-only command console, command palette, config theming, mouse, AMQP, write/destructive ops.
 
 ---
 
@@ -133,28 +137,32 @@ python3 scripts/tui_smoke.py --cmd "./target/debug/brokertui --config /tmp/bt.to
 
 - **Phase 0 — Scaffold** ✅ (`a5c9e30`): event loop, logging, terminal lifecycle, tooling, CI.
 - **Phase 1 — Redis browse** ✅ (`2d83f33`): config/secrets, `BrokerConnection` trait, per-connection actor, SCAN browser, value viewers, INFO dashboard, full TUI.
-- **Phase 2 — Redis realtime + recording** ⏭ NEXT — completes v1. See below.
-- **Phase 3 — Monitoring & polish**: keyspace-notification monitor (needs `notify-keyspace-events`), `MONITOR` tab, read-only command console (whitelist + `COMMAND INFO` flag check), command palette, theming from config, mouse, snapshot UI tests, musl build.
+- **Phase 2 — Redis realtime + recording** ✅ — completes v1. See "delivered" below.
+- **Phase 3 — Monitoring & polish** ⏭ NEXT: keyspace-notification monitor (needs `notify-keyspace-events`), `MONITOR` tab, read-only command console (whitelist + `COMMAND INFO` flag check), command palette, theming from config, mouse, snapshot UI tests, musl build.
 - **Phase 4 — AMQP**: `AmqpConnection` behind the trait, browse exchanges/queues, **non-destructive tail** (temp exclusive queue bound to the exchange), record through the unchanged recorder. ⚠ See AMQP note below.
 - **Phase 5 — Mutations & scale-out**: write/destructive ops (publish, set, delete/purge) behind confirmations + a read-only lock; Redis cluster/sentinel; cargo-dist releases.
 
 ---
 
-## ⏭ Phase 2 — concrete next steps
+## ✅ Phase 2 — delivered
 
-Goal: watch live broker activity and record it to disk. Reuse the actor + AppEvent plumbing.
+Watch live broker activity and record it to disk, reusing the actor + AppEvent plumbing.
 
-1. **Shared event type** — add `BrokerEvent { ts, source, payload (Utf8|Binary|Json), meta }` to `broker/mod.rs`, and a `subscribe(spec) -> stream of BrokerEvent` method on `BrokerConnection`. The recorder and the UI both consume this same stream (so AMQP reuses it unchanged later).
-2. **Redis tails** (dedicated sockets — blocking ops can't share the `ConnectionManager`):
-   - Pub/Sub: `client.get_async_pubsub()` + `SUBSCRIBE`/`PSUBSCRIBE`.
-   - Streams: a loop of `XREAD BLOCK <ms> COUNT <n> STREAMS <key> $`, advancing the last id.
-   - Each spawns a task (tracked, cancellable per-tail) that maps replies → `BrokerEvent`.
-3. **Actor/commands** — `ConnCommand::Subscribe { spec }` / `StopSubscription`; new `AppEvent::Realtime { sub, event }`, `SubscriptionStatus`, `RecordingStatus`.
-4. **Recorder** (`recording/`): a `Recorder` + `RecordSink` writing append-only **JSONL** (`Record` envelope: ts, seq, connection, source type/name, encoding utf8|base64|json, payload, meta) under `~/.local/share/brokertui/recordings/`. `BufWriter`, flush on interval/size, optional size rotation, live counters. Lossless (awaited) channel — never drop while the UI view may.
-5. **UI** — `PubSubTail` / `StreamTail` tabs with capped scrollback ring buffers; a Recordings view; `r` toggles recording on any tail.
-6. **CLI** — `export <file.jsonl> --csv` and headless `record --connect <p> --source pubsub:foo --out <dir>` subcommands (`cli.rs`). These reuse the stack minus `ui/`.
-7. **Likely refactor** — promote `broker` + `recording` into a small `lib.rs` (lib+bin) so the `record`/`export` binaries and `tests/` integration tests can link the crate. (Phase 1 integration tests currently live as in-crate `#[cfg(all(test, feature="integration"))]` modules.)
-8. **Tests** — pub/sub round-trip, `XADD`→tail, recorder→valid JSONL; keep them self-seeding under unique key namespaces (deterministic + parallel-safe).
+1. **Shared event type** — `BrokerEvent { ts, source, payload (Utf8|Json|Binary), meta }` + `Payload`/`SubSpec` in `broker/mod.rs`; `subscribe(&mut self, spec) -> BrokerEventStream` on `BrokerConnection`. The recorder and UI consume the same stream, so AMQP reuses it unchanged later.
+2. **Redis tails** (`broker/redis/tail.rs`, dedicated sockets):
+   - Pub/Sub: `get_async_pubsub()` + `SUBSCRIBE`/`PSUBSCRIBE`; `into_on_message()` owns the backing task so the stream stays alive on its own.
+   - Streams: `futures::stream::unfold` over `XREAD BLOCK 5000 COUNT 100 STREAMS <key> $`, advancing `last_id`; pure `channel_event`/`stream_event` mappers are unit-tested.
+3. **Actor/commands** — `ConnCommand::Subscribe`/`SetRecording`/`StopSubscription`; the actor is now stateful (a `sub_id → tail` registry) and spawns one tracked, per-tail-cancellable task each. `AppEvent::Realtime`/`SubscriptionStarted`/`SubscriptionEnded`/`RecordingUpdate`. UI forward is lossy (`try_send`); the recorder write is lossless (awaited in the tail task). Recording toggles live via a per-tail `watch<bool>`.
+4. **Recorder** (`recording/`) — `Recorder<W: Write>` (generic for tests) + `RecordSink` (`BufWriter<File>`) writing append-only JSONL `Record` envelopes under the recordings dir; flush every 50 records and on a 2s interval; live counters; plus `export_csv`.
+5. **UI** — Realtime screen with per-source tabs + capped scrollback ring buffers (follow/scroll), a Recordings view, `r` toggles recording on any tail. Start tails with `s` (spec prompt) or `t` (stream key in Browser).
+6. **CLI** — `export <file.jsonl> --csv` and headless `record --connect <p> --source <spec> --out <dir>` (Ctrl-C to stop) in `cli.rs`/`main.rs`, reusing the stack minus `ui/`.
+7. **Tests** — pub/sub round-trip, pattern→meta, `XADD`→stream tail, tail→valid JSONL (integration); `Payload`/`SubSpec` parsing, recorder JSONL + CSV, ring-buffer (unit). Self-seeding under unique namespaces (deterministic + parallel-safe).
+
+**Decisions & gotchas (Phase 2):**
+- **`subscribe` takes `&mut self`, not `&self`** — a `&mut dyn BrokerConnection` is `Send` (the trait is `Send`); a shared `&dyn` would require `Sync`, which the actor design deliberately avoids. The returned stream owns a *fresh* socket, so it's still `'static`.
+- **⚠ `redis` response timeout vs `XREAD BLOCK`** — the async connection's `DEFAULT_RESPONSE_TIMEOUT` is **500ms**, which aborts any `XREAD BLOCK` that idles longer. Stream tails open with `AsyncConnectionConfig::set_response_timeout(None)`. (A fast-arriving test entry can hide this — the stream integration test deliberately delays its `XADD` past 500ms.)
+- **`lib.rs` refactor skipped** (it was only "likely") — `record`/`export` are subcommands of the one binary and integration tests stay in-crate (`#[cfg(all(test, feature="integration"))]`), as in Phase 1. Revisit if external crates need to link the stack.
+- **Stream payloads** are emitted as a JSON object of the entry's fields (order preserved); field values must be UTF-8 (same constraint as the inspect path). Pub/sub payloads are fully binary-safe (base64). New setting: `settings.tail_scrollback` (default 2000).
 
 ---
 

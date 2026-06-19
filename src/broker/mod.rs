@@ -10,8 +10,12 @@ pub mod actor;
 pub mod redis;
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
 
 use async_trait::async_trait;
+use base64::Engine as _;
+use futures_util::Stream;
+use time::OffsetDateTime;
 
 /// Stable identifier for an open connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -139,6 +143,155 @@ pub enum PayloadEncoding {
     Json,
 }
 
+impl PayloadEncoding {
+    /// Lowercase tag written to the recording envelope (`encoding` field).
+    pub fn tag(self) -> &'static str {
+        match self {
+            PayloadEncoding::Utf8 => "utf8",
+            PayloadEncoding::Base64 => "base64",
+            PayloadEncoding::Json => "json",
+        }
+    }
+}
+
+/// A realtime payload, kept binary-safe. The bytes are classified once on the
+/// way in so the UI and recorder agree on encoding without re-deciding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Payload {
+    /// Valid UTF-8 that is not JSON.
+    Utf8(String),
+    /// Valid UTF-8 that parses as JSON (stored as the original text).
+    Json(String),
+    /// Bytes that are not valid UTF-8.
+    Binary(Vec<u8>),
+}
+
+impl Payload {
+    /// Classify raw bytes the same way the value viewer does: UTF-8 that parses
+    /// as JSON is `Json`, other UTF-8 is `Utf8`, everything else is `Binary`.
+    pub fn classify(bytes: Vec<u8>) -> Self {
+        match String::from_utf8(bytes) {
+            Ok(text) => {
+                if serde_json::from_str::<serde_json::Value>(&text).is_ok() {
+                    Payload::Json(text)
+                } else {
+                    Payload::Utf8(text)
+                }
+            }
+            // `from_utf8` hands the bytes back on failure, so nothing is copied.
+            Err(e) => Payload::Binary(e.into_bytes()),
+        }
+    }
+
+    /// The encoding tag for this payload.
+    pub fn encoding(&self) -> PayloadEncoding {
+        match self {
+            Payload::Utf8(_) => PayloadEncoding::Utf8,
+            Payload::Json(_) => PayloadEncoding::Json,
+            Payload::Binary(_) => PayloadEncoding::Base64,
+        }
+    }
+
+    /// The payload as a single display/record string (binary → base64).
+    pub fn as_text(&self) -> String {
+        match self {
+            Payload::Utf8(s) | Payload::Json(s) => s.clone(),
+            Payload::Binary(b) => base64::engine::general_purpose::STANDARD.encode(b),
+        }
+    }
+}
+
+/// What to subscribe/tail. Built from a `kind:target` spec string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubSpec {
+    /// A pub/sub channel (`SUBSCRIBE`).
+    Channel(String),
+    /// A pub/sub channel pattern (`PSUBSCRIBE`).
+    Pattern(String),
+    /// A stream key, tailed from `$` (new entries only) within `db`.
+    Stream { key: String, db: u32 },
+}
+
+impl SubSpec {
+    /// Parse a `kind:target` spec — `pubsub:ch`, `psub:ch.*`, `stream:key` —
+    /// using `default_db` for stream targets (which are database-scoped).
+    pub fn parse(spec: &str, default_db: u32) -> anyhow::Result<Self> {
+        let spec = spec.trim();
+        let (kind, target) = spec
+            .split_once(':')
+            .ok_or_else(|| anyhow::anyhow!("expected `kind:target`, e.g. `pubsub:news`"))?;
+        let target = target.trim();
+        if target.is_empty() {
+            anyhow::bail!("missing target after `{kind}:`");
+        }
+        match kind.trim() {
+            "pubsub" | "sub" | "channel" => Ok(SubSpec::Channel(target.to_string())),
+            "psub" | "psubscribe" | "pattern" => Ok(SubSpec::Pattern(target.to_string())),
+            "stream" | "xread" => Ok(SubSpec::Stream {
+                key: target.to_string(),
+                db: default_db,
+            }),
+            other => anyhow::bail!("unknown source kind `{other}` (use pubsub/psub/stream)"),
+        }
+    }
+
+    /// Short source-type tag for the recording envelope.
+    pub fn source_type(&self) -> &'static str {
+        match self {
+            SubSpec::Channel(_) => "pubsub",
+            SubSpec::Pattern(_) => "psubscribe",
+            SubSpec::Stream { .. } => "stream",
+        }
+    }
+
+    /// The target name (channel, pattern, or stream key).
+    pub fn target(&self) -> &str {
+        match self {
+            SubSpec::Channel(s) | SubSpec::Pattern(s) => s,
+            SubSpec::Stream { key, .. } => key,
+        }
+    }
+
+    /// A stable `kind:target` label for tabs, filenames, and round-tripping.
+    pub fn label(&self) -> String {
+        let kind = match self {
+            SubSpec::Channel(_) => "pubsub",
+            SubSpec::Pattern(_) => "psub",
+            SubSpec::Stream { .. } => "stream",
+        };
+        format!("{kind}:{}", self.target())
+    }
+}
+
+/// One realtime event from a subscription/tail. The recorder and the UI consume
+/// the same events, so AMQP can reuse this stream unchanged later.
+#[derive(Debug, Clone)]
+pub struct BrokerEvent {
+    /// When the event was observed (UTC).
+    pub ts: OffsetDateTime,
+    /// Where it came from: channel, or stream key.
+    pub source: String,
+    /// The message body.
+    pub payload: Payload,
+    /// Extra context: stream entry `id`, matched `pattern`, etc.
+    pub meta: Vec<(String, String)>,
+}
+
+impl BrokerEvent {
+    /// Look up a metadata value by key.
+    pub fn meta(&self, key: &str) -> Option<&str> {
+        self.meta
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// A `'static`, `Send` stream of [`BrokerEvent`]s — what [`BrokerConnection::subscribe`]
+/// hands back. It owns its own dedicated socket so the actor's main connection
+/// stays free for browse/inspect work.
+pub type BrokerEventStream = Pin<Box<dyn Stream<Item = BrokerEvent> + Send>>;
+
 /// A single stream entry (id + field/value pairs).
 #[derive(Debug, Clone)]
 pub struct StreamEntry {
@@ -229,4 +382,84 @@ pub trait BrokerConnection: Send {
 
     /// Fetch server statistics for the dashboard.
     async fn stats(&mut self) -> anyhow::Result<ServerStats>;
+
+    /// Open a live tail for `spec` on a *dedicated* socket and return its event
+    /// stream. The returned stream owns that socket, so it is `'static` and the
+    /// actor's main connection is untouched. Takes `&mut self` (not `&self`) so
+    /// the actor can hold it across the await without requiring `Sync`.
+    async fn subscribe(&mut self, spec: SubSpec) -> anyhow::Result<BrokerEventStream>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_payloads() {
+        assert_eq!(
+            Payload::classify(b"hello".to_vec()),
+            Payload::Utf8("hello".into())
+        );
+        assert_eq!(
+            Payload::classify(br#"{"a":1}"#.to_vec()),
+            Payload::Json(r#"{"a":1}"#.into())
+        );
+        match Payload::classify(vec![0x00, 0xff, 0xfe]) {
+            Payload::Binary(b) => assert_eq!(b, vec![0x00, 0xff, 0xfe]),
+            other => panic!("expected binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn payload_encoding_and_text() {
+        assert_eq!(Payload::Utf8("x".into()).encoding(), PayloadEncoding::Utf8);
+        assert_eq!(Payload::Json("{}".into()).encoding(), PayloadEncoding::Json);
+        let bin = Payload::Binary(vec![0x00, 0x01, 0xff, 0xfe]);
+        assert_eq!(bin.encoding(), PayloadEncoding::Base64);
+        assert_eq!(bin.as_text(), "AAH//g==");
+        assert_eq!(PayloadEncoding::Base64.tag(), "base64");
+    }
+
+    #[test]
+    fn parses_sub_specs() {
+        assert_eq!(
+            SubSpec::parse("pubsub:news", 0).unwrap(),
+            SubSpec::Channel("news".into())
+        );
+        assert_eq!(
+            SubSpec::parse("psub:news.*", 0).unwrap(),
+            SubSpec::Pattern("news.*".into())
+        );
+        assert_eq!(
+            SubSpec::parse("stream:orders", 3).unwrap(),
+            SubSpec::Stream {
+                key: "orders".into(),
+                db: 3
+            }
+        );
+        // Whitespace tolerated.
+        assert_eq!(
+            SubSpec::parse("  pubsub : a ", 0).unwrap(),
+            SubSpec::Channel("a".into())
+        );
+    }
+
+    #[test]
+    fn rejects_bad_specs() {
+        assert!(SubSpec::parse("news", 0).is_err()); // no kind
+        assert!(SubSpec::parse("pubsub:", 0).is_err()); // empty target
+        assert!(SubSpec::parse("bogus:x", 0).is_err()); // unknown kind
+    }
+
+    #[test]
+    fn sub_spec_label_and_source_type() {
+        let s = SubSpec::Stream {
+            key: "k".into(),
+            db: 1,
+        };
+        assert_eq!(s.label(), "stream:k");
+        assert_eq!(s.source_type(), "stream");
+        assert_eq!(SubSpec::Pattern("p*".into()).label(), "psub:p*");
+        assert_eq!(SubSpec::Channel("c".into()).source_type(), "pubsub");
+    }
 }

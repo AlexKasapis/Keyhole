@@ -42,7 +42,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"    # file-only logging (TUI owns the terminal)
 clap = { version = "4", features = ["derive"] }
-time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"] }
+# `serde-well-known` provides the RFC 3339 (de)serializers for recording timestamps.
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "macros"] }
 base64 = "0.22"
 bytes = "1"
 percent-encoding = "2.3.2"

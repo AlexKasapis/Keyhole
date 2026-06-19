@@ -3,12 +3,13 @@
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
 use ratatui::Frame;
+use time::OffsetDateTime;
 
 use super::theme::Theme;
-use crate::app::{App, ConnForm};
-use crate::broker::{Ttl, ValueView};
+use crate::app::{App, ConnForm, RecordState, SubState};
+use crate::broker::{BrokerEvent, Payload, Ttl, ValueView};
 
 /// Connections screen: the list of saved profiles.
 pub fn connections(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -250,6 +251,176 @@ pub fn dashboard(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), metrics);
 }
 
+/// Realtime screen: live tail tabs + the focused tail's scrollback ring buffer.
+pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let Some(conn) = app.active_conn() else {
+        frame.render_widget(
+            Paragraph::new("No active connection. Connect first, then press 's' to subscribe.")
+                .style(theme.dim)
+                .block(Block::bordered().border_style(theme.border)),
+            area,
+        );
+        return;
+    };
+    if conn.subs.is_empty() {
+        let body = Paragraph::new(vec![
+            Line::from(""),
+            Line::styled("No live tails.", theme.dim),
+            Line::from(""),
+            Line::from("Press 's' to subscribe (pubsub:ch · psub:ch.* · stream:key),"),
+            Line::from("or 't' on a stream key in the Browser."),
+        ])
+        .alignment(Alignment::Center)
+        .block(
+            Block::bordered()
+                .title(" Realtime ")
+                .title_style(theme.heading)
+                .border_style(theme.border),
+        );
+        frame.render_widget(body, area);
+        return;
+    }
+
+    let [tabs_area, status_area, body_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+
+    let titles: Vec<Line> = conn
+        .subs
+        .iter()
+        .map(|s| {
+            let mut spans = vec![Span::raw(s.label.clone())];
+            if s.recording.is_on() {
+                spans.push(Span::styled(" ●", theme.error));
+            }
+            match &s.state {
+                SubState::Connecting => spans.push(Span::styled(" …", theme.dim)),
+                SubState::Ended(_) => spans.push(Span::styled(" ✗", theme.dim)),
+                SubState::Active => {}
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let tabs = Tabs::new(titles)
+        .select(conn.active_sub.unwrap_or(0))
+        .style(theme.dim)
+        .highlight_style(theme.selected)
+        .divider("│");
+    frame.render_widget(tabs, tabs_area);
+
+    let Some(sub) = conn.active_subscription() else {
+        return;
+    };
+
+    let state_span = match &sub.state {
+        SubState::Connecting => Span::styled("connecting…", theme.dim),
+        SubState::Active => Span::styled("live", theme.success),
+        SubState::Ended(reason) => Span::styled(
+            format!(
+                "ended{}",
+                reason
+                    .as_ref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            ),
+            theme.error,
+        ),
+    };
+    let mut status = vec![
+        Span::raw(" "),
+        state_span,
+        Span::styled(format!("  {} events", sub.received), theme.dim),
+    ];
+    if sub.received as usize > sub.events.len() {
+        status.push(Span::styled(
+            format!(" (last {})", sub.events.len()),
+            theme.dim,
+        ));
+    }
+    if let RecordState::On { records, bytes, .. } = &sub.recording {
+        status.push(Span::styled(
+            format!("  ● REC {records} ({})", human_bytes(*bytes)),
+            theme.error,
+        ));
+    }
+    if !sub.follow {
+        status.push(Span::styled("  ⏸ paused (G to follow)", theme.accent));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(status)).style(theme.status_bar),
+        status_area,
+    );
+
+    let block = Block::bordered()
+        .title(format!(" {} ", sub.label))
+        .title_style(theme.heading)
+        .border_style(theme.border);
+    let inner = block.inner(body_area);
+    frame.render_widget(block, body_area);
+
+    let height = inner.height as usize;
+    let len = sub.events.len();
+    if len == 0 || height == 0 {
+        frame.render_widget(
+            Paragraph::new(Line::styled("  waiting for events…", theme.dim)),
+            inner,
+        );
+        return;
+    }
+    // Window the ring buffer: `offset` events back from the newest, `height` tall.
+    let bottom = len - 1 - sub.offset.min(len - 1);
+    let top = (bottom + 1).saturating_sub(height);
+    let lines: Vec<Line> = (top..=bottom)
+        .filter_map(|i| sub.events.get(i))
+        .map(|ev| event_line(ev, theme))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Recordings screen: JSONL files in the recordings directory.
+pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let block = Block::bordered()
+        .title(" Recordings ")
+        .title_style(theme.heading)
+        .border_style(theme.border);
+    if app.recordings.is_empty() {
+        let body = Paragraph::new(vec![
+            Line::from(""),
+            Line::styled("No recordings found.", theme.dim),
+            Line::from(""),
+            Line::from("Start a tail with 's', then 'r' to record — files land in the"),
+            Line::from("recordings directory. Press 'r' here to rescan."),
+        ])
+        .alignment(Alignment::Center)
+        .block(block);
+        frame.render_widget(body, area);
+        return;
+    }
+    let items: Vec<ListItem> = app
+        .recordings
+        .iter()
+        .map(|f| {
+            let when = f
+                .modified
+                .map(fmt_datetime)
+                .unwrap_or_else(|| "?".to_string());
+            ListItem::new(Line::from(vec![
+                Span::raw(format!("{:<46}", truncate(&f.name, 46))),
+                Span::styled(format!("{:>10}  ", human_bytes(f.size)), theme.dim),
+                Span::styled(when, theme.dim),
+            ]))
+        })
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme.selected)
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, area, &mut app.recordings_state);
+}
+
 /// The add-connection modal overlay.
 pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let Some(form) = app.form.as_ref() else {
@@ -301,7 +472,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 /// The help overlay.
 pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let rect = centered(area, 62, 20);
+    let rect = centered(area, 64, 26);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(" Help ")
@@ -313,10 +484,16 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Enter      connect (on Connections)"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
-        Line::from("  c connections    b browser    d dashboard"),
+        Line::from("  c connections   b browser   d dashboard   w realtime   R recordings"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
         Line::from("  / filter    [ ] change DB    n load more    r refresh"),
+        Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
+        Line::from(""),
+        Line::styled("Realtime", theme.heading),
+        Line::from("  s subscribe   Tab/[ ] switch tab   x stop tail"),
+        Line::from("  ↑↓ scroll history   G follow newest   r toggle recording"),
+        Line::from("  spec: pubsub:ch · psub:ch.* · stream:key"),
         Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  a add connection    ? toggle help    q / Ctrl-c quit"),
@@ -421,6 +598,60 @@ fn render_value(theme: &Theme, view: Option<&ValueView>) -> Vec<Line<'static>> {
             lines
         }
     }
+}
+
+/// Render one realtime event as a single log line: `time  source  [id] payload`.
+fn event_line(ev: &BrokerEvent, theme: &Theme) -> Line<'static> {
+    let ts = format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        ev.ts.hour(),
+        ev.ts.minute(),
+        ev.ts.second(),
+        ev.ts.millisecond()
+    );
+    let mut spans = vec![
+        Span::styled(ts, theme.dim),
+        Span::raw("  "),
+        Span::styled(format!("{:<18}", truncate(&ev.source, 18)), theme.accent),
+        Span::raw(" "),
+    ];
+    if let Some(id) = ev.meta("id") {
+        spans.push(Span::styled(format!("{id} "), theme.dim));
+    }
+    spans.push(Span::raw(payload_preview(&ev.payload, 400)));
+    Line::from(spans)
+}
+
+/// A single-line, length-capped preview of a payload (whitespace collapsed).
+fn payload_preview(payload: &Payload, max: usize) -> String {
+    let raw = match payload {
+        Payload::Utf8(s) | Payload::Json(s) => s.clone(),
+        Payload::Binary(_) => format!("base64:{}", payload.as_text()),
+    };
+    let flat = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate(&flat, max)
+}
+
+/// Truncate to `max` characters, appending an ellipsis when shortened.
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() > max {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Format a timestamp as `YYYY-MM-DD HH:MM` for the recordings list.
+fn fmt_datetime(t: OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute()
+    )
 }
 
 fn opt_num(v: Option<u64>) -> String {

@@ -20,10 +20,22 @@ pub enum Action {
     GotoConnections,
     GotoBrowser,
     GotoDashboard,
+    GotoRealtime,
+    GotoRecordings,
     StartFilter,
+    /// Open the subscribe prompt.
+    Subscribe,
+    /// Tail the selected key (Browser) as a stream.
+    TailKey,
+    /// Focus the previous / next tail tab (Realtime).
+    PrevTab,
+    NextTab,
+    /// Stop the focused tail (Realtime).
+    StopTail,
     DbPrev,
     DbNext,
     LoadMore,
+    /// Context refresh: browse/stats, toggle recording (Realtime), rescan (Recordings).
     Refresh,
     ToggleHelp,
     Dismiss,
@@ -47,6 +59,13 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('c')) => Some(Action::GotoConnections),
         (false, Char('b')) => Some(Action::GotoBrowser),
         (false, Char('d')) => Some(Action::GotoDashboard),
+        (false, Char('w')) => Some(Action::GotoRealtime),
+        (false, Char('R')) => Some(Action::GotoRecordings),
+        (false, Char('s')) => Some(Action::Subscribe),
+        (false, Char('t')) => Some(Action::TailKey),
+        (false, Char('x')) => Some(Action::StopTail),
+        (false, Tab) => Some(Action::NextTab),
+        (false, BackTab) => Some(Action::PrevTab),
         (false, Char('/')) => Some(Action::StartFilter),
         (false, Char('[')) => Some(Action::DbPrev),
         (false, Char(']')) => Some(Action::DbNext),

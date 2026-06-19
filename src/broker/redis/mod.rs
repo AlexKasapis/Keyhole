@@ -7,6 +7,7 @@
 //! their own dedicated sockets in Phase 2.
 
 mod info;
+mod tail;
 mod value;
 
 use async_trait::async_trait;
@@ -14,8 +15,8 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use redis::aio::ConnectionManager;
 
 use super::{
-    BrokerConnection, BrowsePage, BrowseReq, Capabilities, EntryMeta, InspectReq, StreamEntry, Ttl,
-    ValueType, ValueView,
+    BrokerConnection, BrokerEventStream, BrowsePage, BrowseReq, Capabilities, EntryMeta,
+    InspectReq, StreamEntry, SubSpec, Ttl, ValueType, ValueView,
 };
 use crate::config::RedisProfile;
 
@@ -303,6 +304,19 @@ impl BrokerConnection for RedisConnection {
         let text: String = redis::cmd("INFO").query_async(&mut conn).await?;
         Ok(info::parse_info(&text))
     }
+
+    async fn subscribe(&mut self, spec: SubSpec) -> anyhow::Result<BrokerEventStream> {
+        if self.profile.tls {
+            anyhow::bail!("TLS connections require building brokertui with --features tls");
+        }
+        // A fresh client/socket per tail — blocking ops must not share the
+        // actor's multiplexed manager.
+        let client = redis::Client::open(self.connection_url())?;
+        match spec {
+            SubSpec::Channel(_) | SubSpec::Pattern(_) => tail::open_pubsub(client, spec).await,
+            SubSpec::Stream { key, db } => tail::open_stream(client, key, db).await,
+        }
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -313,8 +327,22 @@ mod integration_tests {
     //! own uniquely-namespaced keys, so the suite is deterministic and
     //! parallel-safe (no reliance on external seeding or TTLs).
     use super::*;
+    use crate::broker::Payload;
     use crate::config::RedisProfile;
+    use crate::recording::{RecordSink, Recorder};
+    use futures_util::StreamExt;
     use redis::aio::MultiplexedConnection;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+    use time::OffsetDateTime;
+    use tokio::time::timeout;
+
+    /// A unique, namespaced key/channel so concurrent tests never collide.
+    fn unique(prefix: &str) -> String {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        format!("{prefix}:{}:{}", std::process::id(), n)
+    }
 
     fn test_port() -> u16 {
         std::env::var("BROKERTUI_TEST_REDIS_PORT")
@@ -533,5 +561,154 @@ mod integration_tests {
         assert!(stats.redis_version.is_some());
         assert!(stats.uptime_seconds.is_some());
         assert!(!stats.db_keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pubsub_tail_receives_published_message() {
+        let channel = unique("it:ps");
+        // `subscribe` awaits SUBSCRIBE confirmation before returning, so a publish
+        // issued afterwards is guaranteed to be delivered to the tail.
+        let mut conn = connected().await;
+        let mut stream = conn
+            .subscribe(SubSpec::Channel(channel.clone()))
+            .await
+            .expect("subscribe");
+
+        let mut pubconn = raw().await;
+        let _: redis::Value = redis::cmd("PUBLISH")
+            .arg(&channel)
+            .arg("hello-pubsub")
+            .query_async(&mut pubconn)
+            .await
+            .unwrap();
+
+        let ev = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("tail timed out")
+            .expect("stream ended");
+        assert_eq!(ev.source, channel);
+        assert_eq!(ev.payload, Payload::Utf8("hello-pubsub".into()));
+    }
+
+    #[tokio::test]
+    async fn pattern_tail_records_matched_pattern() {
+        let base = unique("it.pat"); // dots so a glob pattern matches
+        let pattern = format!("{base}.*");
+        let channel = format!("{base}.sports");
+
+        let mut conn = connected().await;
+        let mut stream = conn
+            .subscribe(SubSpec::Pattern(pattern.clone()))
+            .await
+            .expect("psubscribe");
+
+        let mut pubconn = raw().await;
+        let _: redis::Value = redis::cmd("PUBLISH")
+            .arg(&channel)
+            .arg("p")
+            .query_async(&mut pubconn)
+            .await
+            .unwrap();
+
+        let ev = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("tail timed out")
+            .expect("stream ended");
+        assert_eq!(ev.source, channel);
+        assert_eq!(ev.meta("pattern"), Some(pattern.as_str()));
+    }
+
+    #[tokio::test]
+    async fn stream_tail_receives_new_entries() {
+        let key = unique("it:stream");
+        // Seed one entry so `$` resolves to a concrete id; the tail must NOT see it.
+        let mut seed = raw().await;
+        let _: String = redis::cmd("XADD")
+            .arg(&key)
+            .arg("*")
+            .arg("seed")
+            .arg("0")
+            .query_async(&mut seed)
+            .await
+            .unwrap();
+
+        let mut conn = connected().await;
+        let mut stream = conn
+            .subscribe(SubSpec::Stream {
+                key: key.clone(),
+                db: 0,
+            })
+            .await
+            .expect("stream subscribe");
+
+        // XADD after the first XREAD (`$`) is in flight; the tail blocks for it.
+        // The delay deliberately exceeds the client's 500ms default response
+        // timeout, so this also guards against that timeout aborting the block.
+        let key2 = key.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            let mut raw = raw().await;
+            let _: String = redis::cmd("XADD")
+                .arg(&key2)
+                .arg("*")
+                .arg("field")
+                .arg("value1")
+                .query_async(&mut raw)
+                .await
+                .unwrap();
+        });
+
+        let ev = timeout(Duration::from_secs(6), stream.next())
+            .await
+            .expect("tail timed out")
+            .expect("stream ended");
+        assert_eq!(ev.source, key);
+        assert!(ev.meta("id").is_some(), "stream entry id present");
+        // Only the post-subscribe entry, never the seed.
+        assert_eq!(ev.payload, Payload::Json(r#"{"field":"value1"}"#.into()));
+    }
+
+    #[tokio::test]
+    async fn records_tail_to_valid_jsonl() {
+        let channel = unique("it:rec");
+        let dir = std::env::temp_dir().join(unique("brokertui-it-rec").replace(':', "-"));
+
+        let mut conn = connected().await;
+        let spec = SubSpec::Channel(channel.clone());
+        let mut stream = conn.subscribe(spec.clone()).await.expect("subscribe");
+
+        let sink = RecordSink::create(&dir, "test", &spec, OffsetDateTime::now_utc())
+            .expect("create sink");
+        let path = sink.path().to_path_buf();
+        let mut recorder = Recorder::new(sink, "test", &spec);
+
+        let mut pubconn = raw().await;
+        for i in 0..3 {
+            let _: redis::Value = redis::cmd("PUBLISH")
+                .arg(&channel)
+                .arg(format!("msg-{i}"))
+                .query_async(&mut pubconn)
+                .await
+                .unwrap();
+        }
+        for _ in 0..3 {
+            let ev = timeout(Duration::from_secs(5), stream.next())
+                .await
+                .expect("tail timed out")
+                .expect("stream ended");
+            recorder.record(&ev).unwrap();
+        }
+        recorder.flush().unwrap();
+        assert_eq!(recorder.records(), 3);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 3);
+        let r0: crate::recording::Record = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(r0.source, channel);
+        assert_eq!(r0.source_type, "pubsub");
+        assert_eq!(r0.payload, "msg-0");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

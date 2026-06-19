@@ -28,6 +28,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Screen::Connections => views::connections(frame, app, &theme, body_area),
         Screen::Browser => views::browser(frame, app, &theme, body_area),
         Screen::Dashboard => views::dashboard(frame, app, &theme, body_area),
+        Screen::Realtime => views::realtime(frame, app, &theme, body_area),
+        Screen::Recordings => views::recordings(frame, app, &theme, body_area),
     }
     render_footer(frame, app, &theme, footer_area);
 
@@ -52,6 +54,8 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Screen::Connections => "connections",
         Screen::Browser => "browser",
         Screen::Dashboard => "dashboard",
+        Screen::Realtime => "realtime",
+        Screen::Recordings => "recordings",
     };
     let line = Line::from(vec![
         Span::styled(" BrokerTUI ", theme.title),
@@ -88,6 +92,17 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 area,
             );
         }
+        InputMode::Subscribe => {
+            let line = Line::from(vec![
+                Span::styled(" subscribe ", theme.accent),
+                Span::raw(format!("{}▏", app.subscribe_buf)),
+                Span::styled(
+                    "   pubsub:ch · psub:ch.* · stream:key   Enter start · Esc cancel",
+                    theme.dim,
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
         InputMode::Normal => {
             let [hints_area, status_area] =
                 Layout::horizontal([Constraint::Min(0), Constraint::Length(44)]).areas(area);
@@ -120,8 +135,16 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 fn hints(screen: Screen) -> &'static str {
     match screen {
         Screen::Connections => "  ↑↓ move · Enter connect · a add · ? help · q quit",
-        Screen::Browser => "  ↑↓ keys · / filter · [ ] db · d dash · c conns · ? help · q quit",
-        Screen::Dashboard => "  b browser · c conns · r refresh · ? help · q quit",
+        Screen::Browser => {
+            "  ↑↓ keys · / filter · [ ] db · t tail · s sub · w watch · d dash · ? help · q quit"
+        }
+        Screen::Dashboard => "  b browser · w watch · c conns · r refresh · ? help · q quit",
+        Screen::Realtime => {
+            "  ↑↓ scroll · Tab tab · s sub · r rec · x stop · G follow · b browser · ? help"
+        }
+        Screen::Recordings => {
+            "  ↑↓ move · r rescan · w watch · b browser · c conns · ? help · q quit"
+        }
     }
 }
 
