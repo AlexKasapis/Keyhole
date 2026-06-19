@@ -233,3 +233,37 @@ async fn resolve_password(profile: &RedisProfile) -> anyhow::Result<Option<Strin
     let account = profile.name.clone();
     tokio::task::spawn_blocking(move || config::resolve_secret(&spec, &account)).await?
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn redis(name: &str) -> ConnectionConfig {
+        ConnectionConfig::Redis(RedisProfile {
+            name: name.into(),
+            host: "127.0.0.1".into(),
+            port: 6379,
+            db: 0,
+            username: None,
+            password: None,
+            tls: false,
+        })
+    }
+
+    #[test]
+    fn find_profile_matches_by_name() {
+        let config = Config {
+            connections: vec![redis("a"), redis("b")],
+            ..Default::default()
+        };
+        assert_eq!(
+            find_profile(&config, "b").map(|p| p.name).as_deref(),
+            Some("b")
+        );
+        assert!(find_profile(&config, "missing").is_none());
+        assert!(
+            find_profile(&Config::default(), "a").is_none(),
+            "empty config finds nothing"
+        );
+    }
+}

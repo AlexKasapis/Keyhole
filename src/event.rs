@@ -105,3 +105,30 @@ pub fn spawn_tick(
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{spawn_tick, AppEvent};
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
+
+    #[tokio::test]
+    async fn tick_task_emits_then_stops_on_cancel() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let cancel = CancellationToken::new();
+        let tracker = TaskTracker::new();
+        spawn_tick(tx, cancel.clone(), &tracker, Duration::from_millis(20));
+
+        // The first interval tick fires immediately, so a Tick arrives promptly.
+        let first = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
+        assert!(matches!(first, Ok(Some(AppEvent::Tick))), "expected a Tick");
+
+        // Cancellation stops the task; the tracker then drains cleanly.
+        cancel.cancel();
+        tracker.close();
+        tokio::time::timeout(Duration::from_secs(1), tracker.wait())
+            .await
+            .expect("tick task stops on cancel");
+    }
+}

@@ -1091,3 +1091,1034 @@ fn move_selection(current: Option<usize>, len: usize, delta: i32) -> Option<usiz
     let cur = current.unwrap_or(0) as i32;
     Some((cur + delta).clamp(0, len as i32 - 1) as usize)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::broker::actor::mock;
+    use crate::broker::{EntryMeta, Payload, Ttl};
+    use crossterm::event::{KeyEventState, KeyModifiers};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::mpsc::{self, Receiver};
+
+    // -- harness -------------------------------------------------------------
+
+    fn build_app(
+        config: Config,
+        config_path: PathBuf,
+        connect: Option<String>,
+    ) -> (App, Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel::<AppEvent>(64);
+        let app = App::new(
+            config,
+            config_path,
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            connect,
+        );
+        (app, rx)
+    }
+
+    fn test_app() -> (App, Receiver<AppEvent>) {
+        build_app(
+            Config::default(),
+            PathBuf::from("/nonexistent/brokertui/config.toml"),
+            None,
+        )
+    }
+
+    fn profile(name: &str) -> RedisProfile {
+        RedisProfile {
+            name: name.into(),
+            host: "127.0.0.1".into(),
+            port: 6399,
+            db: 0,
+            username: None,
+            password: None,
+            tls: false,
+        }
+    }
+
+    fn config_with(names: &[&str]) -> Config {
+        Config {
+            connections: names
+                .iter()
+                .map(|n| ConnectionConfig::Redis(profile(n)))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn unique_config_path() -> PathBuf {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("brokertui-app-{}-{n}.toml", std::process::id()))
+    }
+
+    /// Attach a live mock-backed connection and return its id.
+    async fn connect(app: &mut App, id: u32, name: &str, databases: u32) -> ConnId {
+        let handle = mock::handle(id, name, databases).await;
+        app.handle_event(AppEvent::Connected { handle });
+        ConnId(id)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ch(c: char) -> KeyEvent {
+        key(KeyCode::Char(c))
+    }
+
+    fn broker_event(body: &str) -> BrokerEvent {
+        BrokerEvent {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            source: "c".into(),
+            payload: Payload::Utf8(body.into()),
+            meta: Vec::new(),
+        }
+    }
+
+    fn stream_entry(name: &str, vtype: ValueType) -> EntryMeta {
+        EntryMeta {
+            key: name.into(),
+            vtype,
+            ttl: Ttl::NoExpire,
+        }
+    }
+
+    // -- construction --------------------------------------------------------
+
+    #[test]
+    fn new_selects_first_profile_when_present() {
+        let (app, _rx) = build_app(config_with(&["a", "b"]), unique_config_path(), None);
+        assert_eq!(app.profiles.len(), 2);
+        assert_eq!(app.profile_state.selected(), Some(0));
+        assert_eq!(app.screen, Screen::Connections);
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.running);
+    }
+
+    #[test]
+    fn new_selects_nothing_without_profiles() {
+        let (app, _rx) = test_app();
+        assert!(app.profiles.is_empty());
+        assert_eq!(app.profile_state.selected(), None);
+    }
+
+    // -- on_start ------------------------------------------------------------
+
+    #[test]
+    fn on_start_unknown_profile_sets_error() {
+        let (mut app, _rx) = build_app(
+            config_with(&["known"]),
+            unique_config_path(),
+            Some("missing".into()),
+        );
+        app.on_start();
+        let status = app.status.as_ref().expect("status set");
+        assert!(status.is_error);
+        assert!(status.message.contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn on_start_known_profile_starts_connecting() {
+        let (mut app, _rx) = build_app(
+            config_with(&["known"]),
+            unique_config_path(),
+            Some("known".into()),
+        );
+        app.on_start();
+        let status = app.status.as_ref().expect("status set");
+        assert!(!status.is_error);
+        assert!(status.message.contains("Connecting to known"));
+        assert_eq!(
+            app.next_id, 2,
+            "an id was allocated for the connect attempt"
+        );
+    }
+
+    // -- connection lifecycle ------------------------------------------------
+
+    #[tokio::test]
+    async fn on_connected_activates_and_opens_browser() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        assert_eq!(app.connections.len(), 1);
+        assert_eq!(app.active, Some(0));
+        assert_eq!(app.screen, Screen::Browser);
+        assert!(app.is_connected("prod"));
+        assert!(!app.is_connected("other"));
+        let status = app.status.as_ref().unwrap();
+        assert!(!status.is_error);
+        assert!(status.message.contains("Connected to prod"));
+        assert_eq!(app.active_conn().unwrap().label(), "prod (db0)");
+    }
+
+    #[tokio::test]
+    async fn on_disconnected_removes_and_resets_to_connections() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.handle_event(AppEvent::Disconnected {
+            id,
+            reason: "bye".into(),
+        });
+        assert!(app.connections.is_empty());
+        assert_eq!(app.active, None);
+        assert_eq!(app.screen, Screen::Connections);
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("disconnected: bye"));
+    }
+
+    #[tokio::test]
+    async fn on_disconnected_unknown_id_is_noop() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.handle_event(AppEvent::Disconnected {
+            id: ConnId(999),
+            reason: "x".into(),
+        });
+        assert_eq!(app.connections.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn on_disconnected_keeps_others_when_multiple() {
+        let (mut app, _rx) = test_app();
+        let first = connect(&mut app, 1, "a", 16).await;
+        connect(&mut app, 2, "b", 16).await;
+        app.handle_event(AppEvent::Disconnected {
+            id: first,
+            reason: "x".into(),
+        });
+        assert_eq!(app.connections.len(), 1);
+        assert_eq!(app.connections[0].name, "b");
+        assert_eq!(app.active, Some(0));
+        assert_ne!(app.screen, Screen::Connections);
+    }
+
+    #[tokio::test]
+    async fn connect_selected_focuses_existing_connection() {
+        let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Connections;
+        app.profile_state.select(Some(0));
+        app.apply(Action::Enter);
+        assert_eq!(app.connections.len(), 1, "no duplicate connection opened");
+        assert_eq!(app.active, Some(0));
+        assert_eq!(app.screen, Screen::Browser);
+    }
+
+    // -- browse / value / stats ----------------------------------------------
+
+    #[tokio::test]
+    async fn keys_page_extends_and_tracks_cursor() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0,
+                entries: vec![stream_entry("k1", ValueType::String)],
+                next_cursor: 5,
+            },
+        });
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.keys.len(), 1);
+        assert_eq!(conn.next_cursor, 5);
+        assert!(!conn.complete);
+
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0,
+                entries: vec![stream_entry("k2", ValueType::List)],
+                next_cursor: 0,
+            },
+        });
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.keys.len(), 2, "second page appended");
+        assert!(conn.complete, "cursor 0 marks the scan complete");
+    }
+
+    #[tokio::test]
+    async fn keys_page_from_stale_db_is_ignored() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].db = 1;
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0, // stale: connection has since switched to db1
+                entries: vec![stream_entry("k", ValueType::String)],
+                next_cursor: 0,
+            },
+        });
+        assert!(app.active_conn().unwrap().keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn value_loaded_only_applies_to_current_key() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].value_key = Some("k".into());
+
+        app.handle_event(AppEvent::ValueLoaded {
+            id,
+            key: "other".into(),
+            value: ValueView::Missing,
+        });
+        assert!(
+            app.active_conn().unwrap().value.is_none(),
+            "mismatch ignored"
+        );
+
+        app.handle_event(AppEvent::ValueLoaded {
+            id,
+            key: "k".into(),
+            value: ValueView::Missing,
+        });
+        assert!(app.active_conn().unwrap().value.is_some(), "match applied");
+    }
+
+    #[tokio::test]
+    async fn stats_updated_sets_stats() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.handle_event(AppEvent::StatsUpdated {
+            id,
+            stats: ServerStats {
+                redis_version: Some("7.4".into()),
+                ..Default::default()
+            },
+        });
+        assert_eq!(
+            app.active_conn()
+                .unwrap()
+                .stats
+                .as_ref()
+                .unwrap()
+                .redis_version
+                .as_deref(),
+            Some("7.4")
+        );
+    }
+
+    #[test]
+    fn conn_error_sets_error_status() {
+        let (mut app, _rx) = test_app();
+        app.handle_event(AppEvent::ConnError {
+            id: ConnId(3),
+            context: "browse".into(),
+            error: "nope".into(),
+        });
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("[3] browse: nope"));
+    }
+
+    // -- screen navigation & help --------------------------------------------
+
+    #[test]
+    fn quit_stops_the_run_loop() {
+        let (mut app, _rx) = test_app();
+        app.handle_key(ch('q'));
+        assert!(!app.running);
+    }
+
+    #[test]
+    fn help_toggles_and_dismisses() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::ToggleHelp);
+        assert!(app.show_help);
+        app.apply(Action::ToggleHelp);
+        assert!(!app.show_help);
+        app.show_help = true;
+        app.apply(Action::Dismiss);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn goto_data_screens_requires_active_connection() {
+        let (mut app, _rx) = test_app();
+        for action in [
+            Action::GotoBrowser,
+            Action::GotoDashboard,
+            Action::GotoRealtime,
+        ] {
+            app.apply(action);
+            assert_eq!(
+                app.screen,
+                Screen::Connections,
+                "{action:?} needs a connection"
+            );
+        }
+        app.apply(Action::GotoRecordings);
+        assert_eq!(
+            app.screen,
+            Screen::Recordings,
+            "recordings is always reachable"
+        );
+    }
+
+    #[tokio::test]
+    async fn goto_screens_switch_with_active_connection() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.apply(Action::GotoDashboard);
+        assert_eq!(app.screen, Screen::Dashboard);
+        app.apply(Action::GotoRealtime);
+        assert_eq!(app.screen, Screen::Realtime);
+        app.apply(Action::GotoConnections);
+        assert_eq!(app.screen, Screen::Connections);
+        app.apply(Action::GotoBrowser);
+        assert_eq!(app.screen, Screen::Browser);
+    }
+
+    // -- navigation ----------------------------------------------------------
+
+    #[test]
+    fn profile_navigation_moves_and_clamps() {
+        let (mut app, _rx) = build_app(config_with(&["a", "b", "c"]), unique_config_path(), None);
+        app.apply(Action::Down);
+        assert_eq!(app.profile_state.selected(), Some(1));
+        app.apply(Action::Bottom);
+        assert_eq!(app.profile_state.selected(), Some(2));
+        app.apply(Action::PageDown);
+        assert_eq!(app.profile_state.selected(), Some(2), "clamped at the end");
+        app.apply(Action::Top);
+        assert_eq!(app.profile_state.selected(), Some(0));
+        app.apply(Action::PageUp);
+        assert_eq!(
+            app.profile_state.selected(),
+            Some(0),
+            "clamped at the start"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_navigation_updates_selected_value() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].keys = vec![
+            stream_entry("k0", ValueType::String),
+            stream_entry("k1", ValueType::String),
+            stream_entry("k2", ValueType::String),
+        ];
+        app.connections[0].table.select(Some(0));
+        app.apply(Action::Down);
+        assert_eq!(app.connections[0].table.selected(), Some(1));
+        assert_eq!(app.connections[0].value_key.as_deref(), Some("k1"));
+    }
+
+    // -- change_db -----------------------------------------------------------
+
+    #[tokio::test]
+    async fn change_db_clamps_to_capabilities() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 4).await; // databases 0..=3
+        assert_eq!(app.screen, Screen::Browser);
+        app.change_db(1);
+        assert_eq!(app.connections[0].db, 1);
+        app.change_db(100);
+        assert_eq!(app.connections[0].db, 3, "clamped to the last database");
+        app.change_db(-100);
+        assert_eq!(app.connections[0].db, 0, "clamped to the first database");
+    }
+
+    #[tokio::test]
+    async fn change_db_only_acts_in_browser() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 4).await;
+        app.screen = Screen::Dashboard;
+        app.change_db(1);
+        assert_eq!(app.connections[0].db, 0, "no DB change outside the Browser");
+    }
+
+    // -- filter --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn apply_filter_builds_scan_patterns() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+
+        app.filter = "foo".into();
+        app.apply_filter();
+        assert_eq!(app.connections[0].pattern, "*foo*", "plain text is wrapped");
+
+        app.filter = "a*b".into();
+        app.apply_filter();
+        assert_eq!(app.connections[0].pattern, "a*b", "globs pass through");
+
+        app.filter = "   ".into();
+        app.apply_filter();
+        assert_eq!(app.connections[0].pattern, "*", "blank means match-all");
+    }
+
+    #[test]
+    fn filter_mode_edits_buffer() {
+        let (mut app, _rx) = test_app();
+        app.mode = InputMode::Filter;
+        app.handle_key(ch('a'));
+        app.handle_key(ch('b'));
+        assert_eq!(app.filter, "ab");
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.filter, "a");
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn start_filter_requires_browser_with_connection() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::StartFilter);
+        assert_eq!(
+            app.mode,
+            InputMode::Normal,
+            "no filter without a connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_filter_enters_filter_mode() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.filter = "stale".into();
+        app.apply(Action::StartFilter);
+        assert_eq!(app.mode, InputMode::Filter);
+        assert!(app.filter.is_empty(), "filter buffer is reset on entry");
+    }
+
+    // -- subscribe -----------------------------------------------------------
+
+    #[test]
+    fn subscribe_without_connection_errors() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::Subscribe);
+        assert_eq!(app.mode, InputMode::Normal);
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("connect first"));
+    }
+
+    #[test]
+    fn submit_subscribe_rejects_bad_spec() {
+        let (mut app, _rx) = test_app();
+        app.mode = InputMode::Subscribe;
+        app.subscribe_buf = "garbage".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, InputMode::Normal);
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("bad spec"));
+    }
+
+    #[test]
+    fn submit_subscribe_empty_is_noop() {
+        let (mut app, _rx) = test_app();
+        app.mode = InputMode::Subscribe;
+        app.subscribe_buf = "   ".into();
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.status.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_subscribe_opens_realtime_tail() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        let next_sub = app.next_sub_id;
+        app.start_subscribe(SubSpec::Channel("news".into()));
+        assert_eq!(app.screen, Screen::Realtime);
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(conn.active_sub, Some(0));
+        assert_eq!(conn.subs[0].state, SubState::Connecting);
+        assert_eq!(conn.subs[0].label, "pubsub:news");
+        assert_eq!(app.next_sub_id, next_sub + 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_subscribe_focuses_existing_tail() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("news".into()));
+        app.start_subscribe(SubSpec::Channel("news".into()));
+        assert_eq!(app.active_conn().unwrap().subs.len(), 1, "no duplicate tab");
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("already tailing"));
+    }
+
+    // -- realtime state transitions ------------------------------------------
+
+    #[tokio::test]
+    async fn realtime_event_marks_tail_active_and_buffers() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        let sub_id = app.connections[0].subs[0].sub_id;
+        app.handle_event(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event("hi"),
+        });
+        let sub = &app.connections[0].subs[0];
+        assert_eq!(sub.state, SubState::Active);
+        assert_eq!(sub.received, 1);
+        assert_eq!(sub.events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sub_started_marks_active() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        let sub_id = app.connections[0].subs[0].sub_id;
+        app.handle_event(AppEvent::SubscriptionStarted { id, sub_id });
+        assert_eq!(app.connections[0].subs[0].state, SubState::Active);
+    }
+
+    #[tokio::test]
+    async fn sub_ended_marks_ended_and_stops_recording() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        let sub_id = app.connections[0].subs[0].sub_id;
+        app.handle_event(AppEvent::SubscriptionEnded {
+            id,
+            sub_id,
+            reason: Some("source closed".into()),
+        });
+        let sub = &app.connections[0].subs[0];
+        assert_eq!(sub.state, SubState::Ended(Some("source closed".into())));
+        assert_eq!(sub.recording, RecordState::Off);
+        assert!(app.status.as_ref().unwrap().message.contains("tail ended"));
+    }
+
+    #[tokio::test]
+    async fn recording_update_transitions() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        let sub_id = app.connections[0].subs[0].sub_id;
+        let path = PathBuf::from("/tmp/rec.jsonl");
+
+        app.handle_event(AppEvent::RecordingUpdate {
+            id,
+            sub_id,
+            status: RecordingStatus::Started { path: path.clone() },
+        });
+        assert!(app.connections[0].subs[0].recording.is_on());
+        assert!(app.status.as_ref().unwrap().message.contains("recording →"));
+
+        app.handle_event(AppEvent::RecordingUpdate {
+            id,
+            sub_id,
+            status: RecordingStatus::Progress {
+                records: 9,
+                bytes: 123,
+            },
+        });
+        match &app.connections[0].subs[0].recording {
+            RecordState::On { records, bytes, .. } => {
+                assert_eq!((*records, *bytes), (9, 123));
+            }
+            other => panic!("expected On, got {other:?}"),
+        }
+
+        app.handle_event(AppEvent::RecordingUpdate {
+            id,
+            sub_id,
+            status: RecordingStatus::Stopped {
+                records: 9,
+                bytes: 123,
+                path,
+            },
+        });
+        assert_eq!(app.connections[0].subs[0].recording, RecordState::Off);
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("recorded 9 events"));
+
+        app.handle_event(AppEvent::RecordingUpdate {
+            id,
+            sub_id,
+            status: RecordingStatus::Failed {
+                error: "disk full".into(),
+            },
+        });
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("recording failed: disk full"));
+    }
+
+    #[tokio::test]
+    async fn toggle_recording_without_tail_errors() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Realtime;
+        app.toggle_recording();
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("no active tail"));
+    }
+
+    #[tokio::test]
+    async fn toggle_recording_on_ended_tail_errors() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        app.connections[0].subs[0].state = SubState::Ended(None);
+        app.toggle_recording();
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("tail has ended"));
+    }
+
+    #[tokio::test]
+    async fn toggle_recording_requests_start_on_active_tail() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        app.toggle_recording();
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("starting recording"));
+    }
+
+    #[tokio::test]
+    async fn stop_active_tail_removes_focused_tab() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        app.start_subscribe(SubSpec::Channel("d".into()));
+        assert_eq!(app.connections[0].active_sub, Some(1));
+        app.stop_active_tail();
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(conn.subs[0].label, "pubsub:c");
+        assert_eq!(conn.active_sub, Some(0));
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("stopped pubsub:d"));
+    }
+
+    #[tokio::test]
+    async fn focus_tab_wraps_around() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        for c in ['a', 'b', 'c'] {
+            app.start_subscribe(SubSpec::Channel(c.to_string()));
+        }
+        assert_eq!(app.connections[0].active_sub, Some(2));
+        app.focus_tab(1);
+        assert_eq!(app.connections[0].active_sub, Some(0), "wraps past the end");
+        app.focus_tab(-1);
+        assert_eq!(
+            app.connections[0].active_sub,
+            Some(2),
+            "wraps past the start"
+        );
+    }
+
+    #[tokio::test]
+    async fn scroll_tail_clamps_and_toggles_follow() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        for i in 0..5 {
+            app.connections[0].subs[0].push(broker_event(&format!("m{i}")));
+        }
+        app.scroll_tail(-1); // up == back into history
+        let sub = &app.connections[0].subs[0];
+        assert_eq!(sub.offset, 1);
+        assert!(!sub.follow);
+
+        app.scroll_tail(-100); // clamp at the oldest event
+        assert_eq!(app.connections[0].subs[0].offset, 4);
+
+        app.scroll_tail(100); // back to newest -> following again
+        let sub = &app.connections[0].subs[0];
+        assert_eq!(sub.offset, 0);
+        assert!(sub.follow);
+    }
+
+    // -- tail_selected_key ---------------------------------------------------
+
+    #[tokio::test]
+    async fn tail_selected_key_starts_stream_tail() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].keys = vec![stream_entry("orders", ValueType::Stream)];
+        app.connections[0].table.select(Some(0));
+        app.tail_selected_key();
+        assert_eq!(app.screen, Screen::Realtime);
+        assert_eq!(app.active_conn().unwrap().subs.len(), 1);
+        assert_eq!(app.active_conn().unwrap().subs[0].label, "stream:orders");
+    }
+
+    #[tokio::test]
+    async fn tail_selected_key_rejects_non_stream() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].keys = vec![stream_entry("greeting", ValueType::String)];
+        app.connections[0].table.select(Some(0));
+        app.tail_selected_key();
+        assert!(app.active_conn().unwrap().subs.is_empty());
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("only streams can be tailed"));
+    }
+
+    #[tokio::test]
+    async fn tail_selected_key_without_selection_errors() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].keys.clear();
+        app.tail_selected_key();
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("no key selected"));
+    }
+
+    // -- form ----------------------------------------------------------------
+
+    #[test]
+    fn add_connection_opens_form() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::AddConnection);
+        assert!(app.form.is_some());
+        assert_eq!(app.mode, InputMode::Form);
+    }
+
+    #[test]
+    fn form_typing_and_backspace_edit_focused_field() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::AddConnection);
+        app.form.as_mut().unwrap().fields[0].clear();
+        app.handle_key(ch('p'));
+        app.handle_key(ch('q'));
+        assert_eq!(app.form.as_ref().unwrap().fields[0], "pq");
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.form.as_ref().unwrap().fields[0], "p");
+    }
+
+    #[test]
+    fn form_tab_moves_focus_and_tls_toggles() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::AddConnection);
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.form.as_ref().unwrap().focus, 1);
+        app.handle_key(key(KeyCode::BackTab));
+        assert_eq!(app.form.as_ref().unwrap().focus, 0);
+
+        app.form.as_mut().unwrap().focus = ConnForm::TLS_FOCUS;
+        app.handle_key(ch(' '));
+        assert!(app.form.as_ref().unwrap().tls);
+        app.handle_key(ch(' '));
+        assert!(!app.form.as_ref().unwrap().tls);
+    }
+
+    #[test]
+    fn form_escape_cancels() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::AddConnection);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.form.is_none());
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[test]
+    fn form_validation_rejects_bad_fields() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::AddConnection);
+        // Default form has an empty name.
+        app.submit_form();
+        assert!(app.form.is_some(), "form stays open on error");
+        assert_eq!(
+            app.form.as_ref().unwrap().error.as_deref(),
+            Some("name is required")
+        );
+
+        app.form.as_mut().unwrap().fields[0] = "ok".into();
+        app.form.as_mut().unwrap().fields[2] = "notaport".into();
+        app.submit_form();
+        assert!(app
+            .form
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("port"));
+
+        app.form.as_mut().unwrap().fields[2] = "6390".into();
+        app.form.as_mut().unwrap().fields[3] = "xx".into();
+        app.submit_form();
+        assert!(app
+            .form
+            .as_ref()
+            .unwrap()
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("db"));
+    }
+
+    #[tokio::test]
+    async fn form_submit_persists_profile_and_connects() {
+        let path = unique_config_path();
+        let (mut app, _rx) = build_app(Config::default(), path.clone(), None);
+        app.apply(Action::AddConnection);
+        {
+            let form = app.form.as_mut().unwrap();
+            form.fields[0] = "c1".into(); // name
+            form.fields[1] = "".into(); // host -> defaults to 127.0.0.1
+            form.fields[2] = "6399".into(); // port
+            form.fields[3] = "2".into(); // db
+            form.fields[4] = "".into(); // username
+            form.fields[5] = "secret".into(); // password literal
+        }
+        app.submit_form();
+
+        assert!(app.form.is_none());
+        assert_eq!(app.mode, InputMode::Normal);
+        assert_eq!(app.profiles.len(), 1);
+        let p = &app.profiles[0];
+        assert_eq!(p.name, "c1");
+        assert_eq!(p.host, "127.0.0.1", "blank host defaults");
+        assert_eq!(p.port, 6399);
+        assert_eq!(p.db, 2);
+        assert_eq!(
+            p.password.as_deref(),
+            Some("prompt"),
+            "a literal password is persisted as a prompt spec, never plaintext"
+        );
+        assert_eq!(app.next_id, 2, "a connection attempt was kicked off");
+
+        let saved = std::fs::read_to_string(&path).expect("config written");
+        assert!(saved.contains("c1"));
+        assert!(!saved.contains("secret"), "the literal must not be written");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // -- input mode plumbing -------------------------------------------------
+
+    #[test]
+    fn key_release_events_are_ignored() {
+        let (mut app, _rx) = test_app();
+        let release = KeyEvent {
+            code: KeyCode::Char('q'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::NONE,
+        };
+        app.handle_key(release);
+        assert!(app.running, "key releases must not trigger actions");
+    }
+
+    // -- recordings ----------------------------------------------------------
+
+    #[test]
+    fn scan_recordings_lists_only_jsonl_newest_first() {
+        let dir = std::env::temp_dir().join(format!("brokertui-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jsonl"), "x").unwrap();
+        std::fs::write(dir.join("b.jsonl"), "y").unwrap();
+        std::fs::write(dir.join("notes.txt"), "z").unwrap();
+
+        let (mut app, _rx) = test_app();
+        app.recordings_dir = dir.clone();
+        app.scan_recordings();
+        assert_eq!(app.recordings.len(), 2, "only .jsonl files are listed");
+        assert!(app.recordings.iter().all(|f| f.name.ends_with(".jsonl")));
+        assert!(
+            app.recordings
+                .windows(2)
+                .all(|w| w[0].modified >= w[1].modified),
+            "sorted newest first"
+        );
+        assert_eq!(app.recordings_state.selected(), Some(0));
+
+        // A stale, out-of-range selection is clamped on rescan.
+        app.recordings_state.select(Some(9));
+        app.scan_recordings();
+        assert_eq!(app.recordings_state.selected(), Some(1));
+
+        // Emptying the directory clears the selection.
+        std::fs::remove_file(dir.join("a.jsonl")).unwrap();
+        std::fs::remove_file(dir.join("b.jsonl")).unwrap();
+        app.scan_recordings();
+        assert!(app.recordings.is_empty());
+        assert_eq!(app.recordings_state.selected(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- pure helpers --------------------------------------------------------
+
+    #[test]
+    fn move_selection_handles_edges() {
+        assert_eq!(move_selection(None, 0, 1), None, "empty list");
+        assert_eq!(
+            move_selection(None, 3, 1),
+            Some(1),
+            "from unset starts at 0"
+        );
+        assert_eq!(move_selection(Some(0), 3, -1), Some(0), "clamped low");
+        assert_eq!(move_selection(Some(2), 3, 1), Some(2), "clamped high");
+        assert_eq!(move_selection(Some(1), 3, 10), Some(2));
+        assert_eq!(move_selection(Some(1), 3, -10), Some(0));
+    }
+
+    #[test]
+    fn classify_password_distinguishes_specs_from_literals() {
+        assert_eq!(classify_password(""), (None, None));
+        assert_eq!(
+            classify_password("hunter2"),
+            (Some("prompt".to_string()), Some("hunter2".to_string())),
+            "a literal is never persisted; a prompt spec stands in"
+        );
+        assert_eq!(
+            classify_password("keyring"),
+            (Some("keyring".to_string()), None)
+        );
+        assert_eq!(
+            classify_password("prompt"),
+            (Some("prompt".to_string()), None)
+        );
+        assert_eq!(
+            classify_password("env:REDIS_PW"),
+            (Some("env:REDIS_PW".to_string()), None)
+        );
+        assert_eq!(
+            classify_password("keyring:prod"),
+            (Some("keyring:prod".to_string()), None)
+        );
+    }
+}

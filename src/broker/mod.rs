@@ -462,4 +462,84 @@ mod tests {
         assert_eq!(SubSpec::Pattern("p*".into()).label(), "psub:p*");
         assert_eq!(SubSpec::Channel("c".into()).source_type(), "pubsub");
     }
+
+    #[test]
+    fn sub_spec_target_accessor() {
+        assert_eq!(SubSpec::Channel("c".into()).target(), "c");
+        assert_eq!(SubSpec::Pattern("p.*".into()).target(), "p.*");
+        assert_eq!(
+            SubSpec::Stream {
+                key: "k".into(),
+                db: 0
+            }
+            .target(),
+            "k"
+        );
+    }
+
+    #[test]
+    fn value_type_from_redis_and_label() {
+        for (reply, vtype, label) in [
+            ("string", ValueType::String, "string"),
+            ("list", ValueType::List, "list"),
+            ("set", ValueType::Set, "set"),
+            ("hash", ValueType::Hash, "hash"),
+            ("zset", ValueType::ZSet, "zset"),
+            ("stream", ValueType::Stream, "stream"),
+            ("none", ValueType::None, "none"),
+        ] {
+            assert_eq!(ValueType::from_redis(reply), vtype);
+            assert_eq!(vtype.label(), label);
+        }
+        assert_eq!(ValueType::from_redis("mystery"), ValueType::Unknown);
+        assert_eq!(ValueType::Unknown.label(), "?");
+    }
+
+    #[test]
+    fn ttl_from_redis_classifies() {
+        assert_eq!(Ttl::from_redis(-1), Ttl::NoExpire);
+        assert_eq!(Ttl::from_redis(-2), Ttl::Unknown);
+        assert_eq!(Ttl::from_redis(0), Ttl::Seconds(0));
+        assert_eq!(Ttl::from_redis(42), Ttl::Seconds(42));
+        assert_eq!(
+            Ttl::from_redis(-99),
+            Ttl::Unknown,
+            "other negatives are unknown"
+        );
+    }
+
+    #[test]
+    fn payload_encoding_tags() {
+        assert_eq!(PayloadEncoding::Utf8.tag(), "utf8");
+        assert_eq!(PayloadEncoding::Json.tag(), "json");
+        assert_eq!(PayloadEncoding::Base64.tag(), "base64");
+    }
+
+    #[test]
+    fn broker_event_meta_lookup() {
+        let ev = BrokerEvent {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            source: "s".into(),
+            payload: Payload::Utf8("x".into()),
+            meta: vec![
+                ("id".into(), "1-0".into()),
+                ("pattern".into(), "p.*".into()),
+            ],
+        };
+        assert_eq!(ev.meta("id"), Some("1-0"));
+        assert_eq!(ev.meta("pattern"), Some("p.*"));
+        assert_eq!(ev.meta("missing"), None);
+    }
+
+    #[test]
+    fn server_stats_hit_ratio_edge_cases() {
+        let mut s = ServerStats::default();
+        assert_eq!(s.hit_ratio(), None, "no counters yields no ratio");
+        s.keyspace_hits = Some(0);
+        s.keyspace_misses = Some(0);
+        assert_eq!(s.hit_ratio(), None, "zero traffic yields no ratio");
+        s.keyspace_hits = Some(3);
+        s.keyspace_misses = Some(1);
+        assert_eq!(s.hit_ratio(), Some(0.75));
+    }
 }

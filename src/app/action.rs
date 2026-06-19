@@ -76,3 +76,66 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyCode::*;
+
+    fn plain(code: KeyCode) -> Option<Action> {
+        map_key(&KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl(code: KeyCode) -> Option<Action> {
+        map_key(&KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    #[test]
+    fn every_normal_binding_maps() {
+        assert_eq!(plain(Char('q')), Some(Action::Quit));
+        assert_eq!(ctrl(Char('c')), Some(Action::Quit));
+        assert_eq!(plain(Char('j')), Some(Action::Down));
+        assert_eq!(plain(Down), Some(Action::Down));
+        assert_eq!(plain(Char('k')), Some(Action::Up));
+        assert_eq!(plain(Up), Some(Action::Up));
+        assert_eq!(plain(Char('g')), Some(Action::Top));
+        assert_eq!(plain(Home), Some(Action::Top));
+        assert_eq!(plain(Char('G')), Some(Action::Bottom));
+        assert_eq!(plain(End), Some(Action::Bottom));
+        assert_eq!(plain(Enter), Some(Action::Enter));
+        assert_eq!(plain(Char('a')), Some(Action::AddConnection));
+        assert_eq!(plain(Char('c')), Some(Action::GotoConnections));
+        assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
+        assert_eq!(plain(Char('d')), Some(Action::GotoDashboard));
+        assert_eq!(plain(Char('w')), Some(Action::GotoRealtime));
+        assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
+        assert_eq!(plain(Char('s')), Some(Action::Subscribe));
+        assert_eq!(plain(Char('t')), Some(Action::TailKey));
+        assert_eq!(plain(Char('x')), Some(Action::StopTail));
+        assert_eq!(plain(Tab), Some(Action::NextTab));
+        assert_eq!(plain(BackTab), Some(Action::PrevTab));
+        assert_eq!(plain(Char('/')), Some(Action::StartFilter));
+        assert_eq!(plain(Char('[')), Some(Action::DbPrev));
+        assert_eq!(plain(Char(']')), Some(Action::DbNext));
+        assert_eq!(plain(Char('n')), Some(Action::LoadMore));
+        assert_eq!(plain(Char('r')), Some(Action::Refresh));
+        assert_eq!(plain(Char('?')), Some(Action::ToggleHelp));
+        assert_eq!(plain(Esc), Some(Action::Dismiss));
+    }
+
+    #[test]
+    fn ctrl_paging_is_distinct_from_plain_letters() {
+        assert_eq!(ctrl(Char('d')), Some(Action::PageDown));
+        assert_eq!(plain(Char('d')), Some(Action::GotoDashboard));
+        assert_eq!(ctrl(Char('u')), Some(Action::PageUp));
+        assert_eq!(plain(Char('u')), None, "plain 'u' is unbound");
+    }
+
+    #[test]
+    fn unbound_keys_return_none() {
+        assert_eq!(plain(Char('z')), None);
+        assert_eq!(ctrl(Char('q')), None, "Ctrl-q is not a binding");
+        assert_eq!(ctrl(Char('a')), None);
+        assert_eq!(plain(F(1)), None);
+    }
+}

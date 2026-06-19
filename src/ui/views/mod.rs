@@ -702,3 +702,91 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
         height: h,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    #[test]
+    fn human_bytes_scales_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1.0 GiB");
+    }
+
+    #[test]
+    fn human_duration_picks_the_coarsest_units() {
+        assert_eq!(human_duration(0), "0s");
+        assert_eq!(human_duration(59), "59s");
+        assert_eq!(human_duration(60), "1m 0s");
+        assert_eq!(human_duration(3661), "1h 1m 1s");
+        assert_eq!(human_duration(90061), "1d 1h 1m");
+    }
+
+    #[test]
+    fn truncate_caps_and_marks_overflow() {
+        assert_eq!(truncate("hello", 10), "hello");
+        assert_eq!(
+            truncate("hello", 5),
+            "hello",
+            "exactly at the cap is unchanged"
+        );
+        assert_eq!(truncate("hello", 3), "he…");
+        // Counts characters, not bytes, so multibyte text is handled safely.
+        assert_eq!(truncate("héllo", 3), "hé…");
+    }
+
+    #[test]
+    fn payload_preview_flattens_whitespace_and_tags_binary() {
+        assert_eq!(
+            payload_preview(&Payload::Utf8("a\n  b\tc".into()), 100),
+            "a b c"
+        );
+        assert_eq!(
+            payload_preview(&Payload::Json("{\"a\":\n1}".into()), 100),
+            "{\"a\": 1}"
+        );
+        let bin = payload_preview(&Payload::Binary(vec![0x00, 0xff]), 100);
+        assert!(
+            bin.starts_with("base64:"),
+            "binary previews are tagged: {bin}"
+        );
+    }
+
+    #[test]
+    fn payload_preview_truncates_long_text() {
+        let long = "x".repeat(50);
+        let preview = payload_preview(&Payload::Utf8(long), 10);
+        assert_eq!(preview.chars().count(), 10);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn fmt_datetime_uses_minute_precision() {
+        assert_eq!(
+            fmt_datetime(datetime!(2026 - 06 - 19 09:08:07 UTC)),
+            "2026-06-19 09:08"
+        );
+    }
+
+    #[test]
+    fn opt_num_renders_placeholder_for_none() {
+        assert_eq!(opt_num(Some(42)), "42");
+        assert_eq!(opt_num(None), "?");
+    }
+
+    #[test]
+    fn centered_positions_and_clamps() {
+        let area = Rect::new(0, 0, 100, 40);
+        let r = centered(area, 60, 16);
+        assert_eq!((r.x, r.y, r.width, r.height), (20, 12, 60, 16));
+        // An oversized request is clamped to the available area.
+        let big = centered(area, 200, 100);
+        assert_eq!((big.x, big.y, big.width, big.height), (0, 0, 100, 40));
+    }
+}

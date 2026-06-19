@@ -156,3 +156,279 @@ fn clock(app: &App) -> String {
         app.now.second()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{ConnForm, Connection, RecordState, SubState, Subscription};
+    use crate::broker::actor::mock;
+    use crate::broker::{
+        BrokerEvent, EntryMeta, Payload, PayloadEncoding, ServerStats, StreamEntry, SubSpec, Ttl,
+        ValueType, ValueView,
+    };
+    use crate::config::Config;
+    use crate::event::AppEvent;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc::{self, Receiver};
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
+
+    fn test_app() -> (App, Receiver<AppEvent>) {
+        let (tx, rx) = mpsc::channel(64);
+        let app = App::new(
+            Config::default(),
+            std::path::PathBuf::from("/tmp/brokertui-ui-test.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        (app, rx)
+    }
+
+    /// Render one frame at 100x30 and return the on-screen text (row-major).
+    fn screen_text(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let frame = terminal
+            .draw(|f| render(f, app))
+            .expect("render must not fail");
+        frame.buffer.content().iter().map(|c| c.symbol()).collect()
+    }
+
+    fn entry(name: &str, vtype: ValueType) -> EntryMeta {
+        EntryMeta {
+            key: name.into(),
+            vtype,
+            ttl: Ttl::Seconds(120),
+        }
+    }
+
+    // -- header & footer (always drawn) --------------------------------------
+
+    #[test]
+    fn header_shows_title_and_clock() {
+        let (mut app, _rx) = test_app();
+        let text = screen_text(&mut app);
+        assert!(text.contains("BrokerTUI"));
+        assert!(text.contains("UTC"), "the clock is in the header");
+        assert!(text.contains("no connection"), "no active connection label");
+    }
+
+    #[test]
+    fn footer_reflects_filter_mode() {
+        let (mut app, _rx) = test_app();
+        app.mode = InputMode::Filter;
+        app.filter = "abc".into();
+        assert!(screen_text(&mut app).contains("filter"));
+    }
+
+    #[test]
+    fn footer_reflects_subscribe_mode() {
+        let (mut app, _rx) = test_app();
+        app.mode = InputMode::Subscribe;
+        assert!(screen_text(&mut app).contains("subscribe"));
+    }
+
+    // -- connections screen --------------------------------------------------
+
+    #[test]
+    fn connections_empty_state() {
+        let (mut app, _rx) = test_app();
+        assert!(screen_text(&mut app).contains("No saved connections"));
+    }
+
+    // -- placeholder screens with no connection ------------------------------
+
+    #[test]
+    fn data_screens_render_no_connection_placeholders() {
+        for screen in [Screen::Browser, Screen::Dashboard, Screen::Realtime] {
+            let (mut app, _rx) = test_app();
+            app.screen = screen;
+            assert!(
+                screen_text(&mut app).contains("No active connection"),
+                "{screen:?} should show a placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn recordings_empty_state() {
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Recordings;
+        assert!(screen_text(&mut app).contains("No recordings found"));
+    }
+
+    // -- overlays ------------------------------------------------------------
+
+    #[test]
+    fn help_overlay_renders() {
+        let (mut app, _rx) = test_app();
+        app.show_help = true;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Help"));
+        assert!(text.contains("Navigation"));
+    }
+
+    #[test]
+    fn connection_form_overlay_renders() {
+        let (mut app, _rx) = test_app();
+        app.form = Some(ConnForm::new());
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Add connection"));
+        assert!(text.contains("Password"));
+    }
+
+    // -- connection-bearing screens ------------------------------------------
+
+    async fn app_with_connection() -> (App, Receiver<AppEvent>) {
+        let (mut app, rx) = test_app();
+        let handle = mock::handle(1, "prod", 16).await;
+        app.connections.push(Connection::new(handle));
+        app.active = Some(0);
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn browser_renders_keys_and_all_value_views() {
+        let entries = StreamEntry {
+            id: "1-0".into(),
+            fields: vec![("field".into(), "value".into())],
+        };
+        let views = vec![
+            ValueView::Str {
+                total_bytes: 8,
+                shown_bytes: 8,
+                text: "hi\nthere".into(),
+                encoding: PayloadEncoding::Utf8,
+            },
+            // shown < total exercises the truncation note.
+            ValueView::Str {
+                total_bytes: 100,
+                shown_bytes: 4,
+                text: "{ }".into(),
+                encoding: PayloadEncoding::Json,
+            },
+            ValueView::List {
+                len: 2,
+                offset: 0,
+                items: vec!["a".into(), "b".into()],
+            },
+            ValueView::Set {
+                len: 1,
+                members: vec!["m".into()],
+            },
+            ValueView::Hash {
+                len: 1,
+                fields: vec![("k".into(), "v".into())],
+            },
+            ValueView::ZSet {
+                len: 1,
+                items: vec![("m".into(), 1.5)],
+            },
+            ValueView::Stream {
+                len: 1,
+                last_id: "1-0".into(),
+                entries: vec![entries],
+            },
+            ValueView::Missing,
+        ];
+
+        for view in views {
+            let (mut app, _rx) = app_with_connection().await;
+            app.screen = Screen::Browser;
+            app.connections[0].keys = vec![entry("mykey", ValueType::String)];
+            app.connections[0].table.select(Some(0));
+            app.connections[0].value_key = Some("mykey".into());
+            app.connections[0].value = Some(view);
+            // The assertion is implicit: render_value must not panic for any view.
+            let text = screen_text(&mut app);
+            assert!(text.contains("mykey"), "the key table should render");
+        }
+    }
+
+    #[tokio::test]
+    async fn dashboard_renders_stats() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Dashboard;
+        app.connections[0].stats = Some(ServerStats {
+            redis_version: Some("7.4.0".into()),
+            used_memory: Some(1024),
+            maxmemory: Some(4096),
+            keyspace_hits: Some(3),
+            keyspace_misses: Some(1),
+            db_keys: vec![(0, 9)],
+            ..Default::default()
+        });
+        let text = screen_text(&mut app);
+        assert!(text.contains("Version"));
+        assert!(text.contains("7.4.0"));
+        assert!(text.contains("Hit ratio"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_shows_loading_without_stats() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Dashboard;
+        assert!(screen_text(&mut app).contains("Loading server stats"));
+    }
+
+    #[tokio::test]
+    async fn realtime_renders_tail_with_events() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Realtime;
+        let mut sub = Subscription::new(1, SubSpec::Channel("news".into()), 100);
+        sub.state = SubState::Active;
+        for i in 0..5 {
+            sub.push(BrokerEvent {
+                ts: time::OffsetDateTime::UNIX_EPOCH,
+                source: "news".into(),
+                payload: Payload::Utf8(format!("message {i}")),
+                meta: Vec::new(),
+            });
+        }
+        app.connections[0].subs.push(sub);
+        app.connections[0].active_sub = Some(0);
+        let text = screen_text(&mut app);
+        assert!(text.contains("pubsub:news"), "the tab label should render");
+        assert!(text.contains("live"));
+    }
+
+    #[tokio::test]
+    async fn realtime_renders_paused_and_recording_indicators() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Realtime;
+        let mut sub = Subscription::new(1, SubSpec::Channel("c".into()), 100);
+        sub.state = SubState::Active;
+        for i in 0..10 {
+            sub.push(BrokerEvent {
+                ts: time::OffsetDateTime::UNIX_EPOCH,
+                source: "c".into(),
+                payload: Payload::Utf8(format!("m{i}")),
+                meta: Vec::new(),
+            });
+        }
+        // Scrolled up into history, with recording on.
+        sub.follow = false;
+        sub.offset = 3;
+        sub.recording = RecordState::On {
+            records: 7,
+            bytes: 2048,
+            path: std::path::PathBuf::from("/tmp/r.jsonl"),
+        };
+        app.connections[0].subs.push(sub);
+        app.connections[0].active_sub = Some(0);
+        let text = screen_text(&mut app);
+        assert!(text.contains("paused"));
+        assert!(text.contains("REC"));
+    }
+
+    #[tokio::test]
+    async fn realtime_with_no_tails_shows_hint() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Realtime;
+        assert!(screen_text(&mut app).contains("No live tails"));
+    }
+}
