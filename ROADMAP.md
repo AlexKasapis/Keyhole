@@ -8,23 +8,26 @@ Single self-contained binary, usable locally or over SSH.
 
 ## 📍 Current status — you are here
 
-**Phase 3 complete.** On top of v1 (browse + realtime + record), the app now has
-the **deferred Redis features and polish**: a **keyspace-notification monitor**
-and **MONITOR firehose** (both as recordable tails), a **read-only command
-console** (deny-by-default allowlist + `COMMAND INFO` flag check), a **command
-palette**, **config theming** (`[theme]` + `NO_COLOR`), and **mouse-wheel
-scrolling**. **Phase 4 (AMQP) is next.**
+**Phase 4 complete.** A second broker is in: **AMQP 1.0** (Apache ActiveMQ /
+AWS Amazon MQ / RabbitMQ 4.x) via `fe2o3-amqp`, behind the same
+`BrokerConnection` trait. AMQP connections **tail topics non-destructively** and
+**browse queues** (copy distribution mode — never consuming), recording through
+the unchanged recorder. The UI is now **capability-driven**: a broker without a
+key browser / dashboard / console simply doesn't surface them. **Phase 5
+(write/destructive ops + cluster/sentinel + dist) is next.**
 
 | | |
 |---|---|
 | Branch | `main` |
-| Commits | `a5c9e30` Phase 0 · `2d83f33` Phase 1 · `be6ecac` Phase 2 · Phase 3 (this commit) |
-| Tests | 209 pass (198 unit/snapshot + 11 integration) |
-| Quality gate | `clippy --all-targets --all-features -D warnings` clean · `clippy --no-default-features` clean · `rustfmt` clean |
-| Verified | PTY harness: connect → console `PING`→`PONG` (live read-only exec) → MONITOR tail → command palette → clean exit; keyspace "disabled" banner with notifications off; all integration tests against Redis on 6380 |
+| Commits | `a5c9e30` P0 · `2d83f33` P1 · `be6ecac` P2 · `ee08e54` P3 · Phase 4 (this commit) |
+| Tests | 226 pass (213 unit/snapshot + 13 integration: 11 Redis + 2 AMQP) |
+| Quality gate | `clippy --all-features` & `--no-default-features` clean (`-D warnings`) · `rustfmt` clean |
+| Verified | PTY harness against live ActiveMQ: connect (AMQP 1.0 + SASL) → `[amqp]` label → Browser gated (`no key browser`) → topic tail; integration: topic round-trip + queue-browse-is-non-destructive (Redis on 6380, ActiveMQ on 5674) |
 
 ### What works today
-- Connect to Redis (saved TOML profiles or `--connect`), auto-reconnect, liveness ping → disconnect detection.
+- Connect to **Redis or AMQP 1.0** (saved TOML profiles, tagged `type="redis"`/`"amqp"`, or `--connect`), liveness ping → disconnect detection. The connections list shows each broker's kind; the UI hides views a broker can't do.
+- **AMQP 1.0** (ActiveMQ / Amazon MQ / RabbitMQ 4.x, `amqps://` TLS supported): tail a **topic** (`topic:name`, non-destructive multicast) or **browse a queue** (`queue:name`, distribution-mode `copy` — reads without consuming), recorded through the same JSONL recorder. SASL PLAIN from the profile's username/password.
+- Connect to Redis: auto-reconnect via `ConnectionManager`, full browse/dashboard/console (below).
 - **Browse**: non-blocking `SCAN` with `MATCH`/`COUNT` paging + pipelined `TYPE`/`TTL`; server-side filter (`/`); DB switching (`[`/`]`); load-more.
 - **Value viewers** for every type: string (JSON pretty-print, binary→base64, size-capped), list, set, hash, zset, stream — auto-loaded into a detail pane as you move the selection.
 - **Dashboard** from `INFO`: memory & hit-ratio gauges, version/uptime/clients/ops-sec, per-DB key counts (auto-refresh).
@@ -39,8 +42,8 @@ scrolling**. **Phase 4 (AMQP) is next.**
 - **Mouse**: scroll wheel navigates the focused list/pane (suppressed during text entry).
 - Screen-based TUI (Connections / Browser / Dashboard / Realtime / Recordings / Console) + help overlay (`?`), vim + arrow keys, panic-safe terminal restore, file-only logging.
 
-### Not done yet (Phase 4+)
-AMQP broker (behind the `BrokerConnection` trait), write/destructive ops (publish, set, delete/purge), Redis cluster/sentinel, `cargo-dist` releases.
+### Not done yet (Phase 5+)
+Write/destructive ops (publish, set, delete/purge), Redis cluster/sentinel, AMQP destination listing (over the management API), an **AMQP 0-9-1 / RabbitMQ** implementation (a planned later addition — the trait already abstracts the broker), `cargo-dist` releases.
 
 ---
 
@@ -49,7 +52,7 @@ AMQP broker (behind the `BrokerConnection` trait), write/destructive ops (publis
 | Decision | Choice |
 |---|---|
 | Language / UI | Rust + `ratatui` 0.30 + `crossterm` + `tokio` |
-| Brokers | **Redis first (full)**, AMQP later behind one `BrokerConnection` trait |
+| Brokers | **Redis** (full) + **AMQP 1.0** (`fe2o3-amqp`: ActiveMQ / Amazon MQ / RabbitMQ 4.x) behind one `BrokerConnection` trait; AMQP 0-9-1 (RabbitMQ) is a planned later addition |
 | v1 mode | **Read + record only** — no publish/inject, no delete/purge/overwrite (deferred) |
 | "Record" | Capture live streams to disk as **JSONL** with a metadata envelope (binary-safe) |
 | Connections/secrets | TOML profiles in `~/.config/brokertui/config.toml`; secrets via env-var + OS keyring (no plaintext) |
@@ -84,12 +87,13 @@ src/
 │  ├─ mod.rs         # ★ BrokerConnection trait (subscribe/tail_notice/exec_readonly)
 │  │                 #   + shared types (SubSpec incl. Keyspace/Monitor, ValueView, …)
 │  ├─ actor.rs       # ★ ConnCommand (incl. Exec), ConnHandle, spawn_connection(), loop
-│  └─ redis/
-│     ├─ mod.rs      # RedisConnection (impl trait) + integration tests
-│     ├─ info.rs     # INFO parser → ServerStats (unit tested)
-│     ├─ value.rs    # string→ValueView rendering (unit tested)
-│     ├─ tail.rs     # pub/sub · stream · keyspace · MONITOR tails + pure mappers
-│     └─ command.rs  # ★ read-only console: allowlist + COMMAND INFO + reply render
+│  ├─ redis/
+│  │  ├─ mod.rs      # RedisConnection (impl trait) + integration tests
+│  │  ├─ info.rs     # INFO parser → ServerStats (unit tested)
+│  │  ├─ value.rs    # string→ValueView rendering (unit tested)
+│  │  ├─ tail.rs     # pub/sub · stream · keyspace · MONITOR tails + pure mappers
+│  │  └─ command.rs  # ★ read-only console: allowlist + COMMAND INFO + reply render
+│  └─ amqp/mod.rs    # AmqpConnection (fe2o3-amqp): topic tail + queue browse (feature "amqp")
 ├─ config/
 │  ├─ mod.rs         # Config / RedisProfile / Settings / ThemeConfig, load/save, Paths
 │  └─ secret.rs      # SecretSpec: env → keyring → prompt
@@ -149,8 +153,8 @@ python3 scripts/tui_smoke.py --cmd "./target/debug/brokertui --config /tmp/bt.to
 - **Phase 1 — Redis browse** ✅ (`2d83f33`): config/secrets, `BrokerConnection` trait, per-connection actor, SCAN browser, value viewers, INFO dashboard, full TUI.
 - **Phase 2 — Redis realtime + recording** ✅ — completes v1. See "delivered" below.
 - **Phase 3 — Monitoring & polish** ✅ — keyspace-notification monitor, `MONITOR` tail, read-only command console, command palette, config theming, mouse, snapshot UI tests, musl CI. See "delivered" below.
-- **Phase 4 — AMQP** ⏭ NEXT: `AmqpConnection` behind the trait, browse exchanges/queues, **non-destructive tail** (temp exclusive queue bound to the exchange), record through the unchanged recorder. ⚠ See AMQP note below.
-- **Phase 5 — Mutations & scale-out**: write/destructive ops (publish, set, delete/purge) behind confirmations + a read-only lock; Redis cluster/sentinel; cargo-dist releases.
+- **Phase 4 — AMQP 1.0** ✅ — `AmqpConnection` (`fe2o3-amqp`) behind the trait, capability-driven UI, **non-destructive** topic tail + queue browse, recorded through the unchanged recorder, ActiveMQ in compose + CI. See "delivered" below.
+- **Phase 5 — Mutations & scale-out** ⏭ NEXT: write/destructive ops (publish, set, delete/purge) behind confirmations + a read-only lock; Redis cluster/sentinel; an AMQP 0-9-1 (RabbitMQ) impl; cargo-dist releases.
 
 ---
 
@@ -199,10 +203,55 @@ The deferred Redis features + UX polish, all reusing the Phase-1/2 plumbing.
 
 ---
 
+## ✅ Phase 4 — delivered
+
+A second broker — **AMQP 1.0** — behind the existing `BrokerConnection` trait,
+proving the abstraction. The user's real target is **AWS Amazon MQ for ActiveMQ**.
+
+1. **Generalised abstraction** — `BrokerKind` + capability flags (`can_browse`/
+   `can_dashboard`/`can_console`) on `Capabilities`; `browse`/`inspect`/`stats`
+   gained default-`bail` impls so a broker implements only what it supports. The
+   UI is capability-driven: the initial screen, the `b`/`d`/`e` nav keys, and the
+   per-tick stats refresh all respect caps. New `SubSpec::Topic`/`Queue`
+   (`topic:`/`queue:`), recorded as `amqp-topic`/`amqp-queue`.
+2. **`AmqpConnection`** (`broker/amqp/`, `fe2o3-amqp` + `rustls`) — `Connection::open`
+   with SASL PLAIN from the profile; `amqp://` or `amqps://` (Amazon MQ :5671).
+   **Topic tail** = a plain receiver (multicast → non-destructive). **Queue
+   browse** = a receiver with distribution-mode `copy` (reads without consuming).
+   Each tail owns a dedicated connection/session/receiver; message bodies →
+   binary-safe `Payload` (`Data` sections and non-UTF-8 → base64). `ping` does a
+   session begin/end round-trip for liveness.
+3. **Unified profiles** — `ConnectionConfig::Amqp(AmqpProfile)` (`type="amqp"`);
+   `App.profiles` is now `Vec<ConnectionConfig>`; the connect flow + headless
+   `record` dispatch on the variant; the add-connection form gained a broker-kind
+   toggle (AMQP hides the DB field).
+4. **`amqp` Cargo feature (default-on)** — gates `fe2o3-amqp`; `--no-default-features`
+   (the musl/headless build) drops AMQP *and* its `rustls`/`aws-lc` TLS-crypto C
+   deps, keeping the static build clean. Redis is always built in.
+5. **Tests & infra** — unit (URL build, body→payload, capability gating, profile
+   parse) + integration against ActiveMQ (topic round-trip; **queue browse proven
+   non-destructive**: a normal consumer still gets the message afterwards).
+   `docker-compose` gained an `activemq` service; CI runs it (+ the wait) and the
+   musl job. PTY-verified end to end.
+
+**Decisions & gotchas (Phase 4):**
+- **AMQP container-ids must be unique per connection** — deriving them from a
+  fixed string made concurrent connections/tails collide (a real bug, not just a
+  test flake): a `static AtomicU64` now suffixes every connection + tail id.
+- **AMQP "tail" is non-destructive only**, honouring the v1 no-destructive-ops
+  rule: topics (multicast) and queue *browse* (copy mode). Destructive queue
+  consume is deferred to the mutations phase.
+- **Topics don't retain** — the topic integration test publishes in a loop until
+  the subscriber (now credit-ready) observes one, removing the attach/publish race.
+- **rustls 0.23 defaults to `aws-lc-rs`** (needs cmake/C), so it rides the
+  default `amqp` feature and is excluded from the minimal musl build.
+
+---
+
 ## Gotchas & environment notes
 
-- **This machine already runs a dev stack** (project `compose`): Redis on **6379**, an **ActiveMQ-based AMQP broker on 5672**, Postgres, DynamoDB, etc. Don't disturb it. BrokerTUI's own brokers use overridden host ports via a gitignored `.env` (Redis **6380**, RabbitMQ **5673**/**15673**).
-- **⚠ AMQP (Phase 4):** the local AMQP broker is **ActiveMQ → AMQP 1.0**, not RabbitMQ's **0-9-1**. The `lapin` crate (AMQP 0-9-1) will *not* work against it. Confirm the real target with the user and pick an AMQP 1.0 client (or test against a genuine RabbitMQ) before building Phase 4.
+- **This machine already runs a dev stack** (project `compose`): Redis on **6379**, an **ActiveMQ-based AMQP broker on 5672**, Postgres, DynamoDB, etc. Don't disturb it. BrokerTUI's own brokers use overridden host ports via a gitignored `.env` (Redis **6380**, ActiveMQ **5674**, RabbitMQ **5673**/**15673**).
+- **AMQP target (resolved in Phase 4):** the real target is **AWS Amazon MQ for Apache ActiveMQ → AMQP 1.0**, so brokertui uses **`fe2o3-amqp`** (not `lapin`, which is AMQP 0-9-1 and can't talk to ActiveMQ). Tests run against a dockerized **ActiveMQ** on 5674. An AMQP 0-9-1 / RabbitMQ implementation is a planned later addition (the `rabbitmq` compose profile is wired for it).
 - **Trimmed for now (YAGNI):** the `BrokerKind` tag and per-value paging `offset`s were removed to keep the lint gate clean; reintroduce in Phase 4 / when value paging lands.
 - **Secrets:** never stored as plaintext. Form literals are used for the session only and persisted as a `prompt` spec. `keyring` v4 uses a pure-Rust zbus Secret Service backend (no system libdbus); it's behind a default-on `keyring` Cargo feature with an env-var fallback — build headless/musl with `--no-default-features`.
 - **redis 1.2:** `ConnectionInfo` fields are private, so connections are built from a percent-encoded `redis://` URL.

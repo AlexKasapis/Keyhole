@@ -104,7 +104,7 @@ impl BrokerConnection for RedisConnection {
         self.conn = Some(manager);
 
         let databases = self.database_count().await;
-        Ok(Capabilities { databases })
+        Ok(Capabilities::redis(databases))
     }
 
     async fn ping(&mut self) -> anyhow::Result<()> {
@@ -318,6 +318,9 @@ impl BrokerConnection for RedisConnection {
             SubSpec::Stream { key, db } => tail::open_stream(client, key, db).await,
             SubSpec::Keyspace { db } => tail::open_keyspace(client, db).await,
             SubSpec::Monitor => tail::open_monitor(client).await,
+            SubSpec::Topic(_) | SubSpec::Queue(_) => {
+                anyhow::bail!("topic/queue specs require an AMQP connection")
+            }
         }
     }
 

@@ -460,6 +460,8 @@ pub(crate) mod mock {
     /// A [`BrokerConnection`] whose every operation is scripted by its fields.
     pub struct MockBroker {
         pub databases: u32,
+        /// Report AMQP capabilities (no browse/dashboard/console) on connect.
+        pub amqp: bool,
         pub connect_err: Option<String>,
         pub ping_err: Option<String>,
         pub browse: Option<BrowsePage>,
@@ -474,6 +476,7 @@ pub(crate) mod mock {
         pub fn new(databases: u32) -> Self {
             Self {
                 databases,
+                amqp: false,
                 connect_err: None,
                 ping_err: None,
                 browse: None,
@@ -494,9 +497,8 @@ pub(crate) mod mock {
         async fn connect(&mut self) -> anyhow::Result<Capabilities> {
             match &self.connect_err {
                 Some(e) => anyhow::bail!("{e}"),
-                None => Ok(Capabilities {
-                    databases: self.databases,
-                }),
+                None if self.amqp => Ok(Capabilities::amqp()),
+                None => Ok(Capabilities::redis(self.databases)),
             }
         }
 
@@ -557,6 +559,28 @@ pub(crate) mod mock {
         )
         .await
         .expect("mock connect")
+    }
+
+    /// Like [`handle`], but the mock reports AMQP capabilities (no browse /
+    /// dashboard / console), for testing capability-gated UI behaviour.
+    pub async fn amqp_handle(id: u32, name: &str) -> ConnHandle {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let mut mock = MockBroker::new(1);
+        mock.amqp = true;
+        spawn_connection(
+            ConnId(id),
+            name.to_string(),
+            mock.boxed(),
+            tx,
+            &tracker,
+            &cancel,
+            std::env::temp_dir(),
+        )
+        .await
+        .expect("mock amqp connect")
     }
 }
 

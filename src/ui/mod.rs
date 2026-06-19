@@ -311,6 +311,60 @@ mod tests {
         let text = screen_text(&mut app);
         assert!(text.contains("Add connection"));
         assert!(text.contains("Password"));
+        assert!(text.contains("Kind"), "the broker-kind toggle renders");
+    }
+
+    #[test]
+    fn connection_form_shows_amqp_hint_when_amqp_kind() {
+        let (mut app, _rx) = test_app();
+        let mut form = ConnForm::new();
+        form.toggle_kind(); // -> AMQP
+        app.form = Some(form);
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(text.contains("[amqp]"));
+        assert!(text.contains("DB is ignored"), "AMQP hint shown");
+    }
+
+    #[test]
+    fn connections_list_shows_broker_kind() {
+        use crate::config::{AmqpProfile, Config, ConnectionConfig, RedisProfile};
+        let config = Config {
+            connections: vec![
+                ConnectionConfig::Redis(RedisProfile {
+                    name: "cache".into(),
+                    host: "127.0.0.1".into(),
+                    port: 6379,
+                    db: 0,
+                    username: None,
+                    password: None,
+                    tls: false,
+                }),
+                ConnectionConfig::Amqp(AmqpProfile {
+                    name: "events".into(),
+                    host: "broker".into(),
+                    port: 5671,
+                    username: None,
+                    password: None,
+                    tls: true,
+                }),
+            ],
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel(64);
+        let mut app = App::new(
+            config,
+            std::path::PathBuf::from("/tmp/bt.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        let text = screen_text(&mut app);
+        assert!(text.contains("[redis]"));
+        assert!(text.contains("[amqp]"));
+        assert!(text.contains("events"));
     }
 
     // -- connection-bearing screens ------------------------------------------

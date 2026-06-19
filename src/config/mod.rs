@@ -57,11 +57,49 @@ pub struct ThemeConfig {
     pub gauge: Option<String>,
 }
 
-/// A saved connection, tagged by broker type (`type = "redis"`).
+/// A saved connection, tagged by broker type (`type = "redis"` / `"amqp"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ConnectionConfig {
     Redis(RedisProfile),
+    Amqp(AmqpProfile),
+}
+
+impl ConnectionConfig {
+    /// The connection's display name.
+    pub fn name(&self) -> &str {
+        match self {
+            ConnectionConfig::Redis(p) => &p.name,
+            ConnectionConfig::Amqp(p) => &p.name,
+        }
+    }
+
+    /// Lowercase broker-kind tag for the connections list.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            ConnectionConfig::Redis(_) => "redis",
+            ConnectionConfig::Amqp(_) => "amqp",
+        }
+    }
+
+    /// A `host:port[/db][ tls]` summary for the connections list.
+    pub fn endpoint(&self) -> String {
+        match self {
+            ConnectionConfig::Redis(p) => {
+                let db = if p.db > 0 {
+                    format!("/{}", p.db)
+                } else {
+                    String::new()
+                };
+                let tls = if p.tls { " tls" } else { "" };
+                format!("{}:{}{db}{tls}", p.host, p.port)
+            }
+            ConnectionConfig::Amqp(p) => {
+                let tls = if p.tls { " tls" } else { "" };
+                format!("{}:{}{tls}", p.host, p.port)
+            }
+        }
+    }
 }
 
 /// A Redis connection profile.
@@ -90,12 +128,42 @@ impl RedisProfile {
     }
 }
 
+/// An AMQP 1.0 connection profile (ActiveMQ / Amazon MQ / RabbitMQ 4.x). The URL
+/// is `amqp[s]://[user:pass@]host:port`; `tls` selects `amqps://` (Amazon MQ's
+/// :5671 endpoint). Secrets follow the same spec rules as Redis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmqpProfile {
+    pub name: String,
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_amqp_port")]
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Secret spec: `env:VAR`, `keyring[:account]`, `prompt`, or omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: bool,
+}
+
+impl AmqpProfile {
+    /// Parse the profile's password field into a [`SecretSpec`].
+    pub fn password_spec(&self) -> SecretSpec {
+        SecretSpec::parse(self.password.as_deref().unwrap_or(""))
+    }
+}
+
 fn default_host() -> String {
     "127.0.0.1".to_string()
 }
 
 fn default_redis_port() -> u16 {
     6379
+}
+
+fn default_amqp_port() -> u16 {
+    5672
 }
 
 /// Global behavioural settings.
@@ -215,7 +283,9 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.connections.len(), 1);
-        let ConnectionConfig::Redis(profile) = &cfg.connections[0];
+        let ConnectionConfig::Redis(profile) = &cfg.connections[0] else {
+            panic!("expected a redis profile");
+        };
         assert_eq!(profile.name, "local");
         assert_eq!(profile.port, 6380);
         assert_eq!(profile.db, 2);
@@ -226,6 +296,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_amqp_connection() {
+        let text = r#"
+            [[connection]]
+            type = "amqp"
+            name = "aws-mq"
+            host = "b-x.mq.eu-west-1.amazonaws.com"
+            port = 5671
+            username = "admin"
+            password = "env:MQ_PW"
+            tls = true
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.connections.len(), 1);
+        let ConnectionConfig::Amqp(p) = &cfg.connections[0] else {
+            panic!("expected an amqp profile");
+        };
+        assert_eq!(p.name, "aws-mq");
+        assert_eq!(p.port, 5671);
+        assert!(p.tls);
+        assert_eq!(p.password_spec(), SecretSpec::Env("MQ_PW".into()));
+        assert_eq!(cfg.connections[0].kind_label(), "amqp");
+        assert_eq!(
+            cfg.connections[0].endpoint(),
+            "b-x.mq.eu-west-1.amazonaws.com:5671 tls"
+        );
+    }
+
+    #[test]
+    fn applies_defaults_for_minimal_amqp_profile() {
+        let text = r#"
+            [[connection]]
+            type = "amqp"
+            name = "local"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        let ConnectionConfig::Amqp(p) = &cfg.connections[0] else {
+            panic!("expected an amqp profile");
+        };
+        assert_eq!(p.host, "127.0.0.1");
+        assert_eq!(p.port, 5672, "AMQP defaults to 5672");
+        assert!(!p.tls);
+        assert_eq!(p.password_spec(), SecretSpec::None);
+    }
+
+    #[test]
     fn applies_defaults_for_minimal_profile() {
         let text = r#"
             [[connection]]
@@ -233,7 +348,9 @@ mod tests {
             name = "min"
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
-        let ConnectionConfig::Redis(profile) = &cfg.connections[0];
+        let ConnectionConfig::Redis(profile) = &cfg.connections[0] else {
+            panic!("expected a redis profile");
+        };
         assert_eq!(profile.host, "127.0.0.1");
         assert_eq!(profile.port, 6379);
         assert_eq!(profile.db, 0);
@@ -258,7 +375,9 @@ mod tests {
         let text = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
         assert_eq!(back.connections.len(), 1);
-        let ConnectionConfig::Redis(profile) = &back.connections[0];
+        let ConnectionConfig::Redis(profile) = &back.connections[0] else {
+            panic!("expected a redis profile");
+        };
         assert_eq!(profile.name, "prod");
         assert!(profile.tls);
         assert_eq!(profile.username.as_deref(), Some("default"));

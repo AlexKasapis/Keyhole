@@ -47,16 +47,23 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-w
 base64 = "0.22"
 bytes = "1"
 percent-encoding = "2.3.2"
+# AMQP 1.0 client (Phase 4): ActiveMQ / Amazon MQ / RabbitMQ-4.x. `rustls`
+# enables `amqps://` for Amazon MQ's TLS endpoint (:5671). Optional so the
+# minimal headless/musl build can drop it (and its TLS-crypto C dependencies).
+fe2o3-amqp = { version = "0.15.1", features = ["rustls"], optional = true }
 
 [dev-dependencies]
 # Snapshot testing of rendered TUI frames (see src/ui — snapshot module).
 insta = "1"
 
 [features]
-default = ["keyring"]
+default = ["keyring", "amqp"]
 # OS keyring support. Disable for headless/musl builds (env-var secrets only):
 #   cargo build --no-default-features
 keyring = ["dep:keyring"]
+# AMQP 1.0 broker support (Redis is always built in). Off in the minimal
+# headless/musl build, whose rustls/aws-lc TLS stack is awkward to link static.
+amqp = ["dep:fe2o3-amqp"]
 # Gate integration tests that require a live broker (e.g. dockerized Redis).
 integration = []
 

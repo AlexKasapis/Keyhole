@@ -21,12 +21,14 @@ use tokio_util::task::TaskTracker;
 
 use crate::app::action::Action;
 use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle};
+#[cfg(feature = "amqp")]
+use crate::broker::amqp::AmqpConnection;
 use crate::broker::redis::RedisConnection;
 use crate::broker::{
-    BrokerConnection, BrokerEvent, BrowsePage, BrowseReq, ConnId, InspectReq, ServerStats, SubSpec,
-    ValueType, ValueView,
+    BrokerConnection, BrokerEvent, BrokerKind, BrowsePage, BrowseReq, Capabilities, ConnId,
+    InspectReq, ServerStats, SubSpec, ValueType, ValueView,
 };
-use crate::config::{self, Config, ConnectionConfig, RedisProfile};
+use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RedisProfile};
 use crate::event::AppEvent;
 use crate::recording::RecordingStatus;
 use crate::theme::Theme;
@@ -59,7 +61,7 @@ pub struct App {
 
     // UI state (read by `crate::ui`).
     pub(crate) theme: Theme,
-    pub(crate) profiles: Vec<RedisProfile>,
+    pub(crate) profiles: Vec<ConnectionConfig>,
     pub(crate) profile_state: ListState,
     pub(crate) connections: Vec<Connection>,
     pub(crate) active: Option<usize>,
@@ -87,13 +89,7 @@ impl App {
         cancel: CancellationToken,
         connect_on_start: Option<String>,
     ) -> Self {
-        let profiles: Vec<RedisProfile> = config
-            .connections
-            .iter()
-            .map(|c| match c {
-                ConnectionConfig::Redis(p) => p.clone(),
-            })
-            .collect();
+        let profiles: Vec<ConnectionConfig> = config.connections.clone();
         let preview_bytes = config.settings.value_preview_bytes;
         let scan_count = config.settings.scan_count;
         let tail_scrollback = config.settings.tail_scrollback;
@@ -139,7 +135,7 @@ impl App {
     /// Kick off an auto-connect requested via `--connect`.
     pub fn on_start(&mut self) {
         if let Some(name) = self.pending_connect.take() {
-            match self.profiles.iter().find(|p| p.name == name).cloned() {
+            match self.profiles.iter().find(|p| p.name() == name).cloned() {
                 Some(profile) => self.start_connect(profile, None),
                 None => self.set_status(format!("no connection profile named '{name}'"), true),
             }
@@ -229,7 +225,11 @@ impl App {
             conn.stat_ticks += 1;
             if conn.stat_ticks >= STATS_REFRESH_TICKS {
                 conn.stat_ticks = 0;
-                conn.handle.send(ConnCommand::RefreshStats);
+                // Only brokers with a dashboard answer RefreshStats; others would
+                // just surface an "unsupported" error each tick.
+                if conn.caps.can_dashboard {
+                    conn.handle.send(ConnCommand::RefreshStats);
+                }
                 // Liveness check; a failure surfaces as Disconnected.
                 conn.handle.send(ConnCommand::Ping);
             }
@@ -240,12 +240,18 @@ impl App {
         let conn = Connection::new(handle);
         let id = conn.id;
         let name = conn.name.clone();
+        let caps = conn.caps.clone();
         self.connections.push(conn);
         self.active = Some(self.connections.len() - 1);
-        self.screen = Screen::Browser;
+        self.screen = initial_screen(&caps);
         self.set_status(format!("Connected to {name}"), false);
-        self.start_browse(id, true);
-        self.request_stats(id);
+        // Kick off the broker-appropriate first load.
+        if caps.can_browse {
+            self.start_browse(id, true);
+        }
+        if caps.can_dashboard {
+            self.request_stats(id);
+        }
     }
 
     fn on_disconnected(&mut self, id: ConnId, reason: String) {
@@ -446,15 +452,21 @@ impl App {
                 self.mode = InputMode::Form;
             }
             Action::GotoConnections => self.screen = Screen::Connections,
-            Action::GotoBrowser => {
-                if self.active.is_some() {
-                    self.screen = Screen::Browser;
-                }
-            }
+            Action::GotoBrowser => match self.active_conn().map(|c| c.caps.can_browse) {
+                Some(true) => self.screen = Screen::Browser,
+                Some(false) => self.set_status("this broker has no key browser".to_string(), true),
+                None => {}
+            },
             Action::GotoDashboard => {
-                if let Some(id) = self.active_id() {
-                    self.screen = Screen::Dashboard;
-                    self.request_stats(id);
+                match self.active_conn().map(|c| (c.id, c.caps.can_dashboard)) {
+                    Some((id, true)) => {
+                        self.screen = Screen::Dashboard;
+                        self.request_stats(id);
+                    }
+                    Some((_, false)) => {
+                        self.set_status("this broker has no dashboard".to_string(), true)
+                    }
+                    None => {}
                 }
             }
             Action::GotoRealtime => {
@@ -466,13 +478,13 @@ impl App {
                 self.screen = Screen::Recordings;
                 self.scan_recordings();
             }
-            Action::GotoConsole => {
-                if self.active.is_some() {
-                    self.screen = Screen::Console;
-                } else {
-                    self.set_status("connect first to use the console".to_string(), true);
+            Action::GotoConsole => match self.active_conn().map(|c| c.caps.can_console) {
+                Some(true) => self.screen = Screen::Console,
+                Some(false) => {
+                    self.set_status("this broker has no command console".to_string(), true)
                 }
-            }
+                None => self.set_status("connect first to use the console".to_string(), true),
+            },
             Action::StartFilter => {
                 if self.screen == Screen::Browser && self.active.is_some() {
                     self.filter.clear();
@@ -595,12 +607,19 @@ impl App {
             }
             KeyCode::Char(c) => {
                 if let Some(form) = &mut self.form {
-                    if form.focus == ConnForm::TLS_FOCUS {
-                        if matches!(c, ' ' | 't' | 'f' | 'y' | 'n') {
-                            form.tls = !form.tls;
+                    match form.focus {
+                        ConnForm::TLS_FOCUS => {
+                            if matches!(c, ' ' | 't' | 'f' | 'y' | 'n') {
+                                form.tls = !form.tls;
+                            }
                         }
-                    } else {
-                        form.fields[form.focus].push(c);
+                        ConnForm::KIND_FOCUS => {
+                            if c == ' ' {
+                                form.toggle_kind();
+                            }
+                        }
+                        f if f < ConnForm::FIELD_COUNT => form.fields[f].push(c),
+                        _ => {}
                     }
                 }
             }
@@ -724,15 +743,19 @@ impl App {
         let Some(profile) = self.profiles.get(sel).cloned() else {
             return;
         };
-        if let Some(idx) = self.connections.iter().position(|c| c.name == profile.name) {
+        if let Some(idx) = self
+            .connections
+            .iter()
+            .position(|c| c.name == profile.name())
+        {
             self.active = Some(idx);
-            self.screen = Screen::Browser;
+            self.screen = initial_screen(&self.connections[idx].caps);
             return;
         }
         self.start_connect(profile, None);
     }
 
-    fn start_connect(&mut self, profile: RedisProfile, override_password: Option<String>) {
+    fn start_connect(&mut self, profile: ConnectionConfig, override_password: Option<String>) {
         let id = ConnId(self.next_id);
         self.next_id += 1;
         let events = self.events.clone();
@@ -740,13 +763,18 @@ impl App {
         let cancel = self.cancel.clone();
         let preview = self.preview_bytes;
         let recordings_dir = self.recordings_dir.clone();
-        let name = profile.name.clone();
+        let name = profile.name().to_string();
         self.set_status(format!("Connecting to {name}…"), false);
 
         tokio::spawn(async move {
+            // Resolve the secret off the render thread (keyring access can block).
+            let (spec, account) = match &profile {
+                ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
+                ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
+            };
             let password = match override_password {
                 Some(pw) => Some(pw),
-                None => match resolve_password(&profile).await {
+                None => match resolve_secret(spec, account).await {
                     Ok(pw) => pw,
                     Err(e) => {
                         let _ = events
@@ -760,8 +788,22 @@ impl App {
                     }
                 },
             };
-            let conn: Box<dyn BrokerConnection> =
-                Box::new(RedisConnection::new(profile, password, preview));
+            let conn: Box<dyn BrokerConnection> = match profile {
+                ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview)),
+                #[cfg(feature = "amqp")]
+                ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
+                #[cfg(not(feature = "amqp"))]
+                ConnectionConfig::Amqp(_) => {
+                    let _ = events
+                        .send(AppEvent::ConnError {
+                            id,
+                            context: "connect".to_string(),
+                            error: "AMQP support is not compiled in this build".to_string(),
+                        })
+                        .await;
+                    return;
+                }
+            };
             match spawn_connection(
                 id,
                 name,
@@ -812,10 +854,6 @@ impl App {
             Ok(p) => p,
             Err(_) => return self.form_error("port must be a number 0-65535"),
         };
-        let db: u32 = match form.fields[3].trim().parse() {
-            Ok(d) => d,
-            Err(_) => return self.form_error("db must be a number"),
-        };
         let username = {
             let u = form.fields[4].trim();
             if u.is_empty() {
@@ -827,20 +865,34 @@ impl App {
         let (saved_spec, session_password) = classify_password(form.fields[5].trim());
         let tls = form.tls;
 
-        let profile = RedisProfile {
-            name,
-            host,
-            port,
-            db,
-            username,
-            password: saved_spec,
-            tls,
+        let profile = match form.kind {
+            BrokerKind::Redis => {
+                let db: u32 = match form.fields[3].trim().parse() {
+                    Ok(d) => d,
+                    Err(_) => return self.form_error("db must be a number"),
+                };
+                ConnectionConfig::Redis(RedisProfile {
+                    name,
+                    host,
+                    port,
+                    db,
+                    username,
+                    password: saved_spec,
+                    tls,
+                })
+            }
+            BrokerKind::Amqp => ConnectionConfig::Amqp(AmqpProfile {
+                name,
+                host,
+                port,
+                username,
+                password: saved_spec,
+                tls,
+            }),
         };
 
         // Persist (best effort) and keep the in-memory profile list in sync.
-        self.config
-            .connections
-            .push(ConnectionConfig::Redis(profile.clone()));
+        self.config.connections.push(profile.clone());
         match config::save(&self.config_path, &self.config) {
             Ok(()) => self.profiles.push(profile.clone()),
             Err(e) => {
@@ -1310,11 +1362,22 @@ impl App {
     }
 }
 
-/// Resolve a profile's secret off the render thread (keyring access can block).
-async fn resolve_password(profile: &RedisProfile) -> anyhow::Result<Option<String>> {
-    let spec = profile.password_spec();
-    let account = profile.name.clone();
+/// Resolve a secret spec off the render thread (keyring access can block).
+async fn resolve_secret(
+    spec: config::SecretSpec,
+    account: String,
+) -> anyhow::Result<Option<String>> {
     tokio::task::spawn_blocking(move || config::resolve_secret(&spec, &account)).await?
+}
+
+/// The screen to show a freshly-focused connection: the key browser when the
+/// broker has one (Redis), else the realtime tails (AMQP).
+fn initial_screen(caps: &Capabilities) -> Screen {
+    if caps.can_browse {
+        Screen::Browser
+    } else {
+        Screen::Realtime
+    }
 }
 
 /// Decide whether the form's password field is a *spec* (persisted) or a
@@ -2257,7 +2320,9 @@ mod tests {
         assert!(app.form.is_none());
         assert_eq!(app.mode, InputMode::Normal);
         assert_eq!(app.profiles.len(), 1);
-        let p = &app.profiles[0];
+        let ConnectionConfig::Redis(p) = &app.profiles[0] else {
+            panic!("expected a redis profile");
+        };
         assert_eq!(p.name, "c1");
         assert_eq!(p.host, "127.0.0.1", "blank host defaults");
         assert_eq!(p.port, 6399);
@@ -2378,6 +2443,79 @@ mod tests {
             Some("notifications disabled")
         );
         assert!(app.status.as_ref().unwrap().is_error);
+    }
+
+    // -- AMQP / capabilities -------------------------------------------------
+
+    /// Attach a live AMQP-capability mock connection.
+    async fn connect_amqp(app: &mut App, id: u32, name: &str) -> ConnId {
+        let handle = mock::amqp_handle(id, name).await;
+        app.handle_event(AppEvent::Connected { handle });
+        ConnId(id)
+    }
+
+    #[tokio::test]
+    async fn amqp_connection_opens_realtime_not_browser() {
+        let (mut app, _rx) = test_app();
+        connect_amqp(&mut app, 1, "mq").await;
+        assert_eq!(
+            app.screen,
+            Screen::Realtime,
+            "AMQP has no browser, so it lands on realtime"
+        );
+        assert_eq!(app.active_conn().unwrap().label(), "mq [amqp]");
+    }
+
+    #[tokio::test]
+    async fn amqp_capabilities_gate_redis_only_screens() {
+        let (mut app, _rx) = test_app();
+        connect_amqp(&mut app, 1, "mq").await;
+        for (action, needle) in [
+            (Action::GotoBrowser, "no key browser"),
+            (Action::GotoDashboard, "no dashboard"),
+            (Action::GotoConsole, "no command console"),
+        ] {
+            app.screen = Screen::Realtime;
+            app.apply(action);
+            assert_eq!(app.screen, Screen::Realtime, "{action:?} must be blocked");
+            assert!(
+                app.status.as_ref().unwrap().message.contains(needle),
+                "expected '{needle}' for {action:?}, got {:?}",
+                app.status.as_ref().unwrap().message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn amqp_tails_a_topic() {
+        let (mut app, _rx) = test_app();
+        connect_amqp(&mut app, 1, "mq").await;
+        app.start_subscribe(SubSpec::Topic("events".into()));
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(conn.subs[0].spec, SubSpec::Topic("events".into()));
+        assert_eq!(conn.subs[0].label, "topic:events");
+    }
+
+    #[tokio::test]
+    async fn amqp_tick_skips_stats_refresh() {
+        // A non-dashboard broker must not be pinged for stats each tick.
+        let (mut app, mut rx) = test_app();
+        connect_amqp(&mut app, 1, "mq").await;
+        // Drain the connect-time events.
+        while rx.try_recv().is_ok() {}
+        app.connections[0].stat_ticks = STATS_REFRESH_TICKS - 1;
+        app.on_tick();
+        // The mock's stats() succeeds, so a RefreshStats would surface as
+        // StatsUpdated. Give the actor a moment, then assert none arrived.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let mut saw_stats = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(ev, AppEvent::StatsUpdated { .. }) {
+                saw_stats = true;
+            }
+        }
+        assert!(!saw_stats, "AMQP tick must not request stats");
     }
 
     // -- console -------------------------------------------------------------

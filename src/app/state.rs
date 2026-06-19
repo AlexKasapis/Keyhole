@@ -8,7 +8,7 @@ use time::OffsetDateTime;
 
 use crate::broker::actor::ConnHandle;
 use crate::broker::{
-    BrokerEvent, Capabilities, ConnId, EntryMeta, ServerStats, SubSpec, ValueView,
+    BrokerEvent, BrokerKind, Capabilities, ConnId, EntryMeta, ServerStats, SubSpec, ValueView,
 };
 
 /// Which top-level screen is showing.
@@ -282,9 +282,13 @@ impl Connection {
         self.subs.iter_mut().find(|s| s.sub_id == sub_id)
     }
 
-    /// A short `name (dbN)` label for the status bar.
+    /// A short status-bar label: `name (dbN)` for Redis (database-scoped),
+    /// `name [amqp]` for brokers where a database index is meaningless.
     pub fn label(&self) -> String {
-        format!("{} (db{})", self.name, self.db)
+        match self.caps.kind {
+            BrokerKind::Redis => format!("{} (db{})", self.name, self.db),
+            BrokerKind::Amqp => format!("{} [{}]", self.name, self.caps.kind.label()),
+        }
     }
 }
 
@@ -294,6 +298,8 @@ impl Connection {
 pub struct ConnForm {
     pub fields: [String; ConnForm::FIELD_COUNT],
     pub tls: bool,
+    /// Which broker the new connection talks to (cycled with the Kind toggle).
+    pub kind: BrokerKind,
     pub focus: usize,
     pub error: Option<String>,
 }
@@ -302,8 +308,10 @@ impl ConnForm {
     pub const FIELD_COUNT: usize = 6;
     /// Index of the synthetic "TLS toggle" focus position.
     pub const TLS_FOCUS: usize = Self::FIELD_COUNT;
-    /// Total number of focusable positions (fields + TLS toggle).
-    pub const FOCUS_COUNT: usize = Self::FIELD_COUNT + 1;
+    /// Index of the synthetic "broker kind toggle" focus position.
+    pub const KIND_FOCUS: usize = Self::FIELD_COUNT + 1;
+    /// Total number of focusable positions (fields + TLS + kind toggles).
+    pub const FOCUS_COUNT: usize = Self::FIELD_COUNT + 2;
 
     pub const LABELS: [&'static str; Self::FIELD_COUNT] =
         ["Name", "Host", "Port", "DB", "Username", "Password"];
@@ -319,9 +327,18 @@ impl ConnForm {
                 String::new(),
             ],
             tls: false,
+            kind: BrokerKind::Redis,
             focus: 0,
             error: None,
         }
+    }
+
+    /// Toggle between the Redis and AMQP broker kinds.
+    pub fn toggle_kind(&mut self) {
+        self.kind = match self.kind {
+            BrokerKind::Redis => BrokerKind::Amqp,
+            BrokerKind::Amqp => BrokerKind::Redis,
+        };
     }
 
     pub fn focus_next(&mut self) {

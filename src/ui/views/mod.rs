@@ -8,7 +8,7 @@ use ratatui::Frame;
 use time::OffsetDateTime;
 
 use crate::app::{App, ConnForm, RecordState, SubState};
-use crate::broker::{BrokerEvent, Payload, Ttl, ValueView};
+use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
 
 /// Connections screen: the list of saved profiles.
@@ -35,18 +35,16 @@ pub fn connections(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
         .profiles
         .iter()
         .map(|p| {
-            let dot = if app.is_connected(&p.name) {
+            let dot = if app.is_connected(p.name()) {
                 "●"
             } else {
                 "○"
             };
-            let db = if p.db > 0 {
-                format!("/{}", p.db)
-            } else {
-                String::new()
-            };
-            let tls = if p.tls { " tls" } else { "" };
-            ListItem::new(format!("{dot} {}   {}:{}{db}{tls}", p.name, p.host, p.port))
+            ListItem::new(Line::from(vec![
+                Span::raw(format!("{dot} {}  ", p.name())),
+                Span::styled(format!("[{}] ", p.kind_label()), theme.dim),
+                Span::raw(p.endpoint()),
+            ]))
         })
         .collect();
 
@@ -604,7 +602,30 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::raw(if form.tls { "[x]" } else { "[ ]" }),
         Span::styled("  (space toggles)", theme.dim),
     ]));
+    let kind_focused = form.focus == ConnForm::KIND_FOCUS;
+    let kind = match form.kind {
+        BrokerKind::Redis => "redis",
+        BrokerKind::Amqp => "amqp",
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:>9}: ", "Kind"),
+            if kind_focused {
+                theme.accent
+            } else {
+                theme.dim
+            },
+        ),
+        Span::raw(format!("[{kind}]")),
+        Span::styled("  (space switches redis/amqp)", theme.dim),
+    ]));
     lines.push(Line::from(""));
+    if matches!(form.kind, BrokerKind::Amqp) {
+        lines.push(Line::styled(
+            "AMQP: DB is ignored; port is 5672 (amqp) or 5671 (amqps/TLS).",
+            theme.dim,
+        ));
+    }
     lines.push(Line::styled(
         "Password: env:VAR · keyring · prompt · or a literal (session only)",
         theme.dim,

@@ -27,10 +27,12 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::app::App;
+#[cfg(feature = "amqp")]
+use crate::broker::amqp::AmqpConnection;
 use crate::broker::redis::RedisConnection;
 use crate::broker::{BrokerConnection, SubSpec};
 use crate::cli::{Cli, Command};
-use crate::config::{Config, ConnectionConfig, RedisProfile};
+use crate::config::{Config, ConnectionConfig};
 use crate::event::AppEvent;
 use crate::recording::{RecordSink, Recorder};
 use crate::tui::Tui;
@@ -174,20 +176,36 @@ async fn run_record(
     source: &str,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
-    let profile = find_profile(&config, profile_name)
+    let profile = find_connection(&config, profile_name)
         .ok_or_else(|| anyhow!("no connection profile named '{profile_name}'"))?;
-    let spec = SubSpec::parse(source, profile.db)?;
+    // The stream/keyspace default db only applies to Redis; AMQP is db-agnostic.
+    let default_db = match &profile {
+        ConnectionConfig::Redis(p) => p.db,
+        ConnectionConfig::Amqp(_) => 0,
+    };
+    let spec = SubSpec::parse(source, default_db)?;
 
-    let password = resolve_password(&profile).await?;
+    let (secret_spec, account) = match &profile {
+        ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
+        ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
+    };
+    let password = resolve_secret(secret_spec, account).await?;
     let preview = config.settings.value_preview_bytes;
-    let mut conn = RedisConnection::new(profile.clone(), password, preview);
+    let name = profile.name().to_string();
+    let mut conn: Box<dyn BrokerConnection> = match profile {
+        ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview)),
+        #[cfg(feature = "amqp")]
+        ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
+        #[cfg(not(feature = "amqp"))]
+        ConnectionConfig::Amqp(_) => anyhow::bail!("AMQP support is not compiled in this build"),
+    };
     conn.connect().await.context("connecting")?;
     let mut stream = conn.subscribe(spec.clone()).await.context("subscribing")?;
 
-    let sink = RecordSink::create(&dir, &profile.name, &spec, OffsetDateTime::now_utc())
+    let sink = RecordSink::create(&dir, &name, &spec, OffsetDateTime::now_utc())
         .context("opening recording file")?;
     let path = sink.path().to_path_buf();
-    let mut recorder = Recorder::new(sink, profile.name.clone(), &spec);
+    let mut recorder = Recorder::new(sink, name, &spec);
     eprintln!("recording {} → {}", spec.label(), path.display());
     eprintln!("(Ctrl-C to stop)");
 
@@ -220,18 +238,20 @@ async fn run_record(
     Ok(())
 }
 
-/// Look up a Redis profile by name.
-fn find_profile(config: &Config, name: &str) -> Option<RedisProfile> {
-    config.connections.iter().find_map(|c| match c {
-        ConnectionConfig::Redis(p) if p.name == name => Some(p.clone()),
-        _ => None,
-    })
+/// Look up a saved connection (any broker) by name.
+fn find_connection(config: &Config, name: &str) -> Option<ConnectionConfig> {
+    config
+        .connections
+        .iter()
+        .find(|c| c.name() == name)
+        .cloned()
 }
 
-/// Resolve a profile's secret off the async runtime (keyring access can block).
-async fn resolve_password(profile: &RedisProfile) -> anyhow::Result<Option<String>> {
-    let spec = profile.password_spec();
-    let account = profile.name.clone();
+/// Resolve a secret spec off the async runtime (keyring access can block).
+async fn resolve_secret(
+    spec: config::SecretSpec,
+    account: String,
+) -> anyhow::Result<Option<String>> {
     tokio::task::spawn_blocking(move || config::resolve_secret(&spec, &account)).await?
 }
 
@@ -240,7 +260,7 @@ mod tests {
     use super::*;
 
     fn redis(name: &str) -> ConnectionConfig {
-        ConnectionConfig::Redis(RedisProfile {
+        ConnectionConfig::Redis(crate::config::RedisProfile {
             name: name.into(),
             host: "127.0.0.1".into(),
             port: 6379,
@@ -251,19 +271,35 @@ mod tests {
         })
     }
 
+    fn amqp(name: &str) -> ConnectionConfig {
+        ConnectionConfig::Amqp(crate::config::AmqpProfile {
+            name: name.into(),
+            host: "127.0.0.1".into(),
+            port: 5672,
+            username: None,
+            password: None,
+            tls: false,
+        })
+    }
+
     #[test]
-    fn find_profile_matches_by_name() {
+    fn find_connection_matches_any_broker_by_name() {
         let config = Config {
-            connections: vec![redis("a"), redis("b")],
+            connections: vec![redis("a"), amqp("mq")],
             ..Default::default()
         };
         assert_eq!(
-            find_profile(&config, "b").map(|p| p.name).as_deref(),
-            Some("b")
+            find_connection(&config, "a").map(|c| c.name().to_string()),
+            Some("a".to_string())
         );
-        assert!(find_profile(&config, "missing").is_none());
+        // AMQP profiles are found too, not just Redis.
+        assert_eq!(
+            find_connection(&config, "mq").map(|c| c.kind_label()),
+            Some("amqp")
+        );
+        assert!(find_connection(&config, "missing").is_none());
         assert!(
-            find_profile(&Config::default(), "a").is_none(),
+            find_connection(&Config::default(), "a").is_none(),
             "empty config finds nothing"
         );
     }

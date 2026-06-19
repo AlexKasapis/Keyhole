@@ -21,6 +21,10 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      activemq:
+        image: apache/activemq-classic:latest
+        ports:
+          - 5672:5672
     steps:
       - uses: actions/checkout@v4
 
@@ -46,9 +50,19 @@ jobs:
         # The keyspace-monitor integration test needs server-side notifications.
         run: redis-cli -h 127.0.0.1 -p 6379 config set notify-keyspace-events KEA
 
+      - name: Wait for ActiveMQ
+        # ActiveMQ boots slowly; wait for its AMQP port before integration tests.
+        run: |
+          for i in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/5672) 2>/dev/null && exit 0
+            sleep 2
+          done
+          echo "ActiveMQ did not become ready" >&2; exit 1
+
       - name: Integration tests
         env:
           BROKERTUI_TEST_REDIS_PORT: "6379"
+          BROKERTUI_TEST_AMQP_PORT: "5672"
         run: cargo test --features integration -- --include-ignored
 
   # Headless, statically-linked build (env-var secrets only; no keyring backend).

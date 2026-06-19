@@ -29,9 +29,11 @@ lint:
 test:
     cargo test
 
-# Integration tests against a dockerized Redis.
+# Integration tests against dockerized Redis + ActiveMQ.
 test-int:
-    docker compose up -d redis
+    docker compose up -d redis activemq
+    # Wait for ActiveMQ's AMQP port to start accepting connections (it boots slowly).
+    bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/${BROKERTUI_ACTIVEMQ_PORT:-5674}) 2>/dev/null && break; sleep 2; done'
     -cargo test --features integration -- --include-ignored
     docker compose down
 

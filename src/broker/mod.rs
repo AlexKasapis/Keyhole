@@ -7,6 +7,8 @@
 //! enum variants when a second broker arrives.
 
 pub mod actor;
+#[cfg(feature = "amqp")]
+pub mod amqp;
 pub mod redis;
 
 use std::collections::BTreeMap;
@@ -21,12 +23,64 @@ use time::OffsetDateTime;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnId(pub u32);
 
-/// What a connection can do — drives which views/actions the UI offers.
-/// (A broker-kind tag returns in Phase 4 when a second broker exists.)
+/// Which broker a connection talks to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerKind {
+    Redis,
+    Amqp,
+}
+
+impl BrokerKind {
+    /// Lowercase tag for display and the recording envelope.
+    pub fn label(self) -> &'static str {
+        match self {
+            BrokerKind::Redis => "redis",
+            BrokerKind::Amqp => "amqp",
+        }
+    }
+}
+
+/// What a connection can do — drives which views/actions the UI offers, so a
+/// broker that lacks a key browser or dashboard simply doesn't surface them.
 #[derive(Debug, Clone)]
 pub struct Capabilities {
+    pub kind: BrokerKind,
     /// Number of selectable databases (Redis); 1 when not applicable.
     pub databases: u32,
+    /// Key/destination browser (Browser screen).
+    pub can_browse: bool,
+    /// Server statistics (Dashboard screen).
+    pub can_dashboard: bool,
+    /// Read-only command console (Console screen).
+    pub can_console: bool,
+}
+
+impl Capabilities {
+    /// Redis: full browse + dashboard + console over `databases` databases.
+    pub fn redis(databases: u32) -> Self {
+        Self {
+            kind: BrokerKind::Redis,
+            databases,
+            can_browse: true,
+            can_dashboard: true,
+            can_console: true,
+        }
+    }
+
+    /// AMQP (v1): realtime tail + record only — no key browser, dashboard, or
+    /// command console (the broker model and the read-only mandate don't fit
+    /// them yet). Only constructed by the AMQP impl / tests, so it is dead code
+    /// in a build without the `amqp` feature.
+    #[cfg_attr(not(feature = "amqp"), allow(dead_code))]
+    pub fn amqp() -> Self {
+        Self {
+            kind: BrokerKind::Amqp,
+            databases: 1,
+            can_browse: false,
+            can_dashboard: false,
+            can_console: false,
+        }
+    }
 }
 
 /// The Redis value type of a key (and the "missing" / "unknown" cases).
@@ -215,6 +269,11 @@ pub enum SubSpec {
     Keyspace { db: u32 },
     /// Every command the server processes (`MONITOR`). Server-wide (all dbs).
     Monitor,
+    /// An AMQP 1.0 topic — a non-destructive live subscription (each subscriber
+    /// gets its own copy, so observing never steals messages). The primary AMQP tail.
+    Topic(String),
+    /// An AMQP 1.0 queue address.
+    Queue(String),
 }
 
 impl SubSpec {
@@ -251,8 +310,11 @@ impl SubSpec {
                 })?;
                 Ok(SubSpec::Keyspace { db })
             }
+            "topic" => Ok(SubSpec::Topic(target.to_string())),
+            "queue" => Ok(SubSpec::Queue(target.to_string())),
             other => anyhow::bail!(
-                "unknown source kind `{other}` (use pubsub/psub/stream/keyspace/monitor)"
+                "unknown source kind `{other}` \
+                 (redis: pubsub/psub/stream/keyspace/monitor · amqp: topic/queue)"
             ),
         }
     }
@@ -265,13 +327,17 @@ impl SubSpec {
             SubSpec::Stream { .. } => "stream",
             SubSpec::Keyspace { .. } => "keyspace",
             SubSpec::Monitor => "monitor",
+            SubSpec::Topic(_) => "amqp-topic",
+            SubSpec::Queue(_) => "amqp-queue",
         }
     }
 
-    /// The target name (channel, pattern, stream key, `dbN`, or `all`).
+    /// The target name (channel, pattern, stream key, `dbN`, `all`, or AMQP address).
     pub fn target(&self) -> String {
         match self {
-            SubSpec::Channel(s) | SubSpec::Pattern(s) => s.clone(),
+            SubSpec::Channel(s) | SubSpec::Pattern(s) | SubSpec::Topic(s) | SubSpec::Queue(s) => {
+                s.clone()
+            }
             SubSpec::Stream { key, .. } => key.clone(),
             SubSpec::Keyspace { db } => format!("db{db}"),
             SubSpec::Monitor => "all".to_string(),
@@ -286,6 +352,8 @@ impl SubSpec {
             SubSpec::Channel(_) => format!("pubsub:{}", self.target()),
             SubSpec::Pattern(_) => format!("psub:{}", self.target()),
             SubSpec::Stream { .. } => format!("stream:{}", self.target()),
+            SubSpec::Topic(_) => format!("topic:{}", self.target()),
+            SubSpec::Queue(_) => format!("queue:{}", self.target()),
         }
     }
 }
@@ -401,14 +469,21 @@ pub trait BrokerConnection: Send {
     /// Cheap liveness check.
     async fn ping(&mut self) -> anyhow::Result<()>;
 
-    /// List a page of entries.
-    async fn browse(&mut self, req: BrowseReq) -> anyhow::Result<BrowsePage>;
+    /// List a page of entries. Default: unsupported (gated off via
+    /// [`Capabilities::can_browse`], so a broker without a browser skips it).
+    async fn browse(&mut self, _req: BrowseReq) -> anyhow::Result<BrowsePage> {
+        anyhow::bail!("this broker does not support browsing")
+    }
 
-    /// Inspect a single entry's value.
-    async fn inspect(&mut self, req: InspectReq) -> anyhow::Result<ValueView>;
+    /// Inspect a single entry's value. Default: unsupported.
+    async fn inspect(&mut self, _req: InspectReq) -> anyhow::Result<ValueView> {
+        anyhow::bail!("this broker does not support inspecting values")
+    }
 
-    /// Fetch server statistics for the dashboard.
-    async fn stats(&mut self) -> anyhow::Result<ServerStats>;
+    /// Fetch server statistics for the dashboard. Default: unsupported.
+    async fn stats(&mut self) -> anyhow::Result<ServerStats> {
+        anyhow::bail!("this broker does not support a stats dashboard")
+    }
 
     /// Open a live tail for `spec` on a *dedicated* socket and return its event
     /// stream. The returned stream owns that socket, so it is `'static` and the
@@ -504,10 +579,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_amqp_specs() {
+        assert_eq!(
+            SubSpec::parse("topic:events", 0).unwrap(),
+            SubSpec::Topic("events".into())
+        );
+        assert_eq!(
+            SubSpec::parse("queue:orders", 0).unwrap(),
+            SubSpec::Queue("orders".into())
+        );
+        // Kind is case-insensitive; address keeps its case.
+        assert_eq!(
+            SubSpec::parse("TOPIC:MyTopic", 0).unwrap(),
+            SubSpec::Topic("MyTopic".into())
+        );
+    }
+
+    #[test]
     fn rejects_bad_specs() {
         assert!(SubSpec::parse("news", 0).is_err()); // no kind
         assert!(SubSpec::parse("pubsub:", 0).is_err()); // empty target
         assert!(SubSpec::parse("bogus:x", 0).is_err()); // unknown kind
+    }
+
+    #[test]
+    fn capabilities_constructors() {
+        let r = Capabilities::redis(16);
+        assert_eq!(r.kind, BrokerKind::Redis);
+        assert_eq!(r.databases, 16);
+        assert!(r.can_browse && r.can_dashboard && r.can_console);
+
+        let a = Capabilities::amqp();
+        assert_eq!(a.kind, BrokerKind::Amqp);
+        assert_eq!(a.databases, 1);
+        assert!(!a.can_browse && !a.can_dashboard && !a.can_console);
+        assert_eq!(BrokerKind::Amqp.label(), "amqp");
+        assert_eq!(BrokerKind::Redis.label(), "redis");
     }
 
     #[test]
@@ -524,6 +631,10 @@ mod tests {
         assert_eq!(SubSpec::Monitor.source_type(), "monitor");
         assert_eq!(SubSpec::Keyspace { db: 2 }.label(), "keyspace:db2");
         assert_eq!(SubSpec::Keyspace { db: 2 }.source_type(), "keyspace");
+        assert_eq!(SubSpec::Topic("e".into()).label(), "topic:e");
+        assert_eq!(SubSpec::Topic("e".into()).source_type(), "amqp-topic");
+        assert_eq!(SubSpec::Queue("q".into()).label(), "queue:q");
+        assert_eq!(SubSpec::Queue("q".into()).source_type(), "amqp-queue");
     }
 
     #[test]
@@ -540,6 +651,8 @@ mod tests {
         );
         assert_eq!(SubSpec::Keyspace { db: 4 }.target(), "db4");
         assert_eq!(SubSpec::Monitor.target(), "all");
+        assert_eq!(SubSpec::Topic("e".into()).target(), "e");
+        assert_eq!(SubSpec::Queue("q".into()).target(), "q");
     }
 
     #[test]
