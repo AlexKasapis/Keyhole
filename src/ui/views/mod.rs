@@ -7,9 +7,9 @@ use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph, Row, Tabl
 use ratatui::Frame;
 use time::OffsetDateTime;
 
-use super::theme::Theme;
 use crate::app::{App, ConnForm, RecordState, SubState};
 use crate::broker::{BrokerEvent, Payload, Ttl, ValueView};
+use crate::theme::Theme;
 
 /// Connections screen: the list of saved profiles.
 pub fn connections(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -361,12 +361,27 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let inner = block.inner(body_area);
     frame.render_widget(block, body_area);
 
-    let height = inner.height as usize;
+    // A keyspace/advisory notice takes a wrapped banner above the events.
+    let events_area = match &sub.notice {
+        Some(notice) => {
+            let [banner, rest] =
+                Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+            frame.render_widget(
+                Paragraph::new(Line::styled(format!("⚠ {notice}"), theme.error))
+                    .wrap(Wrap { trim: true }),
+                banner,
+            );
+            rest
+        }
+        None => inner,
+    };
+
+    let height = events_area.height as usize;
     let len = sub.events.len();
     if len == 0 || height == 0 {
         frame.render_widget(
             Paragraph::new(Line::styled("  waiting for events…", theme.dim)),
-            inner,
+            events_area,
         );
         return;
     }
@@ -377,7 +392,7 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         .filter_map(|i| sub.events.get(i))
         .map(|ev| event_line(ev, theme))
         .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    frame.render_widget(Paragraph::new(lines), events_area);
 }
 
 /// Recordings screen: JSONL files in the recordings directory.
@@ -419,6 +434,141 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .highlight_style(theme.selected)
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
+}
+
+/// Console screen: read-only command output for the active connection, with an
+/// input prompt pinned to the bottom.
+pub fn console(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let Some(conn) = app.active_conn() else {
+        frame.render_widget(
+            Paragraph::new("No active connection. Connect first, then press 'e' for the console.")
+                .style(theme.dim)
+                .block(Block::bordered().border_style(theme.border)),
+            area,
+        );
+        return;
+    };
+    let console = &conn.console;
+
+    let block = Block::bordered()
+        .title(format!(" Console — {} (read-only) ", conn.name))
+        .title_style(theme.heading)
+        .border_style(theme.border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [output_area, prompt_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+
+    // Flatten the executed commands + replies into display lines.
+    let mut lines: Vec<Line> = Vec::new();
+    if console.entries.is_empty() {
+        lines.push(Line::styled("Read-only command console.", theme.dim));
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "Press 'i', type a command, Enter to run. Writes and admin commands are refused.",
+            theme.dim,
+        ));
+        lines.push(Line::styled(
+            "Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1",
+            theme.dim,
+        ));
+    }
+    for entry in &console.entries {
+        lines.push(Line::from(vec![
+            Span::styled("❯ ", theme.accent),
+            Span::styled(entry.command.clone(), theme.heading),
+        ]));
+        let style = if entry.is_error {
+            theme.error
+        } else {
+            theme.success
+        };
+        for line in entry.output.lines() {
+            lines.push(Line::styled(line.to_string(), style));
+        }
+        lines.push(Line::from(""));
+    }
+
+    // Window the output: `scroll` is an offset back from the bottom (0 == tail).
+    let total = lines.len();
+    let height = output_area.height as usize;
+    let max_off = total.saturating_sub(height);
+    let off = (console.scroll as usize).min(max_off);
+    let end = total - off;
+    let start = end.saturating_sub(height);
+    let visible: Vec<Line> = lines[start..end].to_vec();
+    frame.render_widget(
+        Paragraph::new(visible).wrap(Wrap { trim: false }),
+        output_area,
+    );
+
+    // Prompt line: the in-flight command, or the editable input.
+    let prompt = if let Some(pending) = &console.pending {
+        Line::from(vec![
+            Span::styled("… ", theme.accent),
+            Span::styled(format!("running {pending}"), theme.dim),
+        ])
+    } else {
+        let cursor = if app.mode == crate::app::InputMode::Command {
+            "▏"
+        } else {
+            ""
+        };
+        Line::from(vec![
+            Span::styled("❯ ", theme.accent),
+            Span::raw(format!("{}{cursor}", console.input)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(prompt), prompt_area);
+}
+
+/// The command-palette overlay: a filtered, selectable action list.
+pub fn palette(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let Some(state) = app.palette.as_ref() else {
+        return;
+    };
+    let labels = app.palette_labels();
+    let rect = centered(area, 56, 16);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Command palette ")
+        .title_style(theme.heading)
+        .border_style(theme.border_focused);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let [query_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("› ", theme.accent),
+            Span::raw(format!("{}▏", state.query)),
+        ])),
+        query_area,
+    );
+
+    if labels.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled("  no matching commands", theme.dim)),
+            list_area,
+        );
+        return;
+    }
+    let selected = state.selected.min(labels.len() - 1);
+    let items: Vec<ListItem> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, label)| {
+            if i == selected {
+                ListItem::new(Line::styled(format!("▶ {label}"), theme.selected))
+            } else {
+                ListItem::new(Line::from(format!("  {label}")))
+            }
+        })
+        .collect();
+    frame.render_widget(List::new(items), list_area);
 }
 
 /// The add-connection modal overlay.
@@ -472,7 +622,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 /// The help overlay.
 pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let rect = centered(area, 64, 26);
+    let rect = centered(area, 66, 30);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(" Help ")
@@ -480,20 +630,24 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         .border_style(theme.border_focused);
     let lines = vec![
         Line::styled("Navigation", theme.heading),
-        Line::from("  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page"),
-        Line::from("  Enter      connect (on Connections)"),
+        Line::from("  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel scrolls"),
+        Line::from("  Enter connect (Connections)    : command palette"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
-        Line::from("  c connections   b browser   d dashboard   w realtime   R recordings"),
+        Line::from("  c connections  b browser  d dashboard  w realtime  R recordings  e console"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
         Line::from("  / filter    [ ] change DB    n load more    r refresh"),
         Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
         Line::from(""),
-        Line::styled("Realtime", theme.heading),
-        Line::from("  s subscribe   Tab/[ ] switch tab   x stop tail"),
-        Line::from("  ↑↓ scroll history   G follow newest   r toggle recording"),
-        Line::from("  spec: pubsub:ch · psub:ch.* · stream:key"),
+        Line::styled("Realtime tails", theme.heading),
+        Line::from("  s subscribe   m MONITOR   K keyspace   Tab/[ ] switch tab   x stop"),
+        Line::from("  ↑↓ scroll   G follow newest   r toggle recording"),
+        Line::from("  spec: pubsub:ch · psub:ch.* · stream:key · keyspace[:N] · monitor"),
+        Line::from(""),
+        Line::styled("Console (read-only)", theme.heading),
+        Line::from("  i type a command   Enter run   ↑↓ history / scroll   r clear"),
+        Line::from("  writes and admin commands are refused"),
         Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  a add connection    ? toggle help    q / Ctrl-c quit"),

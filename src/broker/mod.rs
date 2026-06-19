@@ -210,13 +210,27 @@ pub enum SubSpec {
     Pattern(String),
     /// A stream key, tailed from `$` (new entries only) within `db`.
     Stream { key: String, db: u32 },
+    /// Keyspace-notification events for a database (`PSUBSCRIBE __keyevent@db__:*`).
+    /// Requires the server's `notify-keyspace-events` to be enabled.
+    Keyspace { db: u32 },
+    /// Every command the server processes (`MONITOR`). Server-wide (all dbs).
+    Monitor,
 }
 
 impl SubSpec {
-    /// Parse a `kind:target` spec — `pubsub:ch`, `psub:ch.*`, `stream:key` —
-    /// using `default_db` for stream targets (which are database-scoped).
+    /// Parse a source spec. Pub/sub-style specs are `kind:target` —
+    /// `pubsub:ch`, `psub:ch.*`, `stream:key`; `default_db` supplies the database
+    /// for `stream`/`keyspace` targets. `monitor` and `keyspace` may be given
+    /// bare (the latter defaults to `default_db`) or as `keyspace:N`.
     pub fn parse(spec: &str, default_db: u32) -> anyhow::Result<Self> {
         let spec = spec.trim();
+        // Targetless / database-defaulted forms.
+        if spec.eq_ignore_ascii_case("monitor") {
+            return Ok(SubSpec::Monitor);
+        }
+        if spec.eq_ignore_ascii_case("keyspace") {
+            return Ok(SubSpec::Keyspace { db: default_db });
+        }
         let (kind, target) = spec
             .split_once(':')
             .ok_or_else(|| anyhow::anyhow!("expected `kind:target`, e.g. `pubsub:news`"))?;
@@ -224,14 +238,22 @@ impl SubSpec {
         if target.is_empty() {
             anyhow::bail!("missing target after `{kind}:`");
         }
-        match kind.trim() {
+        match kind.trim().to_ascii_lowercase().as_str() {
             "pubsub" | "sub" | "channel" => Ok(SubSpec::Channel(target.to_string())),
             "psub" | "psubscribe" | "pattern" => Ok(SubSpec::Pattern(target.to_string())),
             "stream" | "xread" => Ok(SubSpec::Stream {
                 key: target.to_string(),
                 db: default_db,
             }),
-            other => anyhow::bail!("unknown source kind `{other}` (use pubsub/psub/stream)"),
+            "keyspace" => {
+                let db = target.parse::<u32>().map_err(|_| {
+                    anyhow::anyhow!("keyspace db must be a number, e.g. `keyspace:0`")
+                })?;
+                Ok(SubSpec::Keyspace { db })
+            }
+            other => anyhow::bail!(
+                "unknown source kind `{other}` (use pubsub/psub/stream/keyspace/monitor)"
+            ),
         }
     }
 
@@ -241,25 +263,30 @@ impl SubSpec {
             SubSpec::Channel(_) => "pubsub",
             SubSpec::Pattern(_) => "psubscribe",
             SubSpec::Stream { .. } => "stream",
+            SubSpec::Keyspace { .. } => "keyspace",
+            SubSpec::Monitor => "monitor",
         }
     }
 
-    /// The target name (channel, pattern, or stream key).
-    pub fn target(&self) -> &str {
+    /// The target name (channel, pattern, stream key, `dbN`, or `all`).
+    pub fn target(&self) -> String {
         match self {
-            SubSpec::Channel(s) | SubSpec::Pattern(s) => s,
-            SubSpec::Stream { key, .. } => key,
+            SubSpec::Channel(s) | SubSpec::Pattern(s) => s.clone(),
+            SubSpec::Stream { key, .. } => key.clone(),
+            SubSpec::Keyspace { db } => format!("db{db}"),
+            SubSpec::Monitor => "all".to_string(),
         }
     }
 
-    /// A stable `kind:target` label for tabs, filenames, and round-tripping.
+    /// A stable label for tabs, filenames, and round-tripping.
     pub fn label(&self) -> String {
-        let kind = match self {
-            SubSpec::Channel(_) => "pubsub",
-            SubSpec::Pattern(_) => "psub",
-            SubSpec::Stream { .. } => "stream",
-        };
-        format!("{kind}:{}", self.target())
+        match self {
+            SubSpec::Monitor => "monitor".to_string(),
+            SubSpec::Keyspace { db } => format!("keyspace:db{db}"),
+            SubSpec::Channel(_) => format!("pubsub:{}", self.target()),
+            SubSpec::Pattern(_) => format!("psub:{}", self.target()),
+            SubSpec::Stream { .. } => format!("stream:{}", self.target()),
+        }
     }
 }
 
@@ -388,6 +415,20 @@ pub trait BrokerConnection: Send {
     /// actor's main connection is untouched. Takes `&mut self` (not `&self`) so
     /// the actor can hold it across the await without requiring `Sync`.
     async fn subscribe(&mut self, spec: SubSpec) -> anyhow::Result<BrokerEventStream>;
+
+    /// An optional, non-fatal advisory shown when a tail for `spec` is opened —
+    /// e.g. that keyspace notifications are disabled, so the tail will stay
+    /// silent. Returns `None` when there is nothing to flag. Default: no notice.
+    async fn tail_notice(&mut self, _spec: &SubSpec) -> Option<String> {
+        None
+    }
+
+    /// Execute a single, already-validated **read-only** command and render its
+    /// reply for display. Implementations must still defensively reject writes
+    /// (see the read-only command console). Default: unsupported.
+    async fn exec_readonly(&mut self, _command: &str) -> anyhow::Result<String> {
+        anyhow::bail!("this broker does not support a command console")
+    }
 }
 
 #[cfg(test)]
@@ -445,6 +486,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_monitor_and_keyspace_specs() {
+        // MONITOR is targetless and case-insensitive.
+        assert_eq!(SubSpec::parse("monitor", 0).unwrap(), SubSpec::Monitor);
+        assert_eq!(SubSpec::parse("MONITOR", 7).unwrap(), SubSpec::Monitor);
+        // Bare `keyspace` defaults to the active db; `keyspace:N` is explicit.
+        assert_eq!(
+            SubSpec::parse("keyspace", 3).unwrap(),
+            SubSpec::Keyspace { db: 3 }
+        );
+        assert_eq!(
+            SubSpec::parse("keyspace:5", 0).unwrap(),
+            SubSpec::Keyspace { db: 5 }
+        );
+        // A non-numeric keyspace db is rejected.
+        assert!(SubSpec::parse("keyspace:abc", 0).is_err());
+    }
+
+    #[test]
     fn rejects_bad_specs() {
         assert!(SubSpec::parse("news", 0).is_err()); // no kind
         assert!(SubSpec::parse("pubsub:", 0).is_err()); // empty target
@@ -461,6 +520,10 @@ mod tests {
         assert_eq!(s.source_type(), "stream");
         assert_eq!(SubSpec::Pattern("p*".into()).label(), "psub:p*");
         assert_eq!(SubSpec::Channel("c".into()).source_type(), "pubsub");
+        assert_eq!(SubSpec::Monitor.label(), "monitor");
+        assert_eq!(SubSpec::Monitor.source_type(), "monitor");
+        assert_eq!(SubSpec::Keyspace { db: 2 }.label(), "keyspace:db2");
+        assert_eq!(SubSpec::Keyspace { db: 2 }.source_type(), "keyspace");
     }
 
     #[test]
@@ -475,6 +538,8 @@ mod tests {
             .target(),
             "k"
         );
+        assert_eq!(SubSpec::Keyspace { db: 4 }.target(), "db4");
+        assert_eq!(SubSpec::Monitor.target(), "all");
     }
 
     #[test]

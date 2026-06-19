@@ -51,6 +51,10 @@ pub enum ConnCommand {
     StopSubscription {
         sub_id: u32,
     },
+    /// Execute a read-only command in the console and return its rendered reply.
+    Exec {
+        command: String,
+    },
 }
 
 /// A handle the UI keeps for an open connection. Cloneable-free: the UI owns
@@ -169,6 +173,10 @@ async fn start_subscription(
 ) {
     match conn.subscribe(spec.clone()).await {
         Ok(stream) => {
+            // A non-fatal advisory (e.g. keyspace notifications disabled) is
+            // surfaced once, before the tail starts streaming. UI-only — it is
+            // never written to the recording.
+            let notice = conn.tail_notice(&spec).await;
             let (record_tx, record_rx) = watch::channel(record);
             let cancel = conn_cancel.child_token();
             let params = TailParams {
@@ -184,6 +192,11 @@ async fn start_subscription(
             let _ = events
                 .send(AppEvent::SubscriptionStarted { id, sub_id })
                 .await;
+            if let Some(notice) = notice {
+                let _ = events
+                    .send(AppEvent::SubscriptionNotice { id, sub_id, notice })
+                    .await;
+            }
         }
         Err(e) => {
             let _ = events
@@ -378,6 +391,19 @@ async fn process(
                     .await
             }
         },
+        ConnCommand::Exec { command } => {
+            let result = conn
+                .exec_readonly(&command)
+                .await
+                .map_err(|e| e.to_string());
+            events
+                .send(AppEvent::CommandResult {
+                    id,
+                    command,
+                    result,
+                })
+                .await
+        }
         // Subscription commands are handled in the actor loop (they need state).
         ConnCommand::Subscribe { .. }
         | ConnCommand::SetRecording { .. }

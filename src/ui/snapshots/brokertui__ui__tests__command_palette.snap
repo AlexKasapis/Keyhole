@@ -1,0 +1,28 @@
+---
+source: src/ui/mod.rs
+expression: "render_lines(&mut app, 90, 24)"
+---
+ BrokerTUI   no connection  · connections                                    12:34:56 UTC
+┌ Connections ───────────────────────────────────────────────────────────────────────────┐
+│                                                                                        │
+│                                  No saved connections.                                 │
+│                ┌ Command palette ─────────────────────────────────────┐                │
+│                │› ▏                                                   │                │
+│                │▶ Go to: Connections                                  │                │
+│                │  Go to: Browser                                      │                │
+│                │  Go to: Dashboard                                    │                │
+│                │  Go to: Realtime tails                               │                │
+│                │  Go to: Recordings                                   │                │
+│                │  Go to: Command console                              │                │
+│                │  Add connection                                      │                │
+│                │  Subscribe (pub/sub or stream)…                      │                │
+│                │  Monitor commands (MONITOR)                          │                │
+│                │  Keyspace events (current db)                        │                │
+│                │  Refresh / toggle recording                          │                │
+│                │  Toggle help                                         │                │
+│                │  Quit                                                │                │
+│                └──────────────────────────────────────────────────────┘                │
+│                                                                                        │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ palette ▏   ↑↓ select · Enter run · Esc cancel

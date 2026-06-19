@@ -1,0 +1,22 @@
+---
+source: src/ui/mod.rs
+expression: "render_lines(&mut app, 90, 18)"
+---
+ BrokerTUI   prod (db0)  · realtime                                          12:34:56 UTC
+ keyspace:db0
+ live  0 events
+┌ keyspace:db0 ──────────────────────────────────────────────────────────────────────────┐
+│⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
+│                                                                                        │
+│  waiting for events…                                                                   │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+  ↑↓ scroll · Tab tab · s sub · m monitor · r

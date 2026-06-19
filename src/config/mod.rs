@@ -27,6 +27,34 @@ pub struct Config {
     /// Global settings.
     #[serde(default)]
     pub settings: Settings,
+    /// UI theme (`[theme]`).
+    #[serde(default)]
+    pub theme: ThemeConfig,
+}
+
+/// UI theme configuration (`[theme]`): a built-in base palette plus optional
+/// per-style colour overrides. Each colour is a ratatui colour string — a name
+/// (`cyan`), `#rrggbb` hex, or a `0`..`255` 256-colour index. Invalid values are
+/// ignored. `NO_COLOR` (env) overrides everything with a colourless palette.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThemeConfig {
+    /// Base palette: `dark` (default) or `light`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border_focused: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gauge: Option<String>,
 }
 
 /// A saved connection, tagged by broker type (`type = "redis"`).
@@ -225,6 +253,7 @@ mod tests {
                 tls: true,
             })],
             settings: Settings::default(),
+            theme: ThemeConfig::default(),
         };
         let text = toml::to_string(&cfg).unwrap();
         let back: Config = toml::from_str(&text).unwrap();
@@ -234,6 +263,27 @@ mod tests {
         assert!(profile.tls);
         assert_eq!(profile.username.as_deref(), Some("default"));
         assert_eq!(profile.password_spec(), SecretSpec::Keyring(None));
+    }
+
+    #[test]
+    fn parses_theme_section_and_defaults_to_empty() {
+        let text = r##"
+            [[connection]]
+            type = "redis"
+            name = "x"
+
+            [theme]
+            base = "light"
+            accent = "#ff8800"
+        "##;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.theme.base.as_deref(), Some("light"));
+        assert_eq!(cfg.theme.accent.as_deref(), Some("#ff8800"));
+        assert_eq!(cfg.theme.error, None);
+
+        // Absent [theme] yields an all-None default.
+        let minimal: Config = toml::from_str("").unwrap();
+        assert!(minimal.theme.base.is_none());
     }
 
     #[test]

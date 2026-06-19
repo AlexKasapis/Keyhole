@@ -2,7 +2,6 @@
 //! frame by the main loop: a header, the active screen, a footer (hints or the
 //! active text-entry prompt), plus modal overlays (connection form, help).
 
-mod theme;
 mod views;
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -11,11 +10,12 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, InputMode, Screen};
-use theme::Theme;
+use crate::theme::Theme;
 
 /// Draw one frame from the current application state.
 pub fn render(frame: &mut Frame, app: &mut App) {
-    let theme = Theme::default();
+    // `Theme` is `Copy`, so taking it by value frees `app` for `&mut` borrows.
+    let theme = app.theme;
     let [header_area, body_area, footer_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -30,12 +30,16 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Screen::Dashboard => views::dashboard(frame, app, &theme, body_area),
         Screen::Realtime => views::realtime(frame, app, &theme, body_area),
         Screen::Recordings => views::recordings(frame, app, &theme, body_area),
+        Screen::Console => views::console(frame, app, &theme, body_area),
     }
     render_footer(frame, app, &theme, footer_area);
 
     let full = frame.area();
     if app.form.is_some() {
         views::conn_form(frame, app, &theme, full);
+    }
+    if app.palette.is_some() {
+        views::palette(frame, app, &theme, full);
     }
     if app.show_help {
         views::help(frame, &theme, full);
@@ -56,6 +60,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Screen::Dashboard => "dashboard",
         Screen::Realtime => "realtime",
         Screen::Recordings => "recordings",
+        Screen::Console => "console",
     };
     let line = Line::from(vec![
         Span::styled(" BrokerTUI ", theme.title),
@@ -97,9 +102,33 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
                 Span::styled(
-                    "   pubsub:ch · psub:ch.* · stream:key   Enter start · Esc cancel",
+                    "   pubsub:ch · psub:ch.* · stream:key · keyspace · monitor   Enter start · Esc cancel",
                     theme.dim,
                 ),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
+        InputMode::Command => {
+            let input = app
+                .active_conn()
+                .map(|c| c.console.input.as_str())
+                .unwrap_or("");
+            let line = Line::from(vec![
+                Span::styled(" cmd ", theme.accent),
+                Span::raw(format!("{input}▏")),
+                Span::styled(
+                    "   ↑↓ history · Enter run (read-only) · Esc done",
+                    theme.dim,
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
+        InputMode::Palette => {
+            let query = app.palette.as_ref().map(|p| p.query.as_str()).unwrap_or("");
+            let line = Line::from(vec![
+                Span::styled(" palette ", theme.accent),
+                Span::raw(format!("{query}▏")),
+                Span::styled("   ↑↓ select · Enter run · Esc cancel", theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -134,16 +163,19 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 fn hints(screen: Screen) -> &'static str {
     match screen {
-        Screen::Connections => "  ↑↓ move · Enter connect · a add · ? help · q quit",
+        Screen::Connections => "  ↑↓ move · Enter connect · a add · : palette · ? help · q quit",
         Screen::Browser => {
-            "  ↑↓ keys · / filter · [ ] db · t tail · s sub · w watch · d dash · ? help · q quit"
+            "  ↑↓ keys · / filter · [ ] db · t tail · s sub · e console · w watch · : palette · ? help"
         }
-        Screen::Dashboard => "  b browser · w watch · c conns · r refresh · ? help · q quit",
+        Screen::Dashboard => "  b browser · w watch · e console · c conns · r refresh · : palette · ? help",
         Screen::Realtime => {
-            "  ↑↓ scroll · Tab tab · s sub · r rec · x stop · G follow · b browser · ? help"
+            "  ↑↓ scroll · Tab tab · s sub · m monitor · r rec · x stop · G follow · : palette · ? help"
         }
         Screen::Recordings => {
-            "  ↑↓ move · r rescan · w watch · b browser · c conns · ? help · q quit"
+            "  ↑↓ move · r rescan · w watch · b browser · : palette · ? help · q quit"
+        }
+        Screen::Console => {
+            "  i type · ↑↓ scroll · r clear · K keyspace · m monitor · b browser · : palette · ? help"
         }
     }
 }
@@ -430,5 +462,177 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Realtime;
         assert!(screen_text(&mut app).contains("No live tails"));
+    }
+
+    #[tokio::test]
+    async fn realtime_renders_keyspace_notice_banner() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Realtime;
+        let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
+        sub.state = SubState::Active;
+        sub.notice = Some("keyspace notifications are disabled".into());
+        app.connections[0].subs.push(sub);
+        app.connections[0].active_sub = Some(0);
+        let text = screen_text(&mut app);
+        assert!(text.contains("keyspace:db0"), "the tab label renders");
+        assert!(text.contains("disabled"), "the notice banner renders");
+    }
+
+    #[tokio::test]
+    async fn console_renders_prompt_and_entries() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Console;
+        app.connections[0]
+            .console
+            .entries
+            .push(crate::app::ConsoleEntry {
+                command: "PING".into(),
+                output: "PONG".into(),
+                is_error: false,
+            });
+        let text = screen_text(&mut app);
+        assert!(text.contains("Console"));
+        assert!(text.contains("PING"));
+        assert!(text.contains("PONG"));
+    }
+
+    #[tokio::test]
+    async fn console_empty_state_shows_hint() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Console;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Read-only command console"));
+        assert!(text.contains("INFO server"), "shows example commands");
+    }
+
+    #[test]
+    fn console_without_connection_shows_placeholder() {
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Console;
+        assert!(screen_text(&mut app).contains("No active connection"));
+    }
+
+    #[test]
+    fn palette_overlay_renders_filtered_items() {
+        let (mut app, _rx) = test_app();
+        app.palette = Some(crate::app::PaletteState::default());
+        app.mode = InputMode::Palette;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Command palette"));
+        assert!(text.contains("Quit"), "palette lists actions");
+    }
+
+    // -- snapshot tests ------------------------------------------------------
+    //
+    // These capture the rendered frame (text layout, styles excluded) for the
+    // key screens. State is pinned (fixed clock + fixed data) so the output is
+    // deterministic. Regenerate after an intentional UI change with:
+    //   INSTA_UPDATE=always cargo test
+    // then review/commit the updated `src/ui/snapshots/*.snap`.
+
+    /// Render one frame and return it as trimmed rows joined by newlines.
+    fn render_lines(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let frame = terminal.draw(|f| render(f, app)).expect("render");
+        let buf = &frame.buffer;
+        let w = buf.area.width as usize;
+        buf.content()
+            .chunks(w)
+            .map(|row| {
+                row.iter()
+                    .map(|c| c.symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A fixed instant so the header clock is stable in snapshots.
+    fn pin_clock(app: &mut App) {
+        app.now = time::macros::datetime!(2026 - 06 - 19 12:34:56 UTC);
+    }
+
+    #[test]
+    fn snapshot_connections_empty() {
+        let (mut app, _rx) = test_app();
+        pin_clock(&mut app);
+        insta::assert_snapshot!("connections_empty", render_lines(&mut app, 90, 16));
+    }
+
+    #[test]
+    fn snapshot_help_overlay() {
+        let (mut app, _rx) = test_app();
+        pin_clock(&mut app);
+        app.show_help = true;
+        insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 32));
+    }
+
+    #[test]
+    fn snapshot_command_palette() {
+        let (mut app, _rx) = test_app();
+        pin_clock(&mut app);
+        app.palette = Some(crate::app::PaletteState::default());
+        app.mode = InputMode::Palette;
+        insta::assert_snapshot!("command_palette", render_lines(&mut app, 90, 24));
+    }
+
+    #[tokio::test]
+    async fn snapshot_console_with_output() {
+        let (mut app, _rx) = app_with_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Console;
+        app.connections[0]
+            .console
+            .entries
+            .push(crate::app::ConsoleEntry {
+                command: "INFO server".into(),
+                output: "redis_version:7.4.0\nuptime_in_seconds:42".into(),
+                is_error: false,
+            });
+        app.connections[0]
+            .console
+            .entries
+            .push(crate::app::ConsoleEntry {
+                command: "SET k v".into(),
+                output: "`SET` is not on the read-only allowlist".into(),
+                is_error: true,
+            });
+        insta::assert_snapshot!("console_with_output", render_lines(&mut app, 90, 20));
+    }
+
+    #[tokio::test]
+    async fn snapshot_dashboard() {
+        let (mut app, _rx) = app_with_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Dashboard;
+        app.connections[0].stats = Some(ServerStats {
+            redis_version: Some("7.4.0".into()),
+            uptime_seconds: Some(3661),
+            connected_clients: Some(7),
+            instantaneous_ops_per_sec: Some(120),
+            used_memory: Some(1024 * 1024),
+            used_memory_peak: Some(2 * 1024 * 1024),
+            keyspace_hits: Some(900),
+            keyspace_misses: Some(100),
+            db_keys: vec![(0, 42), (1, 7)],
+            ..Default::default()
+        });
+        insta::assert_snapshot!("dashboard", render_lines(&mut app, 90, 20));
+    }
+
+    #[tokio::test]
+    async fn snapshot_realtime_keyspace_notice() {
+        let (mut app, _rx) = app_with_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Realtime;
+        let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
+        sub.state = SubState::Active;
+        sub.notice =
+            Some("keyspace notifications are disabled (notify-keyspace-events is empty)".into());
+        app.connections[0].subs.push(sub);
+        app.connections[0].active_sub = Some(0);
+        insta::assert_snapshot!("realtime_keyspace_notice", render_lines(&mut app, 90, 18));
     }
 }

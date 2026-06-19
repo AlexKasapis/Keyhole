@@ -173,7 +173,7 @@ fn recording_filename(connection: &str, spec: &SubSpec, now: OffsetDateTime) -> 
         "{}-{}-{}-{}.jsonl",
         sanitize(connection),
         spec.source_type(),
-        sanitize(spec.target()),
+        sanitize(&spec.target()),
         stamp
     )
 }

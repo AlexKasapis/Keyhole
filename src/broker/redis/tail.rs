@@ -9,9 +9,16 @@
 //! - **Streams** via a `XREAD BLOCK <ms> COUNT <n> STREAMS <key> <id>` loop that
 //!   advances `last_id`, starting from `$` (new entries only).
 //!
-//! Both map replies to [`BrokerEvent`]s. The byte→[`Payload`] decisions live in
-//! the pure helpers [`channel_event`]/[`stream_event`] so they can be unit
-//! tested without a broker.
+//! Phase 3 adds two more dedicated tails:
+//! - **Keyspace notifications** via `PSUBSCRIBE __keyevent@<db>__:*` — the event
+//!   name is the channel suffix and the affected key is the message body.
+//! - **MONITOR** via [`redis::aio::Monitor`] — a server-wide firehose of every
+//!   processed command, one text line per command.
+//!
+//! Both map replies to [`BrokerEvent`]s. The byte→[`Payload`] decisions and the
+//! line parsing live in pure helpers ([`channel_event`]/[`stream_event`]/
+//! [`keyspace_event`]/[`monitor_event`]) so they can be unit tested without a
+//! broker.
 
 use futures_util::{stream, StreamExt};
 use redis::aio::MultiplexedConnection;
@@ -74,6 +81,79 @@ fn fields_to_json(fields: &[(String, String)]) -> String {
     out
 }
 
+/// Build a [`BrokerEvent`] from a keyspace-notification message.
+///
+/// We subscribe to `__keyevent@<db>__:*`, so the channel suffix is the event
+/// name (`set`, `expired`, `lpush`, …) and the message body is the affected
+/// key. The event name becomes the `source` (so the tab reads like a log of
+/// operations); the key is the binary-safe payload.
+fn keyspace_event(channel: String, key: Vec<u8>) -> BrokerEvent {
+    let (db, event) = parse_keyevent_channel(&channel);
+    let mut meta = Vec::new();
+    if let Some(db) = db {
+        meta.push(("db".to_string(), db));
+    }
+    meta.push(("channel".to_string(), channel.clone()));
+    BrokerEvent {
+        ts: OffsetDateTime::now_utc(),
+        source: event.unwrap_or(channel),
+        payload: Payload::classify(key),
+        meta,
+    }
+}
+
+/// Pull the db index and event name out of a `__keyevent@<db>__:<event>`
+/// channel. Returns `(None, None)` for anything that doesn't match the shape.
+fn parse_keyevent_channel(channel: &str) -> (Option<String>, Option<String>) {
+    let Some(body) = channel.strip_prefix("__keyevent@") else {
+        return (None, None);
+    };
+    // body == `<db>__:<event>`
+    match body.split_once("__:") {
+        Some((db, event)) if !event.is_empty() => (Some(db.to_string()), Some(event.to_string())),
+        _ => (None, None),
+    }
+}
+
+/// Build a [`BrokerEvent`] from a single `MONITOR` line.
+///
+/// A line looks like `<unix_ts> [<db> <client_addr>] "CMD" "arg" …`. The db and
+/// client come from the bracketed section; the quoted command text (always
+/// valid UTF-8 — Redis escapes non-printable bytes) is the payload. The client
+/// address is the `source` so tabs/logs group by caller.
+fn monitor_event(line: String) -> BrokerEvent {
+    let (db, client, command) = parse_monitor_line(&line);
+    let mut meta = Vec::new();
+    if let Some(db) = db {
+        meta.push(("db".to_string(), db));
+    }
+    if let Some(client) = &client {
+        meta.push(("client".to_string(), client.clone()));
+    }
+    BrokerEvent {
+        ts: OffsetDateTime::now_utc(),
+        source: client.unwrap_or_else(|| "monitor".to_string()),
+        payload: Payload::Utf8(command),
+        meta,
+    }
+}
+
+/// Split a `MONITOR` line into `(db, client, command_text)`. Falls back to the
+/// whole trimmed line as the command if the bracketed prefix is absent.
+fn parse_monitor_line(line: &str) -> (Option<String>, Option<String>, String) {
+    if let (Some(lb), Some(rb)) = (line.find('['), line.find(']')) {
+        if lb < rb {
+            let inside = &line[lb + 1..rb];
+            let (db, client) = match inside.split_once(' ') {
+                Some((db, client)) => (Some(db.to_string()), Some(client.trim().to_string())),
+                None => (Some(inside.to_string()), None),
+            };
+            return (db, client, line[rb + 1..].trim().to_string());
+        }
+    }
+    (None, None, line.trim().to_string())
+}
+
 /// Open a pub/sub tail (`SUBSCRIBE`/`PSUBSCRIBE`) and return its event stream.
 pub async fn open_pubsub(
     client: redis::Client,
@@ -83,7 +163,7 @@ pub async fn open_pubsub(
     match &spec {
         SubSpec::Channel(c) => pubsub.subscribe(c).await?,
         SubSpec::Pattern(p) => pubsub.psubscribe(p).await?,
-        SubSpec::Stream { .. } => anyhow::bail!("stream specs are tailed via open_stream"),
+        other => anyhow::bail!("{} is not a pub/sub spec", other.label()),
     }
     let stream = pubsub.into_on_message().map(|msg| {
         let channel = msg.get_channel_name().to_string();
@@ -169,6 +249,30 @@ pub async fn open_stream(
     Ok(Box::pin(stream))
 }
 
+/// Open a keyspace-notification tail for database `db`
+/// (`PSUBSCRIBE __keyevent@<db>__:*`) and return its event stream. The server's
+/// `notify-keyspace-events` must be enabled for events to arrive; brokertui does
+/// not change that setting (see the advisory in `RedisConnection::tail_notice`).
+pub async fn open_keyspace(client: redis::Client, db: u32) -> anyhow::Result<BrokerEventStream> {
+    let mut pubsub = client.get_async_pubsub().await?;
+    let pattern = format!("__keyevent@{db}__:*");
+    pubsub.psubscribe(&pattern).await?;
+    let stream = pubsub.into_on_message().map(|msg| {
+        let channel = msg.get_channel_name().to_string();
+        keyspace_event(channel, msg.get_payload_bytes().to_vec())
+    });
+    Ok(Box::pin(stream))
+}
+
+/// Open a `MONITOR` tail and return its event stream: one [`BrokerEvent`] per
+/// command the server processes (server-wide). High-rate by nature — the UI
+/// forward stays lossy and the recorder lossless, as for every other tail.
+pub async fn open_monitor(client: redis::Client) -> anyhow::Result<BrokerEventStream> {
+    let monitor = client.get_async_monitor().await?;
+    let stream = monitor.into_on_message::<String>().map(monitor_event);
+    Ok(Box::pin(stream))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +324,73 @@ mod tests {
             fields_to_json(&[("a\"b".into(), "c\nd".into())]),
             r#"{"a\"b":"c\nd"}"#
         );
+    }
+
+    #[test]
+    fn parses_keyevent_channels() {
+        assert_eq!(
+            parse_keyevent_channel("__keyevent@0__:set"),
+            (Some("0".into()), Some("set".into()))
+        );
+        assert_eq!(
+            parse_keyevent_channel("__keyevent@15__:expired"),
+            (Some("15".into()), Some("expired".into()))
+        );
+        // Unexpected shapes degrade gracefully.
+        assert_eq!(parse_keyevent_channel("__keyspace@0__:mykey"), (None, None));
+        assert_eq!(parse_keyevent_channel("random"), (None, None));
+        assert_eq!(parse_keyevent_channel("__keyevent@0__:"), (None, None));
+    }
+
+    #[test]
+    fn keyspace_event_uses_event_as_source_and_key_as_payload() {
+        let ev = keyspace_event("__keyevent@0__:set".into(), b"user:42".to_vec());
+        assert_eq!(ev.source, "set", "the event name is the source");
+        assert_eq!(ev.payload, Payload::Utf8("user:42".into()));
+        assert_eq!(ev.meta("db"), Some("0"));
+        assert_eq!(ev.meta("channel"), Some("__keyevent@0__:set"));
+    }
+
+    #[test]
+    fn keyspace_event_binary_key_is_base64_safe() {
+        let ev = keyspace_event("__keyevent@0__:del".into(), vec![0x00, 0xff]);
+        assert_eq!(ev.source, "del");
+        assert_eq!(ev.payload, Payload::Binary(vec![0x00, 0xff]));
+    }
+
+    #[test]
+    fn keyspace_event_falls_back_to_raw_channel() {
+        let ev = keyspace_event("weird-channel".into(), b"k".to_vec());
+        assert_eq!(ev.source, "weird-channel");
+        assert_eq!(ev.meta("db"), None);
+    }
+
+    #[test]
+    fn parses_monitor_lines() {
+        let (db, client, command) =
+            parse_monitor_line(r#"1700000000.123456 [0 127.0.0.1:12345] "SET" "k" "v""#);
+        assert_eq!(db.as_deref(), Some("0"));
+        assert_eq!(client.as_deref(), Some("127.0.0.1:12345"));
+        assert_eq!(command, r#""SET" "k" "v""#);
+    }
+
+    #[test]
+    fn monitor_event_builds_from_line() {
+        let ev = monitor_event(r#"1700000000.5 [3 10.0.0.1:5555] "GET" "key""#.into());
+        assert_eq!(ev.source, "10.0.0.1:5555");
+        assert_eq!(ev.payload, Payload::Utf8(r#""GET" "key""#.into()));
+        assert_eq!(ev.meta("db"), Some("3"));
+        assert_eq!(ev.meta("client"), Some("10.0.0.1:5555"));
+    }
+
+    #[test]
+    fn monitor_line_without_brackets_degrades() {
+        let (db, client, command) = parse_monitor_line("OK");
+        assert_eq!(db, None);
+        assert_eq!(client, None);
+        assert_eq!(command, "OK");
+        // And the event still builds, sourced as "monitor".
+        let ev = monitor_event("OK".into());
+        assert_eq!(ev.source, "monitor");
     }
 }

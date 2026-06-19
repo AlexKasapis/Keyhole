@@ -1,0 +1,20 @@
+---
+source: src/ui/mod.rs
+expression: "render_lines(&mut app, 90, 16)"
+---
+ BrokerTUI   no connection  · connections                                    12:34:56 UTC
+┌ Connections ───────────────────────────────────────────────────────────────────────────┐
+│                                                                                        │
+│                                  No saved connections.                                 │
+│                                                                                        │
+│                                  Press 'a' to add one.                                 │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+  ↑↓ move · Enter connect · a add · : palette

@@ -6,6 +6,7 @@
 //! even across reconnects. Blocking tail connections (pub/sub, streams) get
 //! their own dedicated sockets in Phase 2.
 
+mod command;
 mod info;
 mod tail;
 mod value;
@@ -315,7 +316,60 @@ impl BrokerConnection for RedisConnection {
         match spec {
             SubSpec::Channel(_) | SubSpec::Pattern(_) => tail::open_pubsub(client, spec).await,
             SubSpec::Stream { key, db } => tail::open_stream(client, key, db).await,
+            SubSpec::Keyspace { db } => tail::open_keyspace(client, db).await,
+            SubSpec::Monitor => tail::open_monitor(client).await,
         }
+    }
+
+    /// Flag when a keyspace tail is opened but the server isn't publishing
+    /// notifications (`notify-keyspace-events` is empty), so the user knows why
+    /// the tail stays silent. brokertui never changes the setting itself — that
+    /// is a server-side write, deferred past v1.
+    async fn tail_notice(&mut self, spec: &SubSpec) -> Option<String> {
+        if !matches!(spec, SubSpec::Keyspace { .. }) {
+            return None;
+        }
+        let mut conn = self.manager().ok()?;
+        let reply: redis::RedisResult<Vec<String>> = redis::cmd("CONFIG")
+            .arg("GET")
+            .arg("notify-keyspace-events")
+            .query_async(&mut conn)
+            .await;
+        let flags = reply
+            .ok()
+            .and_then(|kv| kv.get(1).cloned())
+            .unwrap_or_default();
+        if flags.trim().is_empty() {
+            Some(
+                "keyspace notifications are disabled (notify-keyspace-events is empty); \
+                 no events will appear. Enable server-side with e.g. \
+                 `CONFIG SET notify-keyspace-events KEA`."
+                    .to_string(),
+            )
+        } else {
+            None
+        }
+    }
+
+    /// Execute a single read-only command. The text is validated against a
+    /// deny-by-default allowlist, then double-checked against the server's own
+    /// `COMMAND INFO` flags (rejecting anything flagged `write`/`admin`) before
+    /// it runs — so the console can never mutate data, upholding the v1
+    /// read-only guarantee.
+    async fn exec_readonly(&mut self, command: &str) -> anyhow::Result<String> {
+        let parts = command::validate_readonly(command)?;
+        let mut conn = self.manager()?;
+        command::ensure_server_readonly(&mut conn, &parts).await?;
+
+        let mut cmd = redis::cmd(&parts[0]);
+        for arg in &parts[1..] {
+            cmd.arg(arg);
+        }
+        let value: redis::Value = cmd
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(command::render_reply(&value))
     }
 }
 
@@ -666,6 +720,120 @@ mod integration_tests {
         assert!(ev.meta("id").is_some(), "stream entry id present");
         // Only the post-subscribe entry, never the seed.
         assert_eq!(ev.payload, Payload::Json(r#"{"field":"value1"}"#.into()));
+    }
+
+    #[tokio::test]
+    async fn monitor_tail_observes_other_connections_commands() {
+        let token = unique("it:mon");
+        let mut conn = connected().await;
+        let mut stream = conn.subscribe(SubSpec::Monitor).await.expect("monitor");
+
+        // Issue a recognizable command from a different connection.
+        let mut other = raw().await;
+        let _: redis::Value = redis::cmd("GET")
+            .arg(&token)
+            .query_async(&mut other)
+            .await
+            .unwrap();
+
+        // MONITOR is a firehose; scan a few events for our command.
+        let mut seen = false;
+        for _ in 0..200 {
+            match timeout(Duration::from_secs(5), stream.next()).await {
+                Ok(Some(ev)) => {
+                    if ev.payload.as_text().contains(&token) {
+                        assert_eq!(ev.meta("db"), Some("0"));
+                        assert!(ev.meta("client").is_some(), "client addr captured");
+                        seen = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(seen, "MONITOR should observe the GET command");
+    }
+
+    #[tokio::test]
+    async fn keyspace_tail_observes_set_event() {
+        // The test server runs with --notify-keyspace-events KEA.
+        let key = unique("it:ks");
+        let mut conn = connected().await;
+        let mut stream = conn
+            .subscribe(SubSpec::Keyspace { db: 0 })
+            .await
+            .expect("keyspace tail");
+
+        let mut other = raw().await;
+        let _: redis::Value = redis::cmd("SET")
+            .arg(&key)
+            .arg("v")
+            .query_async(&mut other)
+            .await
+            .unwrap();
+
+        // Look for the `set` event carrying our key as the payload.
+        let mut found = false;
+        for _ in 0..200 {
+            match timeout(Duration::from_secs(5), stream.next()).await {
+                Ok(Some(ev)) => {
+                    if ev.source == "set" && ev.payload == Payload::Utf8(key.clone()) {
+                        assert_eq!(ev.meta("db"), Some("0"));
+                        found = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(found, "keyspace tail should observe the SET event");
+    }
+
+    #[tokio::test]
+    async fn keyspace_tail_notice_is_silent_when_enabled() {
+        // With notifications enabled, opening a keyspace tail flags no advisory.
+        let mut conn = connected().await;
+        let notice = conn.tail_notice(&SubSpec::Keyspace { db: 0 }).await;
+        assert!(notice.is_none(), "no notice when KEA is configured");
+        // Non-keyspace specs never carry a notice.
+        assert!(conn
+            .tail_notice(&SubSpec::Channel("c".into()))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn exec_readonly_runs_reads_and_rejects_writes() {
+        let key = unique("it:exec");
+        let mut seed = raw().await;
+        let _: redis::Value = redis::cmd("SET")
+            .arg(&key)
+            .arg("hello")
+            .query_async(&mut seed)
+            .await
+            .unwrap();
+
+        let mut conn = connected().await;
+        // A read returns the value.
+        let out = conn.exec_readonly(&format!("GET {key}")).await.unwrap();
+        assert_eq!(out, "hello");
+        // CONFIG GET is allowed (subcommand allowlist).
+        assert!(conn.exec_readonly("CONFIG GET maxmemory").await.is_ok());
+        // Writes and admin commands are refused before hitting the server.
+        for bad in ["SET other v", "DEL x", "FLUSHALL", "CONFIG SET maxmemory 0"] {
+            assert!(
+                conn.exec_readonly(bad).await.is_err(),
+                "must refuse `{bad}`"
+            );
+        }
+        // The refused SET must not have created the key.
+        let mut check = raw().await;
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg("other")
+            .query_async(&mut check)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0, "the read-only console never wrote `other`");
     }
 
     #[tokio::test]

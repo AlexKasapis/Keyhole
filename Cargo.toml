@@ -48,6 +48,10 @@ base64 = "0.22"
 bytes = "1"
 percent-encoding = "2.3.2"
 
+[dev-dependencies]
+# Snapshot testing of rendered TUI frames (see src/ui — snapshot module).
+insta = "1"
+
 [features]
 default = ["keyring"]
 # OS keyring support. Disable for headless/musl builds (env-var secrets only):

@@ -18,7 +18,10 @@ pub enum SecretSpec {
     Prompt,
 }
 
-/// Service name used for all BrokerTUI keyring entries.
+/// Service name used for all BrokerTUI keyring entries. Only referenced by the
+/// keyring backend, so it is gated to avoid a dead-code warning in headless
+/// (`--no-default-features`) builds.
+#[cfg(feature = "keyring")]
 pub const KEYRING_SERVICE: &str = "brokertui";
 
 impl SecretSpec {

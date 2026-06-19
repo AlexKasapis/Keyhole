@@ -11,6 +11,7 @@ mod config;
 mod event;
 mod logging;
 mod recording;
+mod theme;
 mod tui;
 mod ui;
 

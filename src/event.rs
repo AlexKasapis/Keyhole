@@ -49,6 +49,18 @@ pub enum AppEvent {
     },
     /// A subscription's tail is established and receiving.
     SubscriptionStarted { id: ConnId, sub_id: u32 },
+    /// A non-fatal advisory for a tail (e.g. keyspace notifications disabled).
+    SubscriptionNotice {
+        id: ConnId,
+        sub_id: u32,
+        notice: String,
+    },
+    /// The result of a read-only command-console execution.
+    CommandResult {
+        id: ConnId,
+        command: String,
+        result: Result<String, String>,
+    },
     /// A subscription's tail stopped (source closed, failed, or was stopped).
     SubscriptionEnded {
         id: ConnId,

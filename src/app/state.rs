@@ -17,10 +17,12 @@ pub enum Screen {
     Connections,
     Browser,
     Dashboard,
-    /// Live tails (pub/sub + streams) for the active connection.
+    /// Live tails (pub/sub, streams, keyspace, MONITOR) for the active connection.
     Realtime,
     /// On-disk recordings.
     Recordings,
+    /// Read-only command console for the active connection.
+    Console,
 }
 
 /// Keyboard input mode (text-entry modes capture raw keys).
@@ -31,6 +33,10 @@ pub enum InputMode {
     Form,
     /// Entering a subscription spec (`pubsub:ch`, `psub:ch.*`, `stream:key`).
     Subscribe,
+    /// Typing a command in the read-only console.
+    Command,
+    /// Filtering the command palette.
+    Palette,
 }
 
 /// A transient status-bar message.
@@ -85,6 +91,9 @@ pub struct Subscription {
     /// How many events back from the newest the viewport bottom sits
     /// (`0` == following the newest event).
     pub offset: usize,
+    /// A non-fatal advisory for this tail (e.g. keyspace notifications are
+    /// disabled server-side), shown as a banner. UI-only — never recorded.
+    pub notice: Option<String>,
 }
 
 impl Subscription {
@@ -101,6 +110,7 @@ impl Subscription {
             recording: RecordState::Off,
             follow: true,
             offset: 0,
+            notice: None,
         }
     }
 
@@ -128,6 +138,76 @@ pub struct RecordingFile {
     pub modified: Option<OffsetDateTime>,
 }
 
+/// One executed console command and its rendered reply (or error).
+pub struct ConsoleEntry {
+    pub command: String,
+    pub output: String,
+    pub is_error: bool,
+}
+
+/// Per-connection read-only command console state.
+#[derive(Default)]
+pub struct Console {
+    /// The command line currently being typed.
+    pub input: String,
+    /// Executed commands with their replies (oldest first).
+    pub entries: Vec<ConsoleEntry>,
+    /// Submitted commands, for up/down recall (oldest first).
+    pub history: Vec<String>,
+    /// Recall cursor into `history`; `None` while editing a fresh line.
+    pub history_pos: Option<usize>,
+    /// Output scroll offset (lines from the top); large == follow the tail.
+    pub scroll: u16,
+    /// A command sent to the actor and awaiting its reply.
+    pub pending: Option<String>,
+}
+
+impl Console {
+    /// Record a submitted command in the history (de-duplicating an immediate
+    /// repeat) and reset the recall cursor.
+    pub fn remember(&mut self, command: &str) {
+        if self.history.last().map(String::as_str) != Some(command) {
+            self.history.push(command.to_string());
+        }
+        self.history_pos = None;
+    }
+
+    /// Replace the input with the previous history entry (older).
+    pub fn recall_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let pos = match self.history_pos {
+            Some(0) => 0,
+            Some(p) => p - 1,
+            None => self.history.len() - 1,
+        };
+        self.history_pos = Some(pos);
+        self.input = self.history[pos].clone();
+    }
+
+    /// Replace the input with the next history entry (newer), or clear past the end.
+    pub fn recall_next(&mut self) {
+        let Some(pos) = self.history_pos else {
+            return;
+        };
+        if pos + 1 < self.history.len() {
+            self.history_pos = Some(pos + 1);
+            self.input = self.history[pos + 1].clone();
+        } else {
+            self.history_pos = None;
+            self.input.clear();
+        }
+    }
+}
+
+/// Command-palette overlay state: a fuzzy/substring filter over the action list.
+#[derive(Default)]
+pub struct PaletteState {
+    pub query: String,
+    pub selected: usize,
+}
+
 /// An open connection plus its per-connection browse/inspect/dashboard state.
 pub struct Connection {
     pub id: ConnId,
@@ -148,6 +228,8 @@ pub struct Connection {
     pub subs: Vec<Subscription>,
     /// Index into `subs` of the focused tail.
     pub active_sub: Option<usize>,
+    /// Read-only command console state for this connection.
+    pub console: Console,
     pub handle: ConnHandle,
 }
 
@@ -172,6 +254,7 @@ impl Connection {
             stat_ticks: 0,
             subs: Vec::new(),
             active_sub: None,
+            console: Console::default(),
             handle,
         }
     }
@@ -309,5 +392,46 @@ mod tests {
             path: std::path::PathBuf::from("x")
         }
         .is_on());
+    }
+
+    #[test]
+    fn console_history_recall_walks_both_ways() {
+        let mut c = Console::default();
+        c.remember("GET a");
+        c.remember("GET b");
+        // De-dupes an immediate repeat.
+        c.remember("GET b");
+        assert_eq!(c.history, vec!["GET a", "GET b"]);
+
+        // Up from a fresh line lands on the newest, then walks back.
+        c.recall_prev();
+        assert_eq!(c.input, "GET b");
+        c.recall_prev();
+        assert_eq!(c.input, "GET a");
+        c.recall_prev();
+        assert_eq!(c.input, "GET a", "clamped at the oldest");
+
+        // Down walks forward, then clears past the newest.
+        c.recall_next();
+        assert_eq!(c.input, "GET b");
+        c.recall_next();
+        assert_eq!(c.input, "", "past the newest clears the line");
+        assert_eq!(c.history_pos, None);
+    }
+
+    #[test]
+    fn console_recall_next_without_position_is_noop() {
+        let mut c = Console::default();
+        c.remember("PING");
+        c.input = "typing".into();
+        c.recall_next(); // history_pos is None
+        assert_eq!(c.input, "typing");
+    }
+
+    #[test]
+    fn subscription_starts_without_notice() {
+        let s = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 10);
+        assert!(s.notice.is_none());
+        assert_eq!(s.label, "keyspace:db0");
     }
 }

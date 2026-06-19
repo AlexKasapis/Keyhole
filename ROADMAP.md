@@ -8,31 +8,39 @@ Single self-contained binary, usable locally or over SSH.
 
 ## 📍 Current status — you are here
 
-**Phase 2 complete.** The app connects to Redis, browses, **tails live pub/sub &
-streams, and records them to disk** — plus headless `record`/`export`.
-v1 = Phases 0–2, so **v1 is feature-complete; Phase 3 (monitoring & polish) is next.**
+**Phase 3 complete.** On top of v1 (browse + realtime + record), the app now has
+the **deferred Redis features and polish**: a **keyspace-notification monitor**
+and **MONITOR firehose** (both as recordable tails), a **read-only command
+console** (deny-by-default allowlist + `COMMAND INFO` flag check), a **command
+palette**, **config theming** (`[theme]` + `NO_COLOR`), and **mouse-wheel
+scrolling**. **Phase 4 (AMQP) is next.**
 
 | | |
 |---|---|
 | Branch | `main` |
-| Commits | `a5c9e30` Phase 0 · `2d83f33` Phase 1 · Phase 2 (this commit) |
-| Tests | 42 pass (35 unit + 7 integration) |
-| Quality gate | `clippy --all-targets --all-features -D warnings` clean · `rustfmt` clean |
-| Verified | PTY harness: connect → subscribe → live tail → record → recordings; pub/sub + stream tails; headless `record`/`export` against live Redis |
+| Commits | `a5c9e30` Phase 0 · `2d83f33` Phase 1 · `be6ecac` Phase 2 · Phase 3 (this commit) |
+| Tests | 209 pass (198 unit/snapshot + 11 integration) |
+| Quality gate | `clippy --all-targets --all-features -D warnings` clean · `clippy --no-default-features` clean · `rustfmt` clean |
+| Verified | PTY harness: connect → console `PING`→`PONG` (live read-only exec) → MONITOR tail → command palette → clean exit; keyspace "disabled" banner with notifications off; all integration tests against Redis on 6380 |
 
 ### What works today
 - Connect to Redis (saved TOML profiles or `--connect`), auto-reconnect, liveness ping → disconnect detection.
 - **Browse**: non-blocking `SCAN` with `MATCH`/`COUNT` paging + pipelined `TYPE`/`TTL`; server-side filter (`/`); DB switching (`[`/`]`); load-more.
 - **Value viewers** for every type: string (JSON pretty-print, binary→base64, size-capped), list, set, hash, zset, stream — auto-loaded into a detail pane as you move the selection.
 - **Dashboard** from `INFO`: memory & hit-ratio gauges, version/uptime/clients/ops-sec, per-DB key counts (auto-refresh).
-- **Realtime tails** (`w`): pub/sub (`SUBSCRIBE`/`PSUBSCRIBE`) and stream (`XREAD BLOCK … $`) tails on dedicated sockets, each a tab with a capped scrollback ring buffer. Start with `s` (spec prompt: `pubsub:ch` · `psub:ch.*` · `stream:key`) or `t` on a stream key in the Browser. `Tab`/`[`/`]` switch tabs, `↑↓`/`G` scroll/follow, `x` stops a tail.
-- **Recording** (`r` on any tail): lossless append-only **JSONL** envelopes under the recordings dir, with live counters; the **Recordings** view (`R`) lists files.
-- **Headless CLI**: `record --connect <p> --source <spec> --out <dir>` (Ctrl-C to stop) and `export <file.jsonl> --csv` — reuse the broker + recording stack with no UI.
+- **Realtime tails** (`w`): pub/sub (`SUBSCRIBE`/`PSUBSCRIBE`), stream (`XREAD BLOCK … $`), **keyspace notifications** (`PSUBSCRIBE __keyevent@db__:*`), and **`MONITOR`** — all on dedicated sockets, each a tab with a capped scrollback ring buffer. Start with `s` (spec prompt: `pubsub:ch` · `psub:ch.*` · `stream:key` · `keyspace[:N]` · `monitor`), `m` (MONITOR), `K` (keyspace), or `t` on a stream key. `Tab`/`[`/`]` switch tabs, `↑↓`/`G` scroll/follow, `x` stops a tail.
+- **Keyspace monitor**: when a server has `notify-keyspace-events` disabled, the tab shows a non-fatal **banner** explaining it (brokertui never sets it — that's a write).
+- **Read-only command console** (`e`): type a command (`i`), it's validated against a **deny-by-default allowlist** *and* the server's own `COMMAND INFO` flags (refusing `write`/`admin`/`blocking`/`pubsub`) before running; replies render redis-cli-style. History recall (`↑↓`), `r` clears.
+- **Command palette** (`:`): fuzzy-filter and run any action (go to screen, subscribe, start monitor/keyspace, …).
+- **Recording** (`r` on any tail): lossless append-only **JSONL** envelopes under the recordings dir, with live counters; the **Recordings** view (`R`) lists files. Keyspace/MONITOR tails record through the unchanged recorder.
+- **Headless CLI**: `record --connect <p> --source <spec> --out <dir>` (Ctrl-C to stop, accepts `monitor`/`keyspace` specs) and `export <file.jsonl> --csv` — reuse the broker + recording stack with no UI.
 - **Add-connection modal** (`a`): saves profiles to the config file; passwords stay as *specs* (`env:VAR`/`keyring`/`prompt`) or session-only — never written as plaintext.
-- Screen-based TUI (Connections / Browser / Dashboard / Realtime / Recordings) + help overlay (`?`), vim + arrow keys, panic-safe terminal restore, file-only logging.
+- **Theming**: a `[theme]` config section (`dark`/`light` base + per-style colour overrides) plus `NO_COLOR` support (colourless, modifier-only palette).
+- **Mouse**: scroll wheel navigates the focused list/pane (suppressed during text entry).
+- Screen-based TUI (Connections / Browser / Dashboard / Realtime / Recordings / Console) + help overlay (`?`), vim + arrow keys, panic-safe terminal restore, file-only logging.
 
-### Not done yet (Phase 3+)
-Keyspace-notification monitor, `MONITOR` tab, read-only command console, command palette, config theming, mouse, AMQP, write/destructive ops.
+### Not done yet (Phase 4+)
+AMQP broker (behind the `BrokerConnection` trait), write/destructive ops (publish, set, delete/purge), Redis cluster/sentinel, `cargo-dist` releases.
 
 ---
 
@@ -67,30 +75,32 @@ src/
 ├─ tui.rs            # raw mode + alt screen + panic-hook restore
 ├─ event.rs          # AppEvent enum + input & tick tasks
 ├─ logging.rs        # tracing → rolling file (never stdout)
+├─ theme.rs          # Theme styles + [theme]/NO_COLOR resolution (dark/light/plain)
 ├─ app/
-│  ├─ mod.rs         # App: event handling, key dispatch, connect/browse/inspect flow
-│  ├─ state.rs       # Screen, InputMode, Connection, ConnForm, Status
-│  └─ action.rs      # normal-mode keymap → Action
+│  ├─ mod.rs         # App: event handling, key dispatch, connect/browse/console/palette
+│  ├─ state.rs       # Screen, InputMode, Connection, Console, PaletteState, Subscription
+│  └─ action.rs      # normal-mode keymap → Action + command-palette table
 ├─ broker/
-│  ├─ mod.rs         # ★ BrokerConnection trait + shared types (BrowseReq/Page,
-│  │                 #   EntryMeta, ValueView, ServerStats, Ttl, Capabilities)
-│  ├─ actor.rs       # ★ ConnCommand, ConnHandle, spawn_connection(), actor loop
+│  ├─ mod.rs         # ★ BrokerConnection trait (subscribe/tail_notice/exec_readonly)
+│  │                 #   + shared types (SubSpec incl. Keyspace/Monitor, ValueView, …)
+│  ├─ actor.rs       # ★ ConnCommand (incl. Exec), ConnHandle, spawn_connection(), loop
 │  └─ redis/
 │     ├─ mod.rs      # RedisConnection (impl trait) + integration tests
 │     ├─ info.rs     # INFO parser → ServerStats (unit tested)
-│     └─ value.rs    # string→ValueView rendering (unit tested)
+│     ├─ value.rs    # string→ValueView rendering (unit tested)
+│     ├─ tail.rs     # pub/sub · stream · keyspace · MONITOR tails + pure mappers
+│     └─ command.rs  # ★ read-only console: allowlist + COMMAND INFO + reply render
 ├─ config/
-│  ├─ mod.rs         # Config / RedisProfile / Settings, load/save, Paths (XDG)
+│  ├─ mod.rs         # Config / RedisProfile / Settings / ThemeConfig, load/save, Paths
 │  └─ secret.rs      # SecretSpec: env → keyring → prompt
-├─ recording/mod.rs  # placeholder — Phase 2
+├─ recording/mod.rs  # Recorder + JSONL RecordSink + CSV export
 └─ ui/
-   ├─ mod.rs         # render(): header · screen dispatch · footer · overlays
-   ├─ theme.rs       # Theme styles
-   └─ views/mod.rs   # connections · browser · dashboard · conn_form · help
+   ├─ mod.rs         # render(): header · screen dispatch · footer · overlays · snapshots
+   └─ views/mod.rs   # connections · browser · dashboard · realtime · recordings · console · palette · help
 ```
 ★ = the keystone files to read first.
 
-**Keys:** `q`/`Ctrl-c` quit · `j`/`k`/arrows move · `g`/`G` top/bottom · `Ctrl-u`/`Ctrl-d` page · `Enter` connect (Connections) · `a` add · `c`/`b`/`d` screens · `/` filter · `[`/`]` DB · `n` load more · `r` refresh · `?` help · `Esc` dismiss.
+**Keys:** `q`/`Ctrl-c` quit · `j`/`k`/arrows move (mouse wheel too) · `g`/`G` top/bottom · `Ctrl-u`/`Ctrl-d` page · `Enter` connect · `a` add · `c`/`b`/`d`/`w`/`R`/`e` screens · `s` subscribe · `m` MONITOR · `K` keyspace · `i` console input · `:` palette · `/` filter · `[`/`]` DB/tab · `n` load more · `r` refresh/record/clear · `x` stop tail · `?` help · `Esc` dismiss.
 
 ---
 
@@ -138,8 +148,8 @@ python3 scripts/tui_smoke.py --cmd "./target/debug/brokertui --config /tmp/bt.to
 - **Phase 0 — Scaffold** ✅ (`a5c9e30`): event loop, logging, terminal lifecycle, tooling, CI.
 - **Phase 1 — Redis browse** ✅ (`2d83f33`): config/secrets, `BrokerConnection` trait, per-connection actor, SCAN browser, value viewers, INFO dashboard, full TUI.
 - **Phase 2 — Redis realtime + recording** ✅ — completes v1. See "delivered" below.
-- **Phase 3 — Monitoring & polish** ⏭ NEXT: keyspace-notification monitor (needs `notify-keyspace-events`), `MONITOR` tab, read-only command console (whitelist + `COMMAND INFO` flag check), command palette, theming from config, mouse, snapshot UI tests, musl build.
-- **Phase 4 — AMQP**: `AmqpConnection` behind the trait, browse exchanges/queues, **non-destructive tail** (temp exclusive queue bound to the exchange), record through the unchanged recorder. ⚠ See AMQP note below.
+- **Phase 3 — Monitoring & polish** ✅ — keyspace-notification monitor, `MONITOR` tail, read-only command console, command palette, config theming, mouse, snapshot UI tests, musl CI. See "delivered" below.
+- **Phase 4 — AMQP** ⏭ NEXT: `AmqpConnection` behind the trait, browse exchanges/queues, **non-destructive tail** (temp exclusive queue bound to the exchange), record through the unchanged recorder. ⚠ See AMQP note below.
 - **Phase 5 — Mutations & scale-out**: write/destructive ops (publish, set, delete/purge) behind confirmations + a read-only lock; Redis cluster/sentinel; cargo-dist releases.
 
 ---
@@ -163,6 +173,29 @@ Watch live broker activity and record it to disk, reusing the actor + AppEvent p
 - **⚠ `redis` response timeout vs `XREAD BLOCK`** — the async connection's `DEFAULT_RESPONSE_TIMEOUT` is **500ms**, which aborts any `XREAD BLOCK` that idles longer. Stream tails open with `AsyncConnectionConfig::set_response_timeout(None)`. (A fast-arriving test entry can hide this — the stream integration test deliberately delays its `XADD` past 500ms.)
 - **`lib.rs` refactor skipped** (it was only "likely") — `record`/`export` are subcommands of the one binary and integration tests stay in-crate (`#[cfg(all(test, feature="integration"))]`), as in Phase 1. Revisit if external crates need to link the stack.
 - **Stream payloads** are emitted as a JSON object of the entry's fields (order preserved); field values must be UTF-8 (same constraint as the inspect path). Pub/sub payloads are fully binary-safe (base64). New setting: `settings.tail_scrollback` (default 2000).
+
+---
+
+## ✅ Phase 3 — delivered
+
+The deferred Redis features + UX polish, all reusing the Phase-1/2 plumbing.
+
+1. **New tail kinds as `SubSpec` variants** — `Keyspace { db }` and `Monitor` join `Channel`/`Pattern`/`Stream` in `broker/mod.rs`. Because they're just specs, they flow through the *entire* existing path unchanged: dedicated socket, `BrokerEvent` stream, scrollback ring buffer, recorder (new `source_type` tags), CSV export, and headless `record`. `parse` accepts bare `monitor`/`keyspace` and `keyspace:N`.
+2. **Redis tails** (`broker/redis/tail.rs`) — `open_keyspace` (`PSUBSCRIBE __keyevent@<db>__:*`; the channel suffix is the event, the message is the key) and `open_monitor` (`client.get_async_monitor().into_on_message::<String>()`). Pure `keyspace_event`/`monitor_event`/`parse_monitor_line` mappers are unit-tested.
+3. **Keyspace "disabled" banner** — a new default-`None` trait method `BrokerConnection::tail_notice(&spec)`; the Redis impl runs `CONFIG GET notify-keyspace-events` and returns an advisory when empty. The actor emits `AppEvent::SubscriptionNotice`, stored on the `Subscription` and rendered as a banner. UI-only — never recorded. brokertui never enables notifications itself (that's a write).
+4. **Read-only command console** (`broker/redis/command.rs`, `Screen::Console`) — two-layer safety: a **deny-by-default static allowlist** (`validate_readonly`, with a per-subcommand gate for `CONFIG`/`CLIENT`/`OBJECT`/…) *plus* `ensure_server_readonly` checking the server's own `COMMAND INFO` flags. New `BrokerConnection::exec_readonly`, `ConnCommand::Exec`, `AppEvent::CommandResult`; per-connection history + scrollback; replies rendered redis-cli-style (binary → base64). `tui-textarea` was **avoided** — single-line manual input like the connection form, so the ratatui-0.30 pin risk never materialised.
+5. **Command palette** (`:`, `InputMode::Palette`) — substring filter over a static `(label, Action)` table in `app/action.rs`; `Enter` dispatches the chosen `Action`.
+6. **Theming** (`src/theme.rs`, promoted out of `ui/`) — `Theme::from_config(&ThemeConfig, no_color)` with `dark`/`light` bases + per-style colour overrides (named/`#rrggbb`/indexed via `Color::from_str`); `NO_COLOR` yields a colourless, modifier-only palette. Built once at startup and stored on `App` (`Theme` is `Copy`).
+7. **Mouse** — `EnableMouseCapture`/`DisableMouseCapture` in `tui.rs` (panic-hook safe); scroll-wheel events route through the existing `nav` logic (ignored during text entry; click selection intentionally not tracked — immediate-mode render keeps no hit-test map).
+8. **Snapshot UI tests** — `insta` (dev-dep) renders key screens (connections/help/palette/console/dashboard/keyspace-notice) to `TestBackend` with a pinned clock + fixed data → `src/ui/snapshots/*.snap`. Regenerate with `INSTA_UPDATE=always cargo test`.
+9. **musl / CI** — a new `musl` CI job builds `--release --no-default-features --target x86_64-unknown-linux-musl` and runs headless clippy; the `build` job now runs the integration suite (Redis service + `notify-keyspace-events KEA`). A `--no-default-features` dead-code gate on `KEYRING_SERVICE` was fixed.
+
+**Decisions & gotchas (Phase 3):**
+- **`SubSpec::target()` now returns `String`** (was `&str`) — `Keyspace`/`Monitor` have no backing string (`db0`/`all` are synthesised). The one call site (`recording_filename`) takes `&spec.target()`.
+- **MONITOR is a firehose & server-wide** (all dbs, every command incl. our own liveness pings) — fine via the existing lossy-UI / lossless-recorder split; no `SELECT` needed.
+- **The console runs on the actor's shared manager**, whose `db` follows the last browse `SELECT`. Acceptable for v1; revisit if per-console db isolation is wanted.
+- **`COMMAND INFO` reports `CONFIG`/`CLIENT` as `admin`** as a whole, so the dynamic flag check is *skipped* for subcommand-bearing commands — their specific safe subcommands (`CONFIG GET`, `CLIENT LIST`, …) are gated by the static allowlist instead.
+- **Mouse capture suppresses the terminal's native text selection** while the app runs — a known crossterm tradeoff for receiving scroll events.
 
 ---
 

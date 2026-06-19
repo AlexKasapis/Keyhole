@@ -22,9 +22,19 @@ pub enum Action {
     GotoDashboard,
     GotoRealtime,
     GotoRecordings,
+    /// Open the read-only command console.
+    GotoConsole,
     StartFilter,
     /// Open the subscribe prompt.
     Subscribe,
+    /// Start a MONITOR tail on the active connection.
+    StartMonitor,
+    /// Start a keyspace-notification tail on the active connection's db.
+    StartKeyspace,
+    /// Begin typing a command (Console screen).
+    ConsoleEdit,
+    /// Open the command palette overlay.
+    OpenPalette,
     /// Tail the selected key (Browser) as a stream.
     TailKey,
     /// Focus the previous / next tail tab (Realtime).
@@ -61,7 +71,12 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('d')) => Some(Action::GotoDashboard),
         (false, Char('w')) => Some(Action::GotoRealtime),
         (false, Char('R')) => Some(Action::GotoRecordings),
+        (false, Char('e')) => Some(Action::GotoConsole),
         (false, Char('s')) => Some(Action::Subscribe),
+        (false, Char('m')) => Some(Action::StartMonitor),
+        (false, Char('K')) => Some(Action::StartKeyspace),
+        (false, Char('i')) => Some(Action::ConsoleEdit),
+        (false, Char(':')) => Some(Action::OpenPalette),
         (false, Char('t')) => Some(Action::TailKey),
         (false, Char('x')) => Some(Action::StopTail),
         (false, Tab) => Some(Action::NextTab),
@@ -75,6 +90,43 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Esc) => Some(Action::Dismiss),
         _ => None,
     }
+}
+
+/// One entry in the command palette: a human label and the action it runs.
+pub struct PaletteItem {
+    pub label: &'static str,
+    pub action: Action,
+}
+
+/// The actions offered by the command palette (`:`), in display order.
+pub const PALETTE_ITEMS: &[PaletteItem] = &[
+    pal("Go to: Connections", Action::GotoConnections),
+    pal("Go to: Browser", Action::GotoBrowser),
+    pal("Go to: Dashboard", Action::GotoDashboard),
+    pal("Go to: Realtime tails", Action::GotoRealtime),
+    pal("Go to: Recordings", Action::GotoRecordings),
+    pal("Go to: Command console", Action::GotoConsole),
+    pal("Add connection", Action::AddConnection),
+    pal("Subscribe (pub/sub or stream)…", Action::Subscribe),
+    pal("Monitor commands (MONITOR)", Action::StartMonitor),
+    pal("Keyspace events (current db)", Action::StartKeyspace),
+    pal("Refresh / toggle recording", Action::Refresh),
+    pal("Toggle help", Action::ToggleHelp),
+    pal("Quit", Action::Quit),
+];
+
+/// `const fn` constructor so the palette list can be a `const`.
+const fn pal(label: &'static str, action: Action) -> PaletteItem {
+    PaletteItem { label, action }
+}
+
+/// The palette items whose label contains `query` (case-insensitive substring).
+pub fn palette_matches(query: &str) -> Vec<&'static PaletteItem> {
+    let q = query.trim().to_ascii_lowercase();
+    PALETTE_ITEMS
+        .iter()
+        .filter(|item| q.is_empty() || item.label.to_ascii_lowercase().contains(&q))
+        .collect()
 }
 
 #[cfg(test)]
@@ -109,7 +161,12 @@ mod tests {
         assert_eq!(plain(Char('d')), Some(Action::GotoDashboard));
         assert_eq!(plain(Char('w')), Some(Action::GotoRealtime));
         assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
+        assert_eq!(plain(Char('e')), Some(Action::GotoConsole));
         assert_eq!(plain(Char('s')), Some(Action::Subscribe));
+        assert_eq!(plain(Char('m')), Some(Action::StartMonitor));
+        assert_eq!(plain(Char('K')), Some(Action::StartKeyspace));
+        assert_eq!(plain(Char('i')), Some(Action::ConsoleEdit));
+        assert_eq!(plain(Char(':')), Some(Action::OpenPalette));
         assert_eq!(plain(Char('t')), Some(Action::TailKey));
         assert_eq!(plain(Char('x')), Some(Action::StopTail));
         assert_eq!(plain(Tab), Some(Action::NextTab));
@@ -137,5 +194,30 @@ mod tests {
         assert_eq!(ctrl(Char('q')), None, "Ctrl-q is not a binding");
         assert_eq!(ctrl(Char('a')), None);
         assert_eq!(plain(F(1)), None);
+    }
+
+    #[test]
+    fn palette_filters_by_substring_case_insensitively() {
+        // Empty query returns everything.
+        assert_eq!(palette_matches("").len(), PALETTE_ITEMS.len());
+        // Substring match is case-insensitive.
+        let monitor = palette_matches("monitor");
+        assert_eq!(monitor.len(), 1);
+        assert_eq!(monitor[0].action, Action::StartMonitor);
+        assert!(
+            palette_matches("GO TO").len() >= 5,
+            "all the Go to: entries"
+        );
+        assert!(palette_matches("zzzz").is_empty(), "no matches");
+    }
+
+    #[test]
+    fn every_palette_action_is_distinct() {
+        // A typo'd duplicate would make two palette rows do the same thing.
+        let mut actions: Vec<Action> = PALETTE_ITEMS.iter().map(|i| i.action).collect();
+        let before = actions.len();
+        actions.sort_by_key(|a| format!("{a:?}"));
+        actions.dedup();
+        assert_eq!(actions.len(), before, "palette actions must be unique");
     }
 }

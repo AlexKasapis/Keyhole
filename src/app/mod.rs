@@ -6,13 +6,13 @@ mod action;
 mod state;
 
 pub use state::{
-    ConnForm, Connection, InputMode, RecordState, RecordingFile, Screen, Status, SubState,
-    Subscription,
+    ConnForm, Connection, Console, ConsoleEntry, InputMode, PaletteState, RecordState,
+    RecordingFile, Screen, Status, SubState, Subscription,
 };
 
 use std::path::PathBuf;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
 use ratatui::widgets::ListState;
 use time::OffsetDateTime;
 use tokio::sync::mpsc::Sender;
@@ -29,6 +29,7 @@ use crate::broker::{
 use crate::config::{self, Config, ConnectionConfig, RedisProfile};
 use crate::event::AppEvent;
 use crate::recording::RecordingStatus;
+use crate::theme::Theme;
 
 /// How many ticks (~250ms each) between automatic dashboard stat refreshes.
 const STATS_REFRESH_TICKS: u32 = 8;
@@ -57,6 +58,7 @@ pub struct App {
     pending_connect: Option<String>,
 
     // UI state (read by `crate::ui`).
+    pub(crate) theme: Theme,
     pub(crate) profiles: Vec<RedisProfile>,
     pub(crate) profile_state: ListState,
     pub(crate) connections: Vec<Connection>,
@@ -66,6 +68,7 @@ pub struct App {
     pub(crate) filter: String,
     pub(crate) subscribe_buf: String,
     pub(crate) form: Option<ConnForm>,
+    pub(crate) palette: Option<PaletteState>,
     pub(crate) status: Option<Status>,
     pub(crate) show_help: bool,
     pub(crate) recordings: Vec<RecordingFile>,
@@ -94,6 +97,7 @@ impl App {
         let preview_bytes = config.settings.value_preview_bytes;
         let scan_count = config.settings.scan_count;
         let tail_scrollback = config.settings.tail_scrollback;
+        let theme = Theme::resolve(&config.theme);
         let mut profile_state = ListState::default();
         if !profiles.is_empty() {
             profile_state.select(Some(0));
@@ -113,6 +117,7 @@ impl App {
             next_id: 1,
             next_sub_id: 1,
             pending_connect: connect_on_start,
+            theme,
             profiles,
             profile_state,
             connections: Vec::new(),
@@ -122,6 +127,7 @@ impl App {
             filter: String::new(),
             subscribe_buf: String::new(),
             form: None,
+            palette: None,
             status: None,
             show_help: false,
             recordings: Vec::new(),
@@ -158,11 +164,24 @@ impl App {
         self.connections.iter().any(|c| c.name == name)
     }
 
+    /// Labels of the palette items matching the current query (for rendering).
+    /// Empty when the palette is closed.
+    pub(crate) fn palette_labels(&self) -> Vec<&'static str> {
+        match &self.palette {
+            Some(p) => action::palette_matches(&p.query)
+                .iter()
+                .map(|item| item.label)
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
     // -- event handling ------------------------------------------------------
 
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {
             AppEvent::Input(Event::Key(key)) => self.handle_key(key),
+            AppEvent::Input(Event::Mouse(mouse)) => self.handle_mouse(mouse.kind),
             AppEvent::Input(_) => {}
             AppEvent::Tick => self.on_tick(),
             AppEvent::Connected { handle } => self.on_connected(handle),
@@ -173,12 +192,34 @@ impl App {
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
             AppEvent::SubscriptionStarted { id, sub_id } => self.on_sub_started(id, sub_id),
+            AppEvent::SubscriptionNotice { id, sub_id, notice } => {
+                self.on_sub_notice(id, sub_id, notice)
+            }
             AppEvent::SubscriptionEnded { id, sub_id, reason } => {
                 self.on_sub_ended(id, sub_id, reason)
             }
             AppEvent::RecordingUpdate { id, sub_id, status } => {
                 self.on_recording_update(id, sub_id, status)
             }
+            AppEvent::CommandResult {
+                id,
+                command,
+                result,
+            } => self.on_command_result(id, command, result),
+        }
+    }
+
+    /// Route mouse scroll to the focused list/pane (click selection is not
+    /// tracked — the immediate-mode render keeps no hit-test map). Ignored
+    /// during text entry so a scroll can't disturb a half-typed command.
+    fn handle_mouse(&mut self, kind: MouseEventKind) {
+        if self.mode != InputMode::Normal {
+            return;
+        }
+        match kind {
+            MouseEventKind::ScrollDown => self.nav(1),
+            MouseEventKind::ScrollUp => self.nav(-1),
+            _ => {}
         }
     }
 
@@ -281,6 +322,32 @@ impl App {
         }
     }
 
+    fn on_sub_notice(&mut self, id: ConnId, sub_id: u32, notice: String) {
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            if let Some(sub) = conn.sub_by_id_mut(sub_id) {
+                sub.notice = Some(notice.clone());
+            }
+        }
+        self.set_status(notice, true);
+    }
+
+    fn on_command_result(&mut self, id: ConnId, command: String, result: Result<String, String>) {
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            let (output, is_error) = match result {
+                Ok(out) => (out, false),
+                Err(err) => (err, true),
+            };
+            conn.console.pending = None;
+            conn.console.entries.push(ConsoleEntry {
+                command,
+                output,
+                is_error,
+            });
+            // Snap back to the latest reply (offset 0 == following the bottom).
+            conn.console.scroll = 0;
+        }
+    }
+
     fn on_sub_ended(&mut self, id: ConnId, sub_id: u32, reason: Option<String>) {
         if let Some(conn) = self.conn_by_id_mut(id) {
             if let Some(sub) = conn.sub_by_id_mut(sub_id) {
@@ -355,6 +422,8 @@ impl App {
             InputMode::Filter => self.handle_filter_key(key),
             InputMode::Form => self.handle_form_key(key),
             InputMode::Subscribe => self.handle_subscribe_key(key),
+            InputMode::Command => self.handle_command_key(key),
+            InputMode::Palette => self.handle_palette_key(key),
         }
     }
 
@@ -397,6 +466,13 @@ impl App {
                 self.screen = Screen::Recordings;
                 self.scan_recordings();
             }
+            Action::GotoConsole => {
+                if self.active.is_some() {
+                    self.screen = Screen::Console;
+                } else {
+                    self.set_status("connect first to use the console".to_string(), true);
+                }
+            }
             Action::StartFilter => {
                 if self.screen == Screen::Browser && self.active.is_some() {
                     self.filter.clear();
@@ -404,6 +480,17 @@ impl App {
                 }
             }
             Action::Subscribe => self.open_subscribe_prompt(),
+            Action::StartMonitor => self.start_special_tail(SubSpec::Monitor),
+            Action::StartKeyspace => {
+                let db = self.active_conn().map(|c| c.db).unwrap_or(0);
+                self.start_special_tail(SubSpec::Keyspace { db });
+            }
+            Action::ConsoleEdit => {
+                if self.screen == Screen::Console && self.active.is_some() {
+                    self.enter_command_mode();
+                }
+            }
+            Action::OpenPalette => self.open_palette(),
             Action::TailKey => self.tail_selected_key(),
             Action::PrevTab => {
                 if self.screen == Screen::Realtime {
@@ -452,6 +539,7 @@ impl App {
                     self.scan_recordings();
                     self.set_status("recordings refreshed".to_string(), false);
                 }
+                Screen::Console => self.clear_console(),
                 Screen::Connections => {}
             },
             Action::ToggleHelp => self.show_help = !self.show_help,
@@ -553,6 +641,7 @@ impl App {
                 let next = move_selection(self.recordings_state.selected(), len, delta);
                 self.recordings_state.select(next);
             }
+            Screen::Console => self.scroll_console(delta),
             Screen::Dashboard => {}
         }
     }
@@ -596,6 +685,13 @@ impl App {
                 if len > 0 {
                     self.recordings_state
                         .select(Some(if top { 0 } else { len - 1 }));
+                }
+            }
+            Screen::Console => {
+                if let Some(conn) = self.active_conn_mut() {
+                    // Top: scroll fully up (render clamps the large offset);
+                    // bottom: follow the newest output.
+                    conn.console.scroll = if top { u16::MAX } else { 0 };
                 }
             }
             Screen::Dashboard => {}
@@ -997,6 +1093,159 @@ impl App {
             let next = (sub.offset as i32 - delta).clamp(0, max) as usize;
             sub.offset = next;
             sub.follow = next == 0;
+        }
+    }
+
+    /// Start a keyspace or MONITOR tail on the active connection. These are just
+    /// more [`SubSpec`]s, so they reuse the whole subscribe/record/scrollback
+    /// path; `start_subscribe` focuses an existing identical tail rather than
+    /// duplicating it.
+    fn start_special_tail(&mut self, spec: SubSpec) {
+        if self.active.is_none() {
+            self.set_status("connect first, then start the tail".to_string(), true);
+            return;
+        }
+        self.start_subscribe(spec);
+    }
+
+    // -- command console -----------------------------------------------------
+
+    fn active_console_mut(&mut self) -> Option<&mut Console> {
+        self.active_conn_mut().map(|c| &mut c.console)
+    }
+
+    /// Begin typing a console command on a fresh prompt.
+    fn enter_command_mode(&mut self) {
+        if let Some(console) = self.active_console_mut() {
+            console.input.clear();
+            console.history_pos = None;
+        }
+        self.mode = InputMode::Command;
+    }
+
+    fn clear_console(&mut self) {
+        if let Some(console) = self.active_console_mut() {
+            console.entries.clear();
+            console.scroll = 0;
+        }
+        self.set_status("console cleared".to_string(), false);
+    }
+
+    fn scroll_console(&mut self, delta: i32) {
+        if let Some(console) = self.active_console_mut() {
+            // Up (delta < 0) scrolls back through output (larger offset from the
+            // bottom); the upper bound is clamped against total lines at render.
+            let next = console.scroll as i32 - delta;
+            console.scroll = next.clamp(0, u16::MAX as i32) as u16;
+        }
+    }
+
+    fn handle_command_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.mode = InputMode::Normal,
+            KeyCode::Enter => self.submit_command(),
+            KeyCode::Up => {
+                if let Some(console) = self.active_console_mut() {
+                    console.recall_prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(console) = self.active_console_mut() {
+                    console.recall_next();
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(console) = self.active_console_mut() {
+                    console.input.push(c);
+                    console.history_pos = None;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(console) = self.active_console_mut() {
+                    console.input.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Submit the typed command for read-only execution. Stays in command mode
+    /// (console-style) so commands can be issued back to back; `Esc` leaves.
+    fn submit_command(&mut self) {
+        let Some(id) = self.active_id() else {
+            self.mode = InputMode::Normal;
+            return;
+        };
+        let command = self
+            .active_console_mut()
+            .map(|c| c.input.trim().to_string())
+            .unwrap_or_default();
+        if command.is_empty() {
+            return;
+        }
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            conn.console.remember(&command);
+            conn.console.input.clear();
+            conn.console.pending = Some(command.clone());
+            conn.console.scroll = 0;
+            conn.handle.send(ConnCommand::Exec { command });
+        }
+    }
+
+    // -- command palette -----------------------------------------------------
+
+    fn open_palette(&mut self) {
+        self.palette = Some(PaletteState::default());
+        self.mode = InputMode::Palette;
+    }
+
+    fn close_palette(&mut self) {
+        self.palette = None;
+        self.mode = InputMode::Normal;
+    }
+
+    fn handle_palette_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => self.close_palette(),
+            KeyCode::Enter => self.submit_palette(),
+            KeyCode::Up => self.palette_nav(-1),
+            KeyCode::Down => self.palette_nav(1),
+            KeyCode::Char(c) => {
+                if let Some(p) = &mut self.palette {
+                    p.query.push(c);
+                    p.selected = 0;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(p) = &mut self.palette {
+                    p.query.pop();
+                    p.selected = 0;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn palette_nav(&mut self, delta: i32) {
+        if let Some(p) = &mut self.palette {
+            let len = action::palette_matches(&p.query).len();
+            if len == 0 {
+                p.selected = 0;
+                return;
+            }
+            p.selected = (p.selected as i32 + delta).rem_euclid(len as i32) as usize;
+        }
+    }
+
+    fn submit_palette(&mut self) {
+        let action = self.palette.as_ref().and_then(|p| {
+            action::palette_matches(&p.query)
+                .get(p.selected)
+                .map(|item| item.action)
+        });
+        self.close_palette();
+        if let Some(action) = action {
+            self.apply(action);
         }
     }
 
@@ -2078,6 +2327,234 @@ mod tests {
         assert_eq!(app.recordings_state.selected(), None);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- monitor / keyspace tails --------------------------------------------
+
+    #[tokio::test]
+    async fn start_monitor_opens_a_monitor_tail() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.apply(Action::StartMonitor);
+        assert_eq!(app.screen, Screen::Realtime);
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(conn.subs[0].spec, SubSpec::Monitor);
+        assert_eq!(conn.subs[0].label, "monitor");
+    }
+
+    #[tokio::test]
+    async fn start_keyspace_uses_active_db() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].db = 3;
+        app.apply(Action::StartKeyspace);
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs[0].spec, SubSpec::Keyspace { db: 3 });
+        assert_eq!(conn.subs[0].label, "keyspace:db3");
+    }
+
+    #[test]
+    fn start_monitor_without_connection_errors() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::StartMonitor);
+        assert!(app.active_conn().is_none());
+        assert!(app.status.as_ref().unwrap().is_error);
+    }
+
+    #[tokio::test]
+    async fn sub_notice_is_stored_on_the_tail() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Keyspace { db: 0 });
+        let sub_id = app.connections[0].subs[0].sub_id;
+        app.handle_event(AppEvent::SubscriptionNotice {
+            id,
+            sub_id,
+            notice: "notifications disabled".into(),
+        });
+        assert_eq!(
+            app.connections[0].subs[0].notice.as_deref(),
+            Some("notifications disabled")
+        );
+        assert!(app.status.as_ref().unwrap().is_error);
+    }
+
+    // -- console -------------------------------------------------------------
+
+    #[tokio::test]
+    async fn goto_console_requires_connection() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::GotoConsole);
+        assert_ne!(
+            app.screen,
+            Screen::Console,
+            "no console without a connection"
+        );
+        assert!(app.status.as_ref().unwrap().is_error);
+        connect(&mut app, 1, "prod", 16).await;
+        app.apply(Action::GotoConsole);
+        assert_eq!(app.screen, Screen::Console);
+    }
+
+    #[tokio::test]
+    async fn console_edit_and_submit_records_command() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Console;
+        app.apply(Action::ConsoleEdit);
+        assert_eq!(app.mode, InputMode::Command);
+        for c in "GET k".chars() {
+            app.handle_key(ch(c));
+        }
+        assert_eq!(app.connections[0].console.input, "GET k");
+        app.handle_key(key(KeyCode::Enter));
+        let console = &app.connections[0].console;
+        assert_eq!(console.pending.as_deref(), Some("GET k"));
+        assert_eq!(console.history, vec!["GET k"]);
+        assert!(console.input.is_empty(), "input cleared after submit");
+        assert_eq!(app.mode, InputMode::Command, "stays in command mode");
+        // Esc leaves command mode.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.mode, InputMode::Normal);
+    }
+
+    #[tokio::test]
+    async fn command_result_appends_entry_and_clears_pending() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].console.pending = Some("PING".into());
+        app.handle_event(AppEvent::CommandResult {
+            id,
+            command: "PING".into(),
+            result: Ok("PONG".into()),
+        });
+        let console = &app.connections[0].console;
+        assert!(console.pending.is_none());
+        assert_eq!(console.entries.len(), 1);
+        assert_eq!(console.entries[0].output, "PONG");
+        assert!(!console.entries[0].is_error);
+
+        app.handle_event(AppEvent::CommandResult {
+            id,
+            command: "SET k v".into(),
+            result: Err("refused".into()),
+        });
+        let last = app.connections[0].console.entries.last().unwrap();
+        assert!(last.is_error);
+        assert_eq!(last.output, "refused");
+    }
+
+    #[tokio::test]
+    async fn console_empty_submit_is_ignored() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Console;
+        app.apply(Action::ConsoleEdit);
+        app.handle_key(key(KeyCode::Enter)); // empty
+        assert!(app.connections[0].console.history.is_empty());
+        assert!(app.connections[0].console.pending.is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_console_empties_output() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Console;
+        app.handle_event(AppEvent::CommandResult {
+            id,
+            command: "PING".into(),
+            result: Ok("PONG".into()),
+        });
+        assert_eq!(app.connections[0].console.entries.len(), 1);
+        app.apply(Action::Refresh); // on Console, refresh == clear
+        assert!(app.connections[0].console.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn console_scroll_via_nav_and_edges() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Console;
+        app.nav(-1); // up == scroll back
+        assert_eq!(app.connections[0].console.scroll, 1);
+        app.nav(1); // down
+        assert_eq!(app.connections[0].console.scroll, 0);
+        app.nav(1); // clamped at the bottom
+        assert_eq!(app.connections[0].console.scroll, 0);
+        app.nav_edge(true); // top -> max offset sentinel
+        assert_eq!(app.connections[0].console.scroll, u16::MAX);
+        app.nav_edge(false); // bottom -> follow
+        assert_eq!(app.connections[0].console.scroll, 0);
+    }
+
+    // -- command palette -----------------------------------------------------
+
+    #[test]
+    fn palette_opens_filters_and_dispatches() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::OpenPalette);
+        assert_eq!(app.mode, InputMode::Palette);
+        assert!(app.palette.is_some());
+        // Filter down to "Quit" and run it.
+        for c in "quit".chars() {
+            app.handle_key(ch(c));
+        }
+        assert_eq!(app.palette.as_ref().unwrap().query, "quit");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.palette.is_none(), "palette closes after dispatch");
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(!app.running, "selecting Quit dispatched the action");
+    }
+
+    #[test]
+    fn palette_escape_closes_without_acting() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::OpenPalette);
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.palette.is_none());
+        assert_eq!(app.mode, InputMode::Normal);
+        assert!(app.running);
+    }
+
+    #[test]
+    fn palette_nav_wraps_within_matches() {
+        let (mut app, _rx) = test_app();
+        app.apply(Action::OpenPalette);
+        // Narrow to the "Go to:" entries so the count is predictable.
+        for c in "go to".chars() {
+            app.handle_key(ch(c));
+        }
+        let count = app.palette_labels().len();
+        assert!(count >= 5);
+        app.handle_key(key(KeyCode::Up)); // wrap to the last
+        assert_eq!(app.palette.as_ref().unwrap().selected, count - 1);
+        app.handle_key(key(KeyCode::Down)); // back to the first
+        assert_eq!(app.palette.as_ref().unwrap().selected, 0);
+    }
+
+    // -- mouse ---------------------------------------------------------------
+
+    #[test]
+    fn mouse_scroll_moves_selection_in_normal_mode() {
+        let (mut app, _rx) = build_app(config_with(&["a", "b", "c"]), unique_config_path(), None);
+        assert_eq!(app.profile_state.selected(), Some(0));
+        app.handle_mouse(MouseEventKind::ScrollDown);
+        assert_eq!(app.profile_state.selected(), Some(1));
+        app.handle_mouse(MouseEventKind::ScrollUp);
+        assert_eq!(app.profile_state.selected(), Some(0));
+    }
+
+    #[test]
+    fn mouse_scroll_ignored_during_text_entry() {
+        let (mut app, _rx) = build_app(config_with(&["a", "b"]), unique_config_path(), None);
+        app.mode = InputMode::Palette;
+        app.handle_mouse(MouseEventKind::ScrollDown);
+        assert_eq!(
+            app.profile_state.selected(),
+            Some(0),
+            "no navigation while typing"
+        );
     }
 
     // -- pure helpers --------------------------------------------------------
