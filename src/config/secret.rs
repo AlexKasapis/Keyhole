@@ -45,11 +45,6 @@ impl SecretSpec {
         }
         SecretSpec::Prompt
     }
-
-    /// True when this secret must be entered interactively.
-    pub fn requires_prompt(&self) -> bool {
-        matches!(self, SecretSpec::Prompt)
-    }
 }
 
 /// Resolve a secret to its value.
@@ -62,9 +57,7 @@ pub fn resolve(spec: &SecretSpec, account_hint: &str) -> anyhow::Result<Option<S
         SecretSpec::Env(var) => std::env::var(var)
             .map(Some)
             .map_err(|_| anyhow::anyhow!("environment variable `{var}` is not set")),
-        SecretSpec::Keyring(account) => {
-            resolve_keyring(account.as_deref().unwrap_or(account_hint))
-        }
+        SecretSpec::Keyring(account) => resolve_keyring(account.as_deref().unwrap_or(account_hint)),
     }
 }
 
@@ -75,23 +68,15 @@ fn resolve_keyring(account: &str) -> anyhow::Result<Option<String>> {
     match entry.get_password() {
         Ok(secret) => Ok(Some(secret)),
         Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(anyhow::anyhow!("reading keyring entry for `{account}`: {e}")),
+        Err(e) => Err(anyhow::anyhow!(
+            "reading keyring entry for `{account}`: {e}"
+        )),
     }
 }
 
 #[cfg(not(feature = "keyring"))]
 fn resolve_keyring(_account: &str) -> anyhow::Result<Option<String>> {
     anyhow::bail!("keyring support is not compiled in; use `env:VAR` or `prompt`")
-}
-
-/// Store a secret in the OS keyring under [`KEYRING_SERVICE`] for `account`.
-#[cfg(feature = "keyring")]
-pub fn store_keyring(account: &str, secret: &str) -> anyhow::Result<()> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, account)
-        .map_err(|e| anyhow::anyhow!("opening keyring entry for `{account}`: {e}"))?;
-    entry
-        .set_password(secret)
-        .map_err(|e| anyhow::anyhow!("writing keyring entry for `{account}`: {e}"))
 }
 
 #[cfg(test)]
@@ -102,7 +87,10 @@ mod tests {
     fn parses_specs() {
         assert_eq!(SecretSpec::parse(""), SecretSpec::None);
         assert_eq!(SecretSpec::parse("  "), SecretSpec::None);
-        assert_eq!(SecretSpec::parse("env:REDIS_PW"), SecretSpec::Env("REDIS_PW".into()));
+        assert_eq!(
+            SecretSpec::parse("env:REDIS_PW"),
+            SecretSpec::Env("REDIS_PW".into())
+        );
         assert_eq!(SecretSpec::parse("keyring"), SecretSpec::Keyring(None));
         assert_eq!(
             SecretSpec::parse("keyring:prod"),
@@ -122,7 +110,10 @@ mod tests {
 
     #[test]
     fn missing_env_var_errors() {
-        let result = resolve(&SecretSpec::Env("BROKERTUI_TEST_DEFINITELY_UNSET".into()), "acct");
+        let result = resolve(
+            &SecretSpec::Env("BROKERTUI_TEST_DEFINITELY_UNSET".into()),
+            "acct",
+        );
         assert!(result.is_err());
     }
 

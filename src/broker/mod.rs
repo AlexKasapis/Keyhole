@@ -6,6 +6,9 @@
 //! 4) — some result types currently carry Redis-flavoured data and will grow
 //! enum variants when a second broker arrives.
 
+pub mod actor;
+pub mod redis;
+
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
@@ -14,30 +17,12 @@ use async_trait::async_trait;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ConnId(pub u32);
 
-/// Which kind of broker a connection talks to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrokerKind {
-    Redis,
-    Amqp,
-}
-
-impl BrokerKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            BrokerKind::Redis => "redis",
-            BrokerKind::Amqp => "amqp",
-        }
-    }
-}
-
 /// What a connection can do — drives which views/actions the UI offers.
+/// (A broker-kind tag returns in Phase 4 when a second broker exists.)
 #[derive(Debug, Clone)]
 pub struct Capabilities {
-    pub kind: BrokerKind,
     /// Number of selectable databases (Redis); 1 when not applicable.
     pub databases: u32,
-    /// Server version string, if known.
-    pub version: Option<String>,
 }
 
 /// The Redis value type of a key (and the "missing" / "unknown" cases).
@@ -181,12 +166,10 @@ pub enum ValueView {
     },
     Hash {
         len: usize,
-        offset: usize,
         fields: Vec<(String, String)>,
     },
     ZSet {
         len: usize,
-        offset: usize,
         items: Vec<(String, f64)>,
     },
     Stream {
@@ -232,8 +215,6 @@ impl ServerStats {
 /// these as a `Box<dyn BrokerConnection>` and calls it in response to commands.
 #[async_trait]
 pub trait BrokerConnection: Send {
-    fn kind(&self) -> BrokerKind;
-
     /// Establish the connection and report capabilities.
     async fn connect(&mut self) -> anyhow::Result<Capabilities>;
 

@@ -45,6 +45,7 @@ clap = { version = "4", features = ["derive"] }
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "macros"] }
 base64 = "0.22"
 bytes = "1"
+percent-encoding = "2.3.2"
 
 [features]
 default = ["keyring"]

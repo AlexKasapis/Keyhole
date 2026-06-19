@@ -14,6 +14,7 @@ mod recording;
 mod tui;
 mod ui;
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -24,6 +25,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::app::App;
 use crate::cli::Cli;
+use crate::config::Config;
 use crate::event::AppEvent;
 use crate::tui::Tui;
 
@@ -57,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let mut terminal = tui::init();
-    let result = run(&mut terminal).await;
+    let result = run(&mut terminal, config, config_path, cli.connect).await;
     tui::restore();
 
     if let Err(err) = &result {
@@ -69,18 +71,31 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// The render loop. Owns `App`; only draws and reacts to channel events.
-async fn run(terminal: &mut Tui) -> anyhow::Result<()> {
+async fn run(
+    terminal: &mut Tui,
+    config: Config,
+    config_path: PathBuf,
+    connect: Option<String>,
+) -> anyhow::Result<()> {
     let (tx, mut rx) = mpsc::channel::<AppEvent>(EVENT_CHANNEL_CAPACITY);
     let cancel = CancellationToken::new();
     let tracker = TaskTracker::new();
 
     event::spawn_input(tx.clone(), cancel.child_token(), &tracker);
     event::spawn_tick(tx.clone(), cancel.child_token(), &tracker, TICK_PERIOD);
-    // Drop our own handle; the only remaining senders live in the spawned tasks,
-    // so the channel closes once they stop.
-    drop(tx);
 
-    let mut app = App::new();
+    let mut app = App::new(
+        config,
+        config_path,
+        tx.clone(),
+        tracker.clone(),
+        cancel.clone(),
+        connect,
+    );
+    // Our local handle is no longer needed; App and the spawned tasks hold clones.
+    drop(tx);
+    app.on_start();
+
     while app.running {
         terminal
             .draw(|frame| ui::render(frame, &mut app))
@@ -91,7 +106,7 @@ async fn run(terminal: &mut Tui) -> anyhow::Result<()> {
         }
     }
 
-    // Graceful shutdown: cancel tasks and wait for them to finish.
+    // Graceful shutdown: cancel tasks (input, tick, connection actors) and wait.
     cancel.cancel();
     tracker.close();
     tracker.wait().await;

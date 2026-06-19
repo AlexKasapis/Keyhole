@@ -357,6 +357,7 @@ dependencies = [
  "directories",
  "futures-util",
  "keyring",
+ "percent-encoding",
  "ratatui",
  "redis",
  "serde",

@@ -6,9 +6,7 @@
 
 mod secret;
 
-pub use secret::{resolve as resolve_secret, SecretSpec, KEYRING_SERVICE};
-#[cfg(feature = "keyring")]
-pub use secret::store_keyring;
+pub use secret::{resolve as resolve_secret, SecretSpec};
 
 use std::path::{Path, PathBuf};
 
@@ -36,15 +34,6 @@ pub struct Config {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ConnectionConfig {
     Redis(RedisProfile),
-}
-
-impl ConnectionConfig {
-    /// The user-facing connection name.
-    pub fn name(&self) -> &str {
-        match self {
-            ConnectionConfig::Redis(profile) => &profile.name,
-        }
-    }
 }
 
 /// A Redis connection profile.

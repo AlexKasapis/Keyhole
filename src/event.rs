@@ -1,7 +1,6 @@
 //! The async↔UI boundary: the [`AppEvent`] enum plus the background tasks that
 //! feed it. Tasks own no UI state — they only emit events into the channel that
-//! the render loop drains. New variants (broker data, recording status, …)
-//! arrive in later phases.
+//! the render loop drains. Broker results arrive here from connection actors.
 
 use std::time::Duration;
 
@@ -11,6 +10,9 @@ use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::broker::actor::ConnHandle;
+use crate::broker::{BrowsePage, ConnId, ServerStats, ValueView};
+
 /// Everything the render loop reacts to.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -18,6 +20,26 @@ pub enum AppEvent {
     Input(CrosstermEvent),
     /// Periodic tick for clock/stat refresh and animations.
     Tick,
+    /// A connection finished connecting; carries its handle (with capabilities).
+    Connected { handle: ConnHandle },
+    /// A connection dropped or failed liveness.
+    Disconnected { id: ConnId, reason: String },
+    /// A page of browse results.
+    KeysPage { id: ConnId, page: BrowsePage },
+    /// A key's inspected value.
+    ValueLoaded {
+        id: ConnId,
+        key: String,
+        value: ValueView,
+    },
+    /// Refreshed server statistics.
+    StatsUpdated { id: ConnId, stats: ServerStats },
+    /// A non-fatal error from a connection operation.
+    ConnError {
+        id: ConnId,
+        context: String,
+        error: String,
+    },
 }
 
 /// Forward terminal input events into the channel until cancelled.
