@@ -19,8 +19,7 @@
 //! Redis dedicated-socket model) so the returned stream is `'static` and the
 //! actor's main connection stays free for liveness checks.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
+use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -35,15 +34,6 @@ use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
 
 use super::{BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, SubSpec};
 use crate::config::RabbitmqProfile;
-
-/// A connection name shows up in RabbitMQ's management UI, which is handy when
-/// observing the broker. This counter keeps every connection (main + each tail)
-/// distinct, even for several connections to one broker.
-static CONN_SEQ: AtomicU64 = AtomicU64::new(0);
-
-fn next_seq() -> u64 {
-    CONN_SEQ.fetch_add(1, Ordering::Relaxed)
-}
 
 /// A live (or not-yet-connected) RabbitMQ (AMQP 0.9.1) connection.
 pub struct RabbitmqConnection {
@@ -68,29 +58,18 @@ impl RabbitmqConnection {
     /// percent-encoded credentials and vhost. `tls` selects `amqps://` (the
     /// :5671 TLS listener).
     fn url(&self) -> String {
-        let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
-        let scheme = if self.profile.tls { "amqps" } else { "amqp" };
-        let mut url = format!("{scheme}://");
-        let user = self.profile.username.as_deref();
-        let pass = self.password.as_deref();
-        if user.is_some() || pass.is_some() {
-            if let Some(u) = user {
-                url.push_str(&enc(u));
-            }
-            if let Some(p) = pass {
-                url.push(':');
-                url.push_str(&enc(p));
-            }
-            url.push('@');
-        }
-        url.push_str(&self.profile.host);
-        url.push(':');
-        url.push_str(&self.profile.port.to_string());
+        let mut url = super::amqp_base_url(
+            self.profile.tls,
+            &self.profile.host,
+            self.profile.port,
+            self.profile.username.as_deref(),
+            self.password.as_deref(),
+        );
         // The vhost is a single percent-encoded path segment. The default "/"
         // must encode to "%2F" — a bare trailing "/" is read by AMQP as the
         // *empty* vhost, not the default one.
         url.push('/');
-        url.push_str(&enc(&self.profile.vhost));
+        url.push_str(&utf8_percent_encode(&self.profile.vhost, NON_ALPHANUMERIC).to_string());
         url
     }
 
@@ -98,8 +77,8 @@ impl RabbitmqConnection {
     /// management UI. lapin's default features bind it to the ambient tokio
     /// runtime, so no executor/reactor wiring is needed here.
     fn conn_props(&self) -> ConnectionProperties {
-        ConnectionProperties::default()
-            .with_connection_name(format!("brokertui-{}-{}", self.profile.name, next_seq()).into())
+        let name = format!("brokertui-{}-{}", self.profile.name, super::next_conn_seq());
+        ConnectionProperties::default().with_connection_name(name.into())
     }
 }
 
@@ -108,7 +87,10 @@ impl BrokerConnection for RabbitmqConnection {
     async fn connect(&mut self) -> anyhow::Result<Capabilities> {
         let conn = Connection::connect(&self.url(), self.conn_props())
             .await
-            .map_err(|e| anyhow::anyhow!("connecting to RabbitMQ: {e}"))?;
+            // `.context` keeps the lapin error as the source (so its reply
+            // code/text survives, shown via the `{:#}` chain) rather than
+            // flattening it into the message here.
+            .context("connecting to RabbitMQ")?;
         self.conn = Some(conn);
         Ok(Capabilities::rabbitmq())
     }
@@ -123,7 +105,7 @@ impl BrokerConnection for RabbitmqConnection {
         // channel closes when it drops at the end of this scope.
         conn.create_channel()
             .await
-            .map_err(|e| anyhow::anyhow!("liveness check failed: {e}"))?;
+            .context("liveness check failed")?;
         Ok(())
     }
 
@@ -137,6 +119,24 @@ impl BrokerConnection for RabbitmqConnection {
         };
         // Each tail is its own dedicated connection (and thus its own spy queue).
         open_exchange_tap(&self.url(), self.conn_props(), exchange, binding_key).await
+    }
+
+    async fn tail_notice(&mut self, spec: &SubSpec) -> Option<String> {
+        // The default `#` binding key matches every routing key on a *topic*
+        // exchange and is ignored by a *fanout* exchange, but on a *direct* or
+        // *headers* exchange it matches nothing — so the tap would attach
+        // successfully yet stay permanently silent. AMQP 0.9.1 can't report an
+        // exchange's type without redeclaring it, so flag the ambiguity whenever
+        // the catch-all default is in use (mirroring the Redis keyspace notice).
+        match spec {
+            SubSpec::Exchange { binding_key, .. } if binding_key == "#" => Some(
+                "binding key `#` matches all keys on a topic/fanout exchange, but \
+                 nothing on a direct/headers exchange — give an explicit key \
+                 (exchange:name/key) if this tail stays silent"
+                    .to_string(),
+            ),
+            _ => None,
+        }
     }
 }
 
@@ -160,18 +160,23 @@ async fn open_exchange_tap(
     exchange: String,
     binding_key: String,
 ) -> anyhow::Result<BrokerEventStream> {
+    // Each lapin call attaches human context with `.context`/`.with_context`,
+    // keeping the lapin error as the source so its AMQP reply code (e.g.
+    // NOT_FOUND vs ACCESS_REFUSED) survives in the `{:#}` chain rather than being
+    // flattened — and the messages name what we were doing, not a guessed cause.
     let connection = Connection::connect(url, props)
         .await
-        .map_err(|e| anyhow::anyhow!("opening tap connection: {e}"))?;
+        .context("opening tap connection")?;
     let channel = connection
         .create_channel()
         .await
-        .map_err(|e| anyhow::anyhow!("opening tap channel: {e}"))?;
+        .context("opening tap channel")?;
 
     // Passively declare the exchange first so a missing/inaccessible exchange
-    // fails with a clear message instead of an opaque bind error. In passive
-    // mode the broker only checks existence and ignores `kind`, so the `Topic`
-    // placeholder never conflicts with the exchange's real type.
+    // fails here (with the broker's reply code in the chain) instead of as an
+    // opaque bind error. In passive mode the broker only checks existence and
+    // ignores `kind`, so the `Topic` placeholder never conflicts with the
+    // exchange's real type.
     channel
         .exchange_declare(
             exchange.as_str().into(),
@@ -183,7 +188,7 @@ async fn open_exchange_tap(
             FieldTable::default(),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("exchange `{exchange}` not found or not accessible: {e}"))?;
+        .with_context(|| format!("tapping exchange `{exchange}`"))?;
 
     // A temporary spy queue: server-named (empty name → broker generates one),
     // `exclusive` (only this connection may use it) and `auto_delete` (removed
@@ -199,7 +204,7 @@ async fn open_exchange_tap(
             FieldTable::default(),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("declaring spy queue: {e}"))?;
+        .context("declaring the spy queue")?;
     let queue_name = queue.name().as_str().to_owned();
 
     // Bind the spy queue: the broker now routes a COPY of every matching message
@@ -214,8 +219,8 @@ async fn open_exchange_tap(
             FieldTable::default(),
         )
         .await
-        .map_err(|e| {
-            anyhow::anyhow!("binding spy queue to `{exchange}` (key `{binding_key}`): {e}")
+        .with_context(|| {
+            format!("binding the spy queue to exchange `{exchange}` (key `{binding_key}`)")
         })?;
 
     // Consume with auto-ack: acking only discards our own copy from the spy
@@ -223,7 +228,9 @@ async fn open_exchange_tap(
     let consumer = channel
         .basic_consume(
             queue_name.as_str().into(),
-            format!("brokertui-{}", next_seq()).as_str().into(),
+            format!("brokertui-{}", super::next_conn_seq())
+                .as_str()
+                .into(),
             BasicConsumeOptions {
                 no_ack: true,
                 ..Default::default()
@@ -231,7 +238,7 @@ async fn open_exchange_tap(
             FieldTable::default(),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("consuming spy queue: {e}"))?;
+        .context("consuming the spy queue")?;
 
     let state = TapState {
         _connection: connection,
@@ -343,6 +350,29 @@ mod tests {
         assert!(matches!(b.payload, Payload::Binary(_)));
         // The redelivery flag is surfaced when set.
         assert_eq!(b.meta("redelivered"), Some("true"));
+    }
+
+    #[tokio::test]
+    async fn default_binding_key_tap_warns_about_non_topic_exchanges() {
+        let mut conn = RabbitmqConnection::new(profile(false), None);
+        // The catch-all `#` default → advisory that direct/headers exchanges
+        // need an explicit key (else the tail is silently empty).
+        let notice = conn
+            .tail_notice(&SubSpec::Exchange {
+                exchange: "ex".into(),
+                binding_key: "#".into(),
+            })
+            .await
+            .expect("default `#` key should produce a notice");
+        assert!(notice.contains("direct/headers"));
+        // An explicit binding key → the user chose it, so no advisory.
+        let none = conn
+            .tail_notice(&SubSpec::Exchange {
+                exchange: "ex".into(),
+                binding_key: "orders.*".into(),
+            })
+            .await;
+        assert!(none.is_none());
     }
 }
 
@@ -473,12 +503,12 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn exchange_tap_is_non_destructive_to_a_real_queue() {
-        let exchange = unique("brokertui.it.fanout");
+    async fn exchange_tap_is_live_only_and_leaves_the_real_queue_intact() {
+        let exchange = unique("brokertui.it.topic");
         declare_topic_exchange(&exchange).await;
 
-        // A real, durable queue bound to the exchange — the "production" consumer
-        // we must not steal from.
+        // A real queue bound to the exchange — the "production" consumer we must
+        // neither steal from nor replay into. Exclusive so it auto-cleans on close.
         let real_queue = unique("brokertui.it.realq");
         let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
             .await
@@ -488,7 +518,7 @@ mod integration_tests {
             .queue_declare(
                 real_queue.as_str().into(),
                 QueueDeclareOptions {
-                    durable: true,
+                    exclusive: true,
                     ..Default::default()
                 },
                 FieldTable::default(),
@@ -506,7 +536,12 @@ mod integration_tests {
             .await
             .unwrap();
 
-        // Start the tap (binds an additional spy queue), then publish once.
+        // Publish BEFORE the tap exists: this reaches the real queue but not the
+        // not-yet-created spy queue.
+        publish(&exchange, "evt", "backlog-msg").await;
+
+        // Open the tap (which declares + binds its own spy queue), then publish a
+        // second message that fans out to both the real queue and the spy queue.
         let mut conn = connected().await;
         let mut stream = conn
             .subscribe(SubSpec::Exchange {
@@ -515,33 +550,46 @@ mod integration_tests {
             })
             .await
             .expect("exchange tap");
-        publish(&exchange, "evt", "shared-copy").await;
+        publish(&exchange, "evt", "live-msg").await;
 
-        // The tap observes its own copy …
+        // The tap must observe ONLY the live message, never the pre-subscription
+        // backlog: a destructive or replaying implementation that drained/read an
+        // existing queue would surface "backlog-msg" here and fail this assertion.
         let ev = timeout(Duration::from_secs(8), stream.next())
             .await
             .expect("tap timed out")
             .expect("stream ended");
-        assert_eq!(ev.payload, Payload::Utf8("shared-copy".into()));
+        assert_eq!(
+            ev.payload,
+            Payload::Utf8("live-msg".into()),
+            "the tap is live-only: it must not see traffic published before it attached"
+        );
         drop(stream); // close the tap connection → spy queue auto-deletes
 
-        // … and the real queue still has its own copy: the tap did not consume it.
-        let got = timeout(Duration::from_secs(5), async {
-            loop {
-                if let Ok(Some(msg)) = setup_ch
+        // The real queue must still hold BOTH messages: the tap ran on a parallel
+        // spy queue and consumed only its own copies, taking nothing from here.
+        let mut bodies = timeout(Duration::from_secs(5), async {
+            let mut out: Vec<String> = Vec::new();
+            while out.len() < 2 {
+                match setup_ch
                     .basic_get(real_queue.as_str().into(), BasicGetOptions { no_ack: true })
                     .await
                 {
-                    break String::from_utf8(msg.data.clone()).unwrap();
+                    Ok(Some(msg)) => out.push(String::from_utf8(msg.data.clone()).unwrap()),
+                    Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    // Surface a real channel error instead of spinning to the timeout.
+                    Err(e) => panic!("basic_get on the real queue failed: {e}"),
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
             }
+            out
         })
         .await
-        .expect("real queue should still hold the message");
+        .expect("real queue should still hold both messages");
+        bodies.sort();
         assert_eq!(
-            got, "shared-copy",
-            "exchange tap must not consume real queues"
+            bodies,
+            vec!["backlog-msg".to_string(), "live-msg".to_string()],
+            "exchange tap must leave every message the real queue would have received"
         );
 
         setup.close(200, "bye".into()).await.ok();
@@ -562,9 +610,17 @@ mod integration_tests {
             Ok(_) => panic!("a non-existent exchange must fail the tap"),
             Err(e) => e,
         };
+        // The top-level message names the operation; the broker's reply code is
+        // preserved as the error source and shown in the `{:#}` chain (so a
+        // NOT_FOUND is distinguishable from e.g. an ACCESS_REFUSED).
+        let chain = format!("{err:#}");
         assert!(
-            err.to_string().contains("not found") || err.to_string().contains("not accessible"),
-            "error should explain the exchange is missing: {err}"
+            chain.contains("tapping exchange"),
+            "error should name the operation: {chain}"
+        );
+        assert!(
+            chain.contains("NOT_FOUND") || chain.to_lowercase().contains("no exchange"),
+            "the AMQP reply code must survive in the error chain: {chain}"
         );
     }
 }

@@ -114,6 +114,27 @@ impl ConnectionConfig {
             }
         }
     }
+
+    /// The broker kind this profile connects to.
+    pub fn broker_kind(&self) -> crate::broker::BrokerKind {
+        use crate::broker::BrokerKind;
+        match self {
+            ConnectionConfig::Redis(_) => BrokerKind::Redis,
+            ConnectionConfig::Amqp(_) => BrokerKind::Amqp,
+            ConnectionConfig::Rabbitmq(_) => BrokerKind::Rabbitmq,
+        }
+    }
+
+    /// The `(secret spec, keyring account)` pair for resolving this connection's
+    /// password. The account is the profile name. Shared by the TUI and the
+    /// headless recorder so the per-variant match lives in exactly one place.
+    pub fn secret_account(&self) -> (SecretSpec, String) {
+        match self {
+            ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
+            ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
+            ConnectionConfig::Rabbitmq(p) => (p.password_spec(), p.name.clone()),
+        }
+    }
 }
 
 /// A Redis connection profile.

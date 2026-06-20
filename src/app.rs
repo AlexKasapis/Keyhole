@@ -797,11 +797,7 @@ impl App {
 
         tokio::spawn(async move {
             // Resolve the secret off the render thread (keyring access can block).
-            let (spec, account) = match &profile {
-                ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
-                ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
-                ConnectionConfig::Rabbitmq(p) => (p.password_spec(), p.name.clone()),
-            };
+            let (spec, account) = profile.secret_account();
             let password = match override_password {
                 Some(pw) => Some(pw),
                 None => match resolve_secret(spec, account).await {
@@ -866,7 +862,9 @@ impl App {
                         .send(AppEvent::ConnError {
                             id,
                             context: "connect".to_string(),
-                            error: e.to_string(),
+                            // `{:#}` surfaces the full cause chain (e.g. a RabbitMQ
+                            // connect's context plus the broker's reply detail).
+                            error: format!("{e:#}"),
                         })
                         .await;
                 }
@@ -1072,10 +1070,26 @@ impl App {
             return;
         }
         let default_db = self.active_conn().map(|c| c.db).unwrap_or(0);
-        match SubSpec::parse(&raw, default_db) {
-            Ok(spec) => self.start_subscribe(spec),
-            Err(e) => self.set_status(format!("bad spec: {e}"), true),
+        let spec = match SubSpec::parse(&raw, default_db) {
+            Ok(spec) => spec,
+            Err(e) => return self.set_status(format!("bad spec: {e}"), true),
+        };
+        // Reject a spec meant for a different broker up front, with a clear
+        // message, rather than opening a tail tab that immediately fails.
+        if let Some(kind) = self.active_conn().map(|c| c.caps.kind) {
+            let want = spec.supported_kind();
+            if want != kind {
+                return self.set_status(
+                    format!(
+                        "`{raw}` is a {} spec, but this connection is {}",
+                        want.label(),
+                        kind.label()
+                    ),
+                    true,
+                );
+            }
         }
+        self.start_subscribe(spec);
     }
 
     fn start_subscribe(&mut self, spec: SubSpec) {

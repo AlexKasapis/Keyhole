@@ -16,11 +16,8 @@
 //! Redis dedicated-socket model) so the returned stream is `'static` and the
 //! actor's main connection stays free for liveness checks.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use async_trait::async_trait;
 use futures_util::stream;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use time::OffsetDateTime;
 
 use fe2o3_amqp::connection::ConnectionHandle;
@@ -31,14 +28,11 @@ use fe2o3_amqp::{Connection, Receiver, Session};
 use super::{BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, SubSpec};
 use crate::config::AmqpProfile;
 
-/// AMQP container-ids must be unique per connection: a broker may reject or
-/// confuse two connections sharing one id. This counter makes every connection
-/// (main + each tail) distinct, even for several connections to one broker.
-static CONTAINER_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// A process-unique AMQP container-id with the given prefix.
+/// A process-unique AMQP container-id with the given prefix. Container-ids must
+/// be unique per connection (a broker may reject or confuse two connections
+/// sharing one id), so this draws from the shared connection sequence.
 fn unique_container_id(prefix: &str) -> String {
-    format!("{prefix}-{}", CONTAINER_SEQ.fetch_add(1, Ordering::Relaxed))
+    format!("{prefix}-{}", super::next_conn_seq())
 }
 
 /// A live (or not-yet-connected) AMQP 1.0 connection.
@@ -66,25 +60,13 @@ impl AmqpConnection {
     /// Build an `amqp[s]://[user[:pass]@]host:port` URL with percent-encoded
     /// credentials. `tls` selects `amqps://` (e.g. Amazon MQ on :5671).
     fn url(&self) -> String {
-        let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
-        let scheme = if self.profile.tls { "amqps" } else { "amqp" };
-        let mut url = format!("{scheme}://");
-        let user = self.profile.username.as_deref();
-        let pass = self.password.as_deref();
-        if user.is_some() || pass.is_some() {
-            if let Some(u) = user {
-                url.push_str(&enc(u));
-            }
-            if let Some(p) = pass {
-                url.push(':');
-                url.push_str(&enc(p));
-            }
-            url.push('@');
-        }
-        url.push_str(&self.profile.host);
-        url.push(':');
-        url.push_str(&self.profile.port.to_string());
-        url
+        super::amqp_base_url(
+            self.profile.tls,
+            &self.profile.host,
+            self.profile.port,
+            self.profile.username.as_deref(),
+            self.password.as_deref(),
+        )
     }
 }
 

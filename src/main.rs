@@ -187,12 +187,19 @@ async fn run_record(
         ConnectionConfig::Amqp(_) | ConnectionConfig::Rabbitmq(_) => 0,
     };
     let spec = SubSpec::parse(source, default_db)?;
+    // Reject a spec meant for a different broker before connecting, rather than
+    // failing later at subscribe time after a live connection is established.
+    let want = spec.supported_kind();
+    let kind = profile.broker_kind();
+    if want != kind {
+        anyhow::bail!(
+            "`{source}` is a {} spec, but profile '{profile_name}' is {}",
+            want.label(),
+            kind.label()
+        );
+    }
 
-    let (secret_spec, account) = match &profile {
-        ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
-        ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
-        ConnectionConfig::Rabbitmq(p) => (p.password_spec(), p.name.clone()),
-    };
+    let (secret_spec, account) = profile.secret_account();
     let password = resolve_secret(secret_spec, account).await?;
     let preview = config.settings.value_preview_bytes;
     let name = profile.name().to_string();

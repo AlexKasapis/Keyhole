@@ -34,12 +34,15 @@ jobs:
           RABBITMQ_DEFAULT_PASS: brokertui
         ports:
           - 5673:5672
-        # The health check makes the job wait until RabbitMQ is ready to serve.
+        # Gate on the brokertui user authenticating, not just `ping`: the node
+        # answers ping before the default user is provisioned, so the job could
+        # otherwise start the tests while a connect still hits ACCESS_REFUSED.
         options: >-
-          --health-cmd "rabbitmq-diagnostics -q ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
+          --health-cmd "rabbitmqctl -q authenticate_user brokertui brokertui"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 15
+          --health-start-period 20s
     steps:
       - uses: actions/checkout@v4
 

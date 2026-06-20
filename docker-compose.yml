@@ -33,8 +33,12 @@ services:
     ports:
       - "${BROKERTUI_RABBITMQ_PORT:-5673}:5672"      # AMQP 0.9.1
       - "${BROKERTUI_RABBITMQ_MGMT_PORT:-15673}:15672" # management UI / HTTP API
+    # Gate readiness on the brokertui user actually authenticating — `ping`
+    # succeeds as soon as the node is up, which is *before* the default user is
+    # provisioned, so an early test connect could hit ACCESS_REFUSED.
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+      test: ["CMD", "rabbitmqctl", "-q", "authenticate_user", "brokertui", "brokertui"]
+      interval: 5s
+      timeout: 10s
+      retries: 15
+      start_period: 20s

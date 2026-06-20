@@ -203,7 +203,10 @@ async fn start_subscription(
                 .send(AppEvent::SubscriptionEnded {
                     id,
                     sub_id,
-                    reason: Some(e.to_string()),
+                    // `{:#}` renders the full cause chain (e.g. a RabbitMQ tap's
+                    // context plus the broker's AMQP reply code), not just the
+                    // top message; bare errors render identically to `{}`.
+                    reason: Some(format!("{e:#}")),
                 })
                 .await;
         }
@@ -386,7 +389,8 @@ async fn process(
                 events
                     .send(AppEvent::Disconnected {
                         id,
-                        reason: e.to_string(),
+                        // Full cause chain (e.g. the broker's AMQP reply code).
+                        reason: format!("{e:#}"),
                     })
                     .await
             }

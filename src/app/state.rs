@@ -285,14 +285,25 @@ impl Connection {
     /// A short status-bar label: `name (dbN)` for Redis (database-scoped),
     /// `name [amqp]` for brokers where a database index is meaningless.
     pub fn label(&self) -> String {
-        match self.caps.kind {
-            BrokerKind::Redis => format!("{} (db{})", self.name, self.db),
+        if self.caps.kind.uses_database() {
+            format!("{} (db{})", self.name, self.db)
+        } else {
             // The AMQP brokers are not database-scoped, so just tag the kind.
-            BrokerKind::Amqp | BrokerKind::Rabbitmq => {
-                format!("{} [{}]", self.name, self.caps.kind.label())
-            }
+            format!("{} [{}]", self.name, self.caps.kind.label())
         }
     }
+}
+
+/// The kind-dependent defaults for the connection form's variable fields, kept
+/// in one table (see [`ConnForm::kind_defaults`]) so each broker's row is
+/// defined once rather than spread across parallel per-field matches.
+struct KindDefaults {
+    /// Prefilled Port field.
+    port: &'static str,
+    /// Prefilled slot-3 value (Redis DB index / RabbitMQ vhost / unused).
+    slot3: &'static str,
+    /// Label shown for the slot-3 field.
+    slot3_label: &'static str,
 }
 
 /// The add-connection modal. Fields are plain strings edited in place; the
@@ -339,11 +350,13 @@ impl ConnForm {
         }
     }
 
-    /// Cycle the broker kind Redis → AMQP → RabbitMQ → Redis. The Port and the
-    /// shared DB/Vhost field track each kind's defaults, but *only while they
-    /// still hold the previous kind's default* — so switching kinds fixes up the
-    /// obvious fields (e.g. 6379 → 5672, the DB index → the vhost "/") without
-    /// ever clobbering a value the user has typed.
+    /// Cycle the broker kind Redis → AMQP → RabbitMQ → Redis, fixing up the
+    /// kind-dependent form fields. The **Port** means the same thing for every
+    /// broker, so a value the user has customised is preserved (only a value
+    /// still holding the previous kind's default is re-defaulted). **Slot 3's**
+    /// meaning *changes* with the kind (a Redis DB index vs a RabbitMQ vhost vs
+    /// unused for AMQP), so a carried-over value would be nonsensical — it is
+    /// always reset to the new kind's default rather than bleeding across kinds.
     pub fn toggle_kind(&mut self) {
         let prev = self.kind;
         self.kind = match prev {
@@ -351,39 +364,41 @@ impl ConnForm {
             BrokerKind::Amqp => BrokerKind::Rabbitmq,
             BrokerKind::Rabbitmq => BrokerKind::Redis,
         };
-        if self.fields[2] == Self::default_port(prev) {
-            self.fields[2] = Self::default_port(self.kind).to_string();
+        let prev_def = Self::kind_defaults(prev);
+        let new_def = Self::kind_defaults(self.kind);
+        if self.fields[2] == prev_def.port {
+            self.fields[2] = new_def.port.to_string();
         }
-        if self.fields[3] == Self::default_slot3(prev) {
-            self.fields[3] = Self::default_slot3(self.kind).to_string();
-        }
+        self.fields[Self::SLOT3_FIELD] = new_def.slot3.to_string();
     }
 
-    /// The Port field's pre-filled default for a broker kind.
-    fn default_port(kind: BrokerKind) -> &'static str {
+    /// The kind-dependent form defaults in one place: the prefilled Port, the
+    /// slot-3 value, and the slot-3 label (a Redis DB index vs a RabbitMQ vhost
+    /// vs unused for AMQP). Adding a broker means adding one row here.
+    fn kind_defaults(kind: BrokerKind) -> KindDefaults {
         match kind {
-            BrokerKind::Redis => "6379",
-            BrokerKind::Amqp | BrokerKind::Rabbitmq => "5672",
-        }
-    }
-
-    /// The shared slot-3 field's default per kind: a Redis database index, a
-    /// RabbitMQ vhost, or empty (AMQP 1.0 ignores it). See [`Self::slot3_label`].
-    fn default_slot3(kind: BrokerKind) -> &'static str {
-        match kind {
-            BrokerKind::Redis => "0",
-            BrokerKind::Amqp => "",
-            BrokerKind::Rabbitmq => "/",
+            BrokerKind::Redis => KindDefaults {
+                port: "6379",
+                slot3: "0",
+                slot3_label: "DB",
+            },
+            BrokerKind::Amqp => KindDefaults {
+                port: "5672",
+                slot3: "",
+                slot3_label: "DB",
+            },
+            BrokerKind::Rabbitmq => KindDefaults {
+                port: "5672",
+                slot3: "/",
+                slot3_label: "Vhost",
+            },
         }
     }
 
     /// The label shown for the shared slot-3 field, which carries a Redis
     /// database index or a RabbitMQ vhost depending on the selected kind.
     pub fn slot3_label(kind: BrokerKind) -> &'static str {
-        match kind {
-            BrokerKind::Redis | BrokerKind::Amqp => "DB",
-            BrokerKind::Rabbitmq => "Vhost",
-        }
+        Self::kind_defaults(kind).slot3_label
     }
 
     pub fn focus_next(&mut self) {
@@ -531,18 +546,21 @@ mod tests {
     }
 
     #[test]
-    fn connform_toggle_kind_preserves_user_edited_fields() {
+    fn connform_toggle_kind_preserves_custom_port_but_resets_slot3() {
         let mut form = ConnForm::new();
-        // A user-typed port and DB must NOT be overwritten on a kind switch,
-        // because they no longer match the previous kind's default.
+        // Port means the same across brokers, so a user-typed value (no longer
+        // the previous kind's default) survives a kind switch …
         form.fields[2] = "7000".to_string();
+        // … but slot-3's meaning changes per kind (a Redis DB index vs a vhost),
+        // so a value there must NOT bleed across kinds — it resets to the new
+        // kind's default. (Finding: a stray DB value otherwise became a vhost.)
         form.fields[ConnForm::SLOT3_FIELD] = "3".to_string();
-        form.toggle_kind(); // -> AMQP
+        form.toggle_kind(); // Redis -> AMQP
         assert_eq!(form.fields[2], "7000", "custom port preserved");
         assert_eq!(
             form.fields[ConnForm::SLOT3_FIELD],
-            "3",
-            "custom slot preserved"
+            "",
+            "slot-3 reset to the new kind's default, not carried over"
         );
     }
 }

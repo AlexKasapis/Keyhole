@@ -32,9 +32,11 @@ test:
 # Integration tests against dockerized Redis + ActiveMQ + RabbitMQ.
 test-int:
     docker compose --profile rabbitmq up -d redis activemq rabbitmq
-    # Wait for the AMQP brokers' ports to start accepting connections (they boot slowly).
+    # ActiveMQ has no healthcheck; wait for its AMQP port to accept connections.
     bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/${BROKERTUI_ACTIVEMQ_PORT:-5674}) 2>/dev/null && break; sleep 2; done'
-    bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/${BROKERTUI_RABBITMQ_PORT:-5673}) 2>/dev/null && break; sleep 2; done'
+    # Wait until RabbitMQ accepts the brokertui credentials — i.e. the node is up
+    # AND the default user is provisioned (a bare port/ping check races ahead of it).
+    bash -c 'for i in $(seq 1 60); do docker compose exec -T rabbitmq rabbitmqctl -q authenticate_user brokertui brokertui >/dev/null 2>&1 && break; sleep 2; done'
     -cargo test --features integration -- --include-ignored
     docker compose --profile rabbitmq down
 

@@ -21,11 +21,68 @@ pub mod redis;
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
+#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures_util::Stream;
+#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
+use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use time::OffsetDateTime;
+
+/// The AMQP short-string length cap (one length byte), shared by the AMQP 1.0
+/// and RabbitMQ brokers. Names longer than this make the AMQP client panic on
+/// conversion, so source specs are validated against it up front. Always built
+/// (the spec parser enforces it) even when neither AMQP broker is compiled.
+pub(crate) const AMQP_SHORTSTR_MAX: usize = 255;
+
+/// A process-wide, monotonically increasing sequence for minting unique
+/// connection identifiers (AMQP container-ids, RabbitMQ connection names), so
+/// every broker connection is distinct even against a single broker.
+#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
+pub(crate) fn next_conn_seq() -> u64 {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Build `amqp[s]://[user[:pass]@]host:port` with percent-encoded credentials
+/// and an IPv6-bracketed host. Shared by the AMQP 1.0 and RabbitMQ brokers
+/// (RabbitMQ appends a `/vhost` segment); `tls` selects the `amqps://` scheme.
+#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
+pub(crate) fn amqp_base_url(
+    tls: bool,
+    host: &str,
+    port: u16,
+    user: Option<&str>,
+    pass: Option<&str>,
+) -> String {
+    let enc = |s: &str| utf8_percent_encode(s, NON_ALPHANUMERIC).to_string();
+    let scheme = if tls { "amqps" } else { "amqp" };
+    let mut url = format!("{scheme}://");
+    if user.is_some() || pass.is_some() {
+        if let Some(u) = user {
+            url.push_str(&enc(u));
+        }
+        if let Some(p) = pass {
+            url.push(':');
+            url.push_str(&enc(p));
+        }
+        url.push('@');
+    }
+    // Bracket an IPv6 literal (which contains `:`) so the `host:port` boundary
+    // parses unambiguously; leave an already-bracketed or non-IPv6 host as-is.
+    if host.contains(':') && !host.starts_with('[') {
+        url.push('[');
+        url.push_str(host);
+        url.push(']');
+    } else {
+        url.push_str(host);
+    }
+    url.push(':');
+    url.push_str(&port.to_string());
+    url
+}
 
 /// Stable identifier for an open connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -60,6 +117,17 @@ impl BrokerKind {
             BrokerKind::Redis => "pubsub:ch · psub:ch.* · stream:key · keyspace · monitor",
             BrokerKind::Amqp => "topic:name · queue:name",
             BrokerKind::Rabbitmq => "exchange:name · exchange:name/binding-key",
+        }
+    }
+
+    /// Whether this broker is database-scoped (Redis `SELECT`); the AMQP brokers
+    /// are not. Centralizes the Redis-vs-rest distinction so the "db-agnostic"
+    /// behaviour isn't re-spelled as `Amqp | Rabbitmq` at each use site. Kept
+    /// exhaustive (no `_` arm) so a new broker must consciously classify itself.
+    pub fn uses_database(self) -> bool {
+        match self {
+            BrokerKind::Redis => true,
+            BrokerKind::Amqp | BrokerKind::Rabbitmq => false,
         }
     }
 }
@@ -379,6 +447,15 @@ impl SubSpec {
                 } else {
                     binding_key
                 };
+                // AMQP short-strings cap at 255 bytes; reject longer names/keys
+                // here so the AMQP client never panics converting them (its
+                // `ShortString::from` calls `.expect()` on the length).
+                if exchange.len() > AMQP_SHORTSTR_MAX {
+                    anyhow::bail!("exchange name exceeds {AMQP_SHORTSTR_MAX} bytes");
+                }
+                if binding_key.len() > AMQP_SHORTSTR_MAX {
+                    anyhow::bail!("binding key exceeds {AMQP_SHORTSTR_MAX} bytes");
+                }
                 Ok(SubSpec::Exchange {
                     exchange: exchange.to_string(),
                     binding_key: binding_key.to_string(),
@@ -439,6 +516,21 @@ impl SubSpec {
                     format!("exchange:{exchange}/{binding_key}")
                 }
             }
+        }
+    }
+
+    /// The broker kind this source spec targets. Each spec belongs to exactly
+    /// one broker, so a spec typed for the wrong broker can be rejected up front
+    /// (with a clear message) instead of failing later at subscribe time.
+    pub fn supported_kind(&self) -> BrokerKind {
+        match self {
+            SubSpec::Channel(_)
+            | SubSpec::Pattern(_)
+            | SubSpec::Stream { .. }
+            | SubSpec::Keyspace { .. }
+            | SubSpec::Monitor => BrokerKind::Redis,
+            SubSpec::Topic(_) | SubSpec::Queue(_) => BrokerKind::Amqp,
+            SubSpec::Exchange { .. } => BrokerKind::Rabbitmq,
         }
     }
 }
@@ -725,6 +817,82 @@ mod tests {
         );
         // An empty exchange name (key given but no name) is rejected.
         assert!(SubSpec::parse("exchange:/key", 0).is_err());
+    }
+
+    #[test]
+    fn rejects_overlong_exchange_name_or_binding_key() {
+        // Over the 255-byte AMQP short-string cap → rejected up front (so the
+        // AMQP client never panics converting it).
+        let long = "x".repeat(AMQP_SHORTSTR_MAX + 1);
+        assert!(SubSpec::parse(&format!("exchange:{long}"), 0).is_err());
+        assert!(SubSpec::parse(&format!("exchange:ex/{long}"), 0).is_err());
+        // Exactly the cap is allowed.
+        let max = "x".repeat(AMQP_SHORTSTR_MAX);
+        assert!(SubSpec::parse(&format!("exchange:{max}"), 0).is_ok());
+    }
+
+    #[test]
+    fn sub_spec_supported_kind_maps_each_spec_to_its_broker() {
+        assert_eq!(
+            SubSpec::Channel("c".into()).supported_kind(),
+            BrokerKind::Redis
+        );
+        assert_eq!(SubSpec::Monitor.supported_kind(), BrokerKind::Redis);
+        assert_eq!(
+            SubSpec::Keyspace { db: 0 }.supported_kind(),
+            BrokerKind::Redis
+        );
+        assert_eq!(
+            SubSpec::Topic("t".into()).supported_kind(),
+            BrokerKind::Amqp
+        );
+        assert_eq!(
+            SubSpec::Queue("q".into()).supported_kind(),
+            BrokerKind::Amqp
+        );
+        assert_eq!(
+            SubSpec::Exchange {
+                exchange: "e".into(),
+                binding_key: "#".into()
+            }
+            .supported_kind(),
+            BrokerKind::Rabbitmq
+        );
+    }
+
+    #[test]
+    fn broker_kind_uses_database_only_for_redis() {
+        assert!(BrokerKind::Redis.uses_database());
+        assert!(!BrokerKind::Amqp.uses_database());
+        assert!(!BrokerKind::Rabbitmq.uses_database());
+    }
+
+    #[cfg(any(feature = "amqp", feature = "rabbitmq"))]
+    #[test]
+    fn amqp_base_url_encodes_creds_and_brackets_ipv6() {
+        // Percent-encodes userinfo (shared by both AMQP brokers).
+        assert_eq!(
+            amqp_base_url(false, "h.example.com", 5672, Some("u"), Some("p@ss/word")),
+            "amqp://u:p%40ss%2Fword@h.example.com:5672"
+        );
+        // TLS selects the amqps scheme.
+        assert!(amqp_base_url(true, "h", 5671, None, None).starts_with("amqps://"));
+        // No credentials → no userinfo.
+        assert_eq!(amqp_base_url(false, "h", 5672, None, None), "amqp://h:5672");
+        // An IPv6 literal host is bracketed so host:port parses unambiguously.
+        assert_eq!(
+            amqp_base_url(false, "::1", 5672, None, None),
+            "amqp://[::1]:5672"
+        );
+        assert_eq!(
+            amqp_base_url(false, "fe80::1", 5672, Some("u"), None),
+            "amqp://u@[fe80::1]:5672"
+        );
+        // An already-bracketed host is left as-is.
+        assert_eq!(
+            amqp_base_url(false, "[::1]", 5672, None, None),
+            "amqp://[::1]:5672"
+        );
     }
 
     #[test]
