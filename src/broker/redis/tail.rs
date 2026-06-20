@@ -141,17 +141,26 @@ fn monitor_event(line: String) -> BrokerEvent {
 /// Split a `MONITOR` line into `(db, client, command_text)`. Falls back to the
 /// whole trimmed line as the command if the bracketed prefix is absent.
 fn parse_monitor_line(line: &str) -> (Option<String>, Option<String>, String) {
-    if let (Some(lb), Some(rb)) = (line.find('['), line.find(']')) {
-        if lb < rb {
-            let inside = &line[lb + 1..rb];
-            let (db, client) = match inside.split_once(' ') {
-                Some((db, client)) => (Some(db.to_string()), Some(client.trim().to_string())),
-                None => (Some(inside.to_string()), None),
-            };
-            return (db, client, line[rb + 1..].trim().to_string());
-        }
+    let fallback = || (None, None, line.trim().to_string());
+    let Some(lb) = line.find('[') else {
+        return fallback();
+    };
+    // The `[db client]` section closes at the last `]` *before* the command
+    // starts (the first `"`). Stopping at the first `]` would terminate early on
+    // an IPv6 client address like `[::1]:6379`, which carries its own brackets.
+    let search_end = line.find('"').unwrap_or(line.len());
+    let Some(rb) = line[..search_end].rfind(']') else {
+        return fallback();
+    };
+    if lb >= rb {
+        return fallback();
     }
-    (None, None, line.trim().to_string())
+    let inside = &line[lb + 1..rb];
+    let (db, client) = match inside.split_once(' ') {
+        Some((db, client)) => (Some(db.to_string()), Some(client.trim().to_string())),
+        None => (Some(inside.to_string()), None),
+    };
+    (db, client, line[rb + 1..].trim().to_string())
 }
 
 /// Open a pub/sub tail (`SUBSCRIBE`/`PSUBSCRIBE`) and return its event stream.
@@ -372,6 +381,16 @@ mod tests {
         assert_eq!(db.as_deref(), Some("0"));
         assert_eq!(client.as_deref(), Some("127.0.0.1:12345"));
         assert_eq!(command, r#""SET" "k" "v""#);
+    }
+
+    #[test]
+    fn parses_monitor_line_with_ipv6_client() {
+        // An IPv6 peer address contains its own `[..]`; the section must still
+        // close at the real `]`, not the one inside `[::1]`.
+        let (db, client, command) = parse_monitor_line(r#"1700000000.0 [0 [::1]:6379] "GET" "k""#);
+        assert_eq!(db.as_deref(), Some("0"));
+        assert_eq!(client.as_deref(), Some("[::1]:6379"));
+        assert_eq!(command, r#""GET" "k""#);
     }
 
     #[test]

@@ -19,4 +19,4 @@ expression: "render_lines(&mut app, 90, 18)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  ↑↓ scroll · Tab tab · s sub · m monitor · r
+  ↑↓ scroll · Tab tab · s sub · m monitor · r rec · x stop · G follow · : palette · ? help

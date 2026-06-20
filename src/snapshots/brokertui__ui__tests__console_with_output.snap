@@ -21,4 +21,4 @@ expression: "render_lines(&mut app, 90, 20)"
 │                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  i type · ↑↓ scroll · r clear · K keyspace ·
+  i type · ↑↓ scroll · r clear · K keyspace · m monitor · b browser · : palette · ? help

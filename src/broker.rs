@@ -1,10 +1,16 @@
 //! Broker connection abstraction.
 //!
 //! [`BrokerConnection`] is the trait every broker implements; the per-connection
-//! actor drives it generically so the rest of the app is broker-agnostic. The
-//! shared request/result types here are shaped so AMQP can slot in later (Phase
-//! 4) — some result types currently carry Redis-flavoured data and will grow
-//! enum variants when a second broker arrives.
+//! actor drives it generically so the rest of the app is broker-agnostic.
+//!
+//! Browse / inspect / dashboard / console are **optional, capability-gated**
+//! operations. Their request and result types ([`BrowseReq`], [`ValueView`],
+//! [`ServerStats`], …) are Redis-shaped; a broker that doesn't offer them (e.g.
+//! AMQP) keeps the trait's default `bail!` implementations and reports `false`
+//! in its [`Capabilities`], so the UI never surfaces those screens for it.
+//! Realtime tailing ([`subscribe`](BrokerConnection::subscribe), yielding
+//! [`BrokerEvent`]s) is the one capability every broker shares, so the live view
+//! and the recorder work against any broker unchanged.
 
 pub mod actor;
 #[cfg(feature = "amqp")]
@@ -364,11 +370,12 @@ impl SubSpec {
 pub struct BrokerEvent {
     /// When the event was observed (UTC).
     pub ts: OffsetDateTime,
-    /// Where it came from: channel, or stream key.
+    /// Where it came from: a Redis channel / stream key, or an AMQP destination.
     pub source: String,
     /// The message body.
     pub payload: Payload,
-    /// Extra context: stream entry `id`, matched `pattern`, etc.
+    /// Broker-defined extras: Redis stream entry `id`, matched `pattern`,
+    /// MONITOR `db`/`client`, etc.
     pub meta: Vec<(String, String)>,
 }
 

@@ -7,8 +7,10 @@
 //! - **Topic** (`topic:name`) — a non-destructive multicast subscription: every
 //!   subscriber gets its own copy, so observing never steals messages.
 //! - **Queue** (`queue:name`) — opened in **browse** mode (distribution-mode
-//!   `copy`), so messages are read without being consumed. Still non-destructive,
-//!   upholding the "no destructive ops" rule.
+//!   `copy`), so messages are read without being consumed. Once the link
+//!   attaches we check the broker's negotiated source and refuse the tail if it
+//!   downgraded to a destructive (non-`copy`) distribution mode, upholding the
+//!   "no destructive ops" rule even against a broker that ignores `copy`.
 //!
 //! Each tail owns a dedicated connection + session + receiver (mirroring the
 //! Redis dedicated-socket model) so the returned stream is `'static` and the
@@ -163,6 +165,14 @@ async fn open_tail(
         .await
         .map_err(|e| anyhow::anyhow!("attaching to `{address}`: {e}"))?;
 
+    // Non-destructive guarantee: a queue browse must run on a `copy` link.
+    // `Source::distribution_mode` here is the value the broker echoed back on
+    // attach; if it is anything other than `copy`, settling deliveries would
+    // consume them, so refuse rather than silently consume.
+    if browse {
+        ensure_browse_nondestructive(receiver.source(), &name)?;
+    }
+
     let state = TailState {
         _connection: connection,
         _session: session,
@@ -187,6 +197,24 @@ async fn open_tail(
     Ok(Box::pin(stream))
 }
 
+/// Enforce the non-destructive guarantee for a queue browse: the broker's
+/// negotiated `source` must not carry a distribution mode other than `copy`.
+/// A `move` (or any non-`copy`) mode means settling a delivery consumes it, so
+/// we refuse the tail. An *absent* mode is tolerated — not every broker echoes
+/// the field back (Apache ActiveMQ, the primary target, is one), and the spec
+/// default for an unspecified mode does not imply destructive consumption.
+fn ensure_browse_nondestructive(source: &Option<Source>, queue: &str) -> anyhow::Result<()> {
+    if let Some(mode) = source.as_ref().and_then(|s| s.distribution_mode.as_ref()) {
+        if !matches!(mode, DistributionMode::Copy) {
+            anyhow::bail!(
+                "broker did not grant non-destructive browse for queue `{queue}` \
+                 (distribution-mode `{mode:?}`); refusing to consume messages"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Build a [`BrokerEvent`] from a received AMQP message body, keeping it
 /// binary-safe (data sections and non-UTF-8 strings become base64 downstream).
 fn delivery_to_event(source: &str, body: Body<Value>) -> BrokerEvent {
@@ -209,7 +237,11 @@ fn body_to_payload(body: Body<Value>) -> Payload {
             Payload::classify(bytes)
         }
         Body::Value(value) => value_to_payload(value.0),
-        Body::Sequence(_) | Body::Empty => Payload::Utf8(String::new()),
+        // An amqp-sequence body has no canonical text form; render its debug
+        // shape and classify it rather than silently dropping the content (an
+        // observation tool must never swallow a non-empty body).
+        Body::Sequence(seq) => Payload::classify(format!("{seq:?}").into_bytes()),
+        Body::Empty => Payload::Utf8(String::new()),
     }
 }
 
@@ -285,6 +317,45 @@ mod tests {
     #[test]
     fn empty_body_is_empty_text() {
         assert_eq!(body_to_payload(Body::Empty), Payload::Utf8(String::new()));
+    }
+
+    #[test]
+    fn binary_value_body_is_base64_safe() {
+        // Non-UTF-8 bytes survive as Binary (base64 when displayed/recorded).
+        match body_to_payload(Body::Value(AmqpValue(Value::Binary(
+            vec![0x00, 0xff].into(),
+        )))) {
+            Payload::Binary(b) => assert_eq!(b, vec![0x00, 0xff]),
+            other => panic!("expected binary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn browse_guard_refuses_explicit_non_copy_mode() {
+        // A broker that echoes `move` would consume on settle — refuse the tail.
+        let moved = Some(
+            Source::builder()
+                .address("q")
+                .distribution_mode(DistributionMode::Move)
+                .build(),
+        );
+        assert!(ensure_browse_nondestructive(&moved, "q").is_err());
+    }
+
+    #[test]
+    fn browse_guard_allows_copy_or_unspecified_mode() {
+        // Explicit `copy` is fine.
+        let copy = Some(
+            Source::builder()
+                .address("q")
+                .distribution_mode(DistributionMode::Copy)
+                .build(),
+        );
+        assert!(ensure_browse_nondestructive(&copy, "q").is_ok());
+        // An unspecified mode is tolerated (not every broker echoes it back).
+        let unspecified = Some(Source::builder().address("q").build());
+        assert!(ensure_browse_nondestructive(&unspecified, "q").is_ok());
+        assert!(ensure_browse_nondestructive(&None, "q").is_ok());
     }
 }
 

@@ -23,6 +23,7 @@ ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
 tui-tree-widget = "0.24"   # sidebar connection/keyspace tree
 tui-input = "0.15"         # single-line fields for the connection form modal
+unicode-width = "0.2"      # display-width-aware column truncation/padding
 
 # --- Redis client (v1 broker) ---
 redis = { version = "1.2", features = ["tokio-comp", "connection-manager", "streams"] }

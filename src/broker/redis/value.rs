@@ -32,6 +32,21 @@ pub fn render_string(bytes: Vec<u8>, total_bytes: usize) -> ValueView {
                 }
             }
         }
+        // A byte-prefix preview can slice a multi-byte codepoint at its tail.
+        // When the value was truncated, salvage the valid UTF-8 portion rather
+        // than mislabeling a genuinely-textual value as binary/base64.
+        Err(e) if shown_bytes < total_bytes && e.valid_up_to() > 0 => {
+            let valid = e.valid_up_to();
+            let text = std::str::from_utf8(&bytes[..valid])
+                .expect("valid_up_to() bytes are valid UTF-8")
+                .to_string();
+            ValueView::Str {
+                total_bytes,
+                shown_bytes: valid,
+                text,
+                encoding: PayloadEncoding::Utf8,
+            }
+        }
         Err(_) => ValueView::Str {
             total_bytes,
             shown_bytes,
@@ -72,6 +87,27 @@ mod tests {
                 assert_eq!(encoding, PayloadEncoding::Json);
                 assert!(text.contains('\n'), "pretty JSON should be multiline");
                 assert!(text.contains("\"a\": 1"));
+            }
+            _ => panic!("expected Str"),
+        }
+    }
+
+    #[test]
+    fn truncated_prefix_salvages_valid_utf8_boundary() {
+        // "héllo" = [h, 0xC3, 0xA9, l, l, o]; a 2-byte preview slices the 'é'.
+        // The valid prefix ("h") must render as UTF-8, not the whole as base64.
+        let v = render_string(vec![b'h', 0xC3], 6);
+        match v {
+            ValueView::Str {
+                text,
+                encoding,
+                shown_bytes,
+                total_bytes,
+            } => {
+                assert_eq!(encoding, PayloadEncoding::Utf8);
+                assert_eq!(text, "h");
+                assert_eq!(shown_bytes, 1, "only the valid-up-to prefix is shown");
+                assert_eq!(total_bytes, 6);
             }
             _ => panic!("expected Str"),
         }

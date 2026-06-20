@@ -175,7 +175,9 @@ impl BrokerConnection for RedisConnection {
             .query_async(&mut conn)
             .await?;
         let start = req.offset as isize;
-        let stop = (req.offset + req.limit) as isize - 1;
+        // Saturating so a pathological offset+limit can't overflow or sign-flip
+        // (which LRANGE/ZRANGE would misread as a from-the-end index).
+        let stop = req.offset.saturating_add(req.limit).saturating_sub(1) as isize;
 
         let view = match ValueType::from_redis(&type_reply) {
             ValueType::None | ValueType::Unknown => ValueView::Missing,
@@ -221,13 +223,7 @@ impl BrokerConnection for RedisConnection {
                     .arg(&req.key)
                     .query_async(&mut conn)
                     .await?;
-                let (_cursor, members): (u64, Vec<String>) = redis::cmd("SSCAN")
-                    .arg(&req.key)
-                    .arg(0)
-                    .arg("COUNT")
-                    .arg(req.limit)
-                    .query_async(&mut conn)
-                    .await?;
+                let members = scan_collect(&mut conn, "SSCAN", &req.key, req.limit).await?;
                 ValueView::Set { len, members }
             }
             ValueType::Hash => {
@@ -235,13 +231,10 @@ impl BrokerConnection for RedisConnection {
                     .arg(&req.key)
                     .query_async(&mut conn)
                     .await?;
-                let (_cursor, flat): (u64, Vec<String>) = redis::cmd("HSCAN")
-                    .arg(&req.key)
-                    .arg(0)
-                    .arg("COUNT")
-                    .arg(req.limit)
-                    .query_async(&mut conn)
-                    .await?;
+                // HSCAN returns a flat [field, value, …]; collect 2 elements per
+                // field, then pair them up.
+                let want = req.limit.saturating_mul(2);
+                let flat = scan_collect(&mut conn, "HSCAN", &req.key, want).await?;
                 let fields = flat
                     .chunks_exact(2)
                     .map(|c| (c[0].clone(), c[1].clone()))
@@ -374,6 +367,49 @@ impl BrokerConnection for RedisConnection {
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(command::render_reply(&value))
     }
+}
+
+/// Run a cursor-based scan (`SSCAN`/`HSCAN`) on `key`, accumulating reply
+/// elements until at least `want` are collected or the scan completes, then
+/// truncating to `want`.
+///
+/// A single `SSCAN`/`HSCAN` returns only a `COUNT`-*hint*-sized batch plus a
+/// cursor, so one call can yield far fewer elements than a large collection
+/// holds — issuing it once (and discarding the cursor) would show an arbitrary
+/// partial slice while the header reports the true, larger cardinality. Looping
+/// gives the viewer deterministic "first N" paging.
+async fn scan_collect(
+    conn: &mut ConnectionManager,
+    cmd: &str,
+    key: &str,
+    want: usize,
+) -> anyhow::Result<Vec<String>> {
+    /// `COUNT` hint per scan iteration — large enough to fill a viewer page in
+    /// one or two round-trips without fetching an unbounded amount.
+    const SCAN_HINT: usize = 512;
+
+    if want == 0 {
+        return Ok(Vec::new());
+    }
+    let mut cursor = 0u64;
+    let mut out: Vec<String> = Vec::new();
+    loop {
+        let (next, batch): (u64, Vec<String>) = redis::cmd(cmd)
+            .arg(key)
+            .arg(cursor)
+            .arg("COUNT")
+            .arg(SCAN_HINT)
+            .query_async(conn)
+            .await?;
+        out.extend(batch);
+        cursor = next;
+        // Cursor 0 marks a completed scan; otherwise stop once the page is full.
+        if cursor == 0 || out.len() >= want {
+            break;
+        }
+    }
+    out.truncate(want);
+    Ok(out)
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -601,6 +637,55 @@ mod integration_tests {
             conn.inspect(req("it:ins:absent")).await.unwrap(),
             ValueView::Missing
         ));
+    }
+
+    #[tokio::test]
+    async fn inspect_large_set_and_hash_fill_the_page() {
+        let setk = unique("it:big:set");
+        let hashk = unique("it:big:hash");
+        let mut raw = raw().await;
+        // 1000 members/fields — well above the per-scan COUNT hint, so a single
+        // SSCAN/HSCAN would return only a partial batch (the bug this guards).
+        let mut set_cmd = redis::cmd("SADD");
+        set_cmd.arg(&setk);
+        for i in 0..1000 {
+            set_cmd.arg(format!("m{i}"));
+        }
+        let _: i64 = set_cmd.query_async(&mut raw).await.unwrap();
+        let mut hash_cmd = redis::cmd("HSET");
+        hash_cmd.arg(&hashk);
+        for i in 0..1000 {
+            hash_cmd.arg(format!("f{i}")).arg(format!("v{i}"));
+        }
+        let _: i64 = hash_cmd.query_async(&mut raw).await.unwrap();
+
+        let mut conn = connected().await;
+        let req = |key: &str| InspectReq {
+            db: 0,
+            key: key.into(),
+            offset: 0,
+            limit: 200,
+        };
+        match conn.inspect(req(&setk)).await.unwrap() {
+            ValueView::Set { len, members } => {
+                assert_eq!(len, 1000, "SCARD reports the true cardinality");
+                assert_eq!(members.len(), 200, "the viewer page is filled to the limit");
+            }
+            other => panic!("expected set, got {other:?}"),
+        }
+        match conn.inspect(req(&hashk)).await.unwrap() {
+            ValueView::Hash { len, fields } => {
+                assert_eq!(len, 1000);
+                assert_eq!(fields.len(), 200, "200 field/value pairs returned");
+            }
+            other => panic!("expected hash, got {other:?}"),
+        }
+        let _: () = redis::cmd("DEL")
+            .arg(&setk)
+            .arg(&hashk)
+            .query_async(&mut raw)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

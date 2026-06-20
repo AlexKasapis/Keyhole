@@ -62,6 +62,8 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Up | Char('k')) => Some(Action::Up),
         (true, Char('d')) => Some(Action::PageDown),
         (true, Char('u')) => Some(Action::PageUp),
+        (_, PageDown) => Some(Action::PageDown),
+        (_, PageUp) => Some(Action::PageUp),
         (false, Char('g') | Home) => Some(Action::Top),
         (false, Char('G') | End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
@@ -186,6 +188,9 @@ mod tests {
         assert_eq!(plain(Char('d')), Some(Action::GotoDashboard));
         assert_eq!(ctrl(Char('u')), Some(Action::PageUp));
         assert_eq!(plain(Char('u')), None, "plain 'u' is unbound");
+        // The physical Page keys page too (regardless of modifiers).
+        assert_eq!(plain(PageDown), Some(Action::PageDown));
+        assert_eq!(plain(PageUp), Some(Action::PageUp));
     }
 
     #[test]

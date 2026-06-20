@@ -21,4 +21,4 @@ expression: "render_lines(&mut app, 90, 20)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  b browser · w watch · e console · c conns ·
+  b browser · w watch · e console · c conns · r refresh · : palette · ? help

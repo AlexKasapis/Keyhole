@@ -6,6 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
 use ratatui::Frame;
 use time::OffsetDateTime;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, ConnForm, RecordState, SubState};
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
@@ -113,7 +114,14 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         Some(k) => format!(" {k} "),
         None => " Value ".to_string(),
     };
-    let value = Paragraph::new(render_value(theme, conn.value.as_ref()))
+    let value_lines = render_value(theme, conn.value.as_ref());
+    // Clamp the scroll offset so paging can't run off the end of the value. The
+    // bound uses logical line count (wrapping may split lines further, as the
+    // console's scroll does too); inner height excludes the two border rows.
+    let inner_h = value_area.height.saturating_sub(2) as usize;
+    let max_scroll = value_lines.len().saturating_sub(inner_h) as u16;
+    conn.value_scroll = conn.value_scroll.min(max_scroll);
+    let value = Paragraph::new(value_lines)
         .block(
             Block::bordered()
                 .title(title)
@@ -175,7 +183,7 @@ pub fn dashboard(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Gauge::default()
             .block(Block::bordered().title("Memory").border_style(theme.border))
             .gauge_style(theme.gauge)
-            .ratio(mem_ratio.clamp(0.0, 1.0))
+            .ratio(gauge_ratio(mem_ratio))
             .label(mem_label),
         g1,
     );
@@ -189,7 +197,7 @@ pub fn dashboard(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                     .border_style(theme.border),
             )
             .gauge_style(theme.gauge)
-            .ratio(hit.clamp(0.0, 1.0))
+            .ratio(gauge_ratio(hit))
             .label(format!("{:.1}%", hit * 100.0)),
         g2,
     );
@@ -421,7 +429,7 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
                 .map(fmt_datetime)
                 .unwrap_or_else(|| "?".to_string());
             ListItem::new(Line::from(vec![
-                Span::raw(format!("{:<46}", truncate(&f.name, 46))),
+                Span::raw(pad_end(&truncate(&f.name, 46), 46)),
                 Span::styled(format!("{:>10}  ", human_bytes(f.size)), theme.dim),
                 Span::styled(when, theme.dim),
             ]))
@@ -658,7 +666,8 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  c connections  b browser  d dashboard  w realtime  R recordings  e console"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
-        Line::from("  / filter    [ ] change DB    n load more    r refresh"),
+        Line::from("  / filter   [ ] change DB   n load more   r refresh"),
+        Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),
         Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
         Line::from(""),
         Line::styled("Realtime tails", theme.heading),
@@ -787,7 +796,7 @@ fn event_line(ev: &BrokerEvent, theme: &Theme) -> Line<'static> {
     let mut spans = vec![
         Span::styled(ts, theme.dim),
         Span::raw("  "),
-        Span::styled(format!("{:<18}", truncate(&ev.source, 18)), theme.accent),
+        Span::styled(pad_end(&truncate(&ev.source, 18), 18), theme.accent),
         Span::raw(" "),
     ];
     if let Some(id) = ev.meta("id") {
@@ -807,14 +816,39 @@ fn payload_preview(payload: &Payload, max: usize) -> String {
     truncate(&flat, max)
 }
 
-/// Truncate to `max` characters, appending an ellipsis when shortened.
+/// Truncate to a display width of `max` columns, appending an ellipsis when
+/// shortened. Width-aware so wide (CJK/emoji) characters don't overflow the
+/// column and break alignment of whatever follows.
 fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() > max {
-        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{cut}…")
-    } else {
-        s.to_string()
+    if UnicodeWidthStr::width(s) <= max {
+        return s.to_string();
     }
+    // Reserve one column for the ellipsis.
+    let budget = max.saturating_sub(1);
+    let mut width = 0;
+    let mut out = String::new();
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        width += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// Right-pad `s` with spaces to a display width of `width` columns. Pairs with
+/// [`truncate`] for fixed-width columns: `pad_end(&truncate(s, n), n)` yields a
+/// cell exactly `n` columns wide regardless of wide characters.
+fn pad_end(s: &str, width: usize) -> String {
+    let w = UnicodeWidthStr::width(s);
+    let mut out = s.to_string();
+    if w < width {
+        out.push_str(&" ".repeat(width - w));
+    }
+    out
 }
 
 /// Format a timestamp as `YYYY-MM-DD HH:MM` for the recordings list.
@@ -831,6 +865,17 @@ fn fmt_datetime(t: OffsetDateTime) -> String {
 
 fn opt_num(v: Option<u64>) -> String {
     v.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
+}
+
+/// Clamp a gauge ratio into `[0, 1]`, mapping non-finite values (NaN/∞) to 0.
+/// `f64::clamp` passes NaN through unchanged, which would trip `Gauge::ratio`'s
+/// internal `0.0..=1.0` assertion and panic the dashboard.
+fn gauge_ratio(r: f64) -> f64 {
+    if r.is_finite() {
+        r.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
 }
 
 fn human_bytes(n: u64) -> String {
@@ -963,5 +1008,82 @@ mod tests {
         // An oversized request is clamped to the available area.
         let big = centered(area, 200, 100);
         assert_eq!((big.x, big.y, big.width, big.height), (0, 0, 100, 40));
+    }
+
+    #[test]
+    fn truncate_and_pad_are_display_width_aware() {
+        // CJK characters are 2 columns wide; "日本語" is 6 columns.
+        assert_eq!(truncate("日本語", 4), "日…", "caps to the column budget");
+        assert_eq!(
+            pad_end("日", 4),
+            "日  ",
+            "pads by display width, not char count"
+        );
+        // ASCII is unchanged when it fits.
+        assert_eq!(pad_end("ab", 4), "ab  ");
+        assert_eq!(truncate("abcd", 10), "abcd");
+    }
+
+    /// Flatten a rendered line's spans into a plain string for content assertions.
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn event_line_shows_source_id_and_payload() {
+        let theme = Theme::dark();
+        let ev = BrokerEvent {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            source: "orders".into(),
+            payload: Payload::Utf8("hello world".into()),
+            meta: vec![("id".into(), "1-0".into())],
+        };
+        let text = line_text(&event_line(&ev, &theme));
+        assert!(text.contains("orders"), "source rendered: {text:?}");
+        assert!(
+            text.contains("1-0"),
+            "stream id from meta rendered: {text:?}"
+        );
+        assert!(text.contains("hello world"), "payload rendered: {text:?}");
+    }
+
+    #[test]
+    fn render_value_marks_truncation_and_numbers_list_offsets() {
+        let theme = Theme::dark();
+        let truncated = render_value(
+            &theme,
+            Some(&ValueView::Str {
+                total_bytes: 100,
+                shown_bytes: 10,
+                text: "abcdefghij".into(),
+                encoding: crate::broker::PayloadEncoding::Utf8,
+            }),
+        );
+        let text: String = truncated
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("showing 10 of 100 bytes"),
+            "size header: {text:?}"
+        );
+        assert!(text.contains("truncated"), "truncation note: {text:?}");
+
+        // List rows are numbered from the page offset, not from zero.
+        let list = render_value(
+            &theme,
+            Some(&ValueView::List {
+                len: 5,
+                offset: 3,
+                items: vec!["x".into(), "y".into()],
+            }),
+        );
+        let ltext: String = list.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(ltext.contains("list · 5 items"));
+        assert!(
+            ltext.contains('3') && ltext.contains('4'),
+            "offsets 3,4: {ltext:?}"
+        );
     }
 }

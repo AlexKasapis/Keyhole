@@ -404,10 +404,14 @@ async fn process(
                 })
                 .await
         }
-        // Subscription commands are handled in the actor loop (they need state).
+        // Subscription commands are intercepted by the actor loop before
+        // `process` is ever reached (they mutate the live-tail registry), so this
+        // arm documents that invariant rather than silently no-op'ing.
         ConnCommand::Subscribe { .. }
         | ConnCommand::SetRecording { .. }
-        | ConnCommand::StopSubscription { .. } => Ok(()),
+        | ConnCommand::StopSubscription { .. } => {
+            unreachable!("subscription commands are handled in the actor loop")
+        }
     };
     // A send error means the UI is gone; the actor will stop on cancellation.
     let _ = result;
@@ -469,6 +473,8 @@ pub(crate) mod mock {
         pub inspect: ValueView,
         pub stats: ServerStats,
         pub sub: Option<SubBehavior>,
+        /// Advisory returned from `tail_notice` (e.g. keyspace notifications off).
+        pub notice: Option<String>,
     }
 
     impl MockBroker {
@@ -484,6 +490,7 @@ pub(crate) mod mock {
                 inspect: ValueView::Missing,
                 stats: ServerStats::default(),
                 sub: None,
+                notice: None,
             }
         }
 
@@ -537,6 +544,10 @@ pub(crate) mod mock {
                     |mut rx| async move { rx.recv().await.map(|ev| (ev, rx)) },
                 ))),
             }
+        }
+
+        async fn tail_notice(&mut self, _spec: &SubSpec) -> Option<String> {
+            self.notice.clone()
         }
     }
 
@@ -989,6 +1000,58 @@ mod tests {
         assert!(
             !after.iter().any(|e| matches!(e, AppEvent::Realtime { .. })),
             "no events forward after StopSubscription, got {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_cancel_tears_down_live_tail() {
+        // Cancelling the parent token must stop the actor AND drain its live
+        // tails (the `subs.drain()` teardown path), not just the command loop.
+        let (tx_ev, rx_ev) = mpsc::channel::<BrokerEvent>(16);
+        let mut mock = MockBroker::new(1);
+        mock.sub = Some(SubBehavior::Channel(rx_ev));
+        let (handle, mut rx, _t, cancel) = spawn(mock, temp_dir("pcancel")).await;
+        handle.send(ConnCommand::Subscribe {
+            sub_id: 1,
+            spec: SubSpec::Channel("c".into()),
+            record: false,
+        });
+        tx_ev.send(ev("c", "one")).await.unwrap();
+        assert!(
+            wait_for(&mut rx, |e| matches!(e, AppEvent::Realtime { .. })).await,
+            "the first event forwards before cancelling"
+        );
+
+        cancel.cancel();
+        tokio::time::sleep(Duration::from_millis(100)).await; // let the cancel land
+        let _ = tx_ev.send(ev("c", "two")).await; // ignored: the tail is gone
+        let after = drain_for(&mut rx, 200).await;
+        assert!(
+            !after.iter().any(|e| matches!(e, AppEvent::Realtime { .. })),
+            "no events forward after parent cancel, got {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_emits_tail_notice() {
+        // A broker advisory (e.g. keyspace notifications disabled) surfaces once
+        // as a SubscriptionNotice after the tail starts.
+        let mut mock = MockBroker::new(1);
+        mock.sub = Some(SubBehavior::Once(Vec::new()));
+        mock.notice = Some("notifications disabled".into());
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("notice")).await;
+        handle.send(ConnCommand::Subscribe {
+            sub_id: 9,
+            spec: SubSpec::Keyspace { db: 0 },
+            record: false,
+        });
+        assert!(
+            wait_for(&mut rx, |e| {
+                matches!(e, AppEvent::SubscriptionNotice { sub_id, notice, .. }
+                    if *sub_id == 9 && notice.contains("disabled"))
+            })
+            .await,
+            "tail_notice should surface as a SubscriptionNotice"
         );
     }
 

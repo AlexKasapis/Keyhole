@@ -12,7 +12,8 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │  c connections  b browser  d dashboard  w realtime  R recording│           │
 │           │                                                                │           │
 │           │Browser                                                         │           │
-│           │  / filter    [ ] change DB    n load more    r refresh         │           │
+│           │  / filter   [ ] change DB   n load more   r refresh            │           │
+│           │  PgUp/PgDn (or Ctrl-u/d) scroll the value pane                 │           │
 │           │  t tail selected stream    s subscribe (pub/sub or stream)     │           │
 │           │                                                                │           │
 │           │Realtime tails                                                  │           │
@@ -31,6 +32,5 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │                                                                │           │
 │           │                                                                │           │
 │           │                                                                │           │
-│           │                                                                │           │
 └───────────└────────────────────────────────────────────────────────────────┘───────────┘
-  ↑↓ move · Enter connect · a add · : palette
+  ↑↓ move · Enter connect · a add · : palette · ? help · q quit

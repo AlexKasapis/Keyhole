@@ -26,14 +26,19 @@ use base64::Engine as _;
 /// alters connection/server state is omitted (and would also be caught by
 /// [`ensure_server_readonly`]). Notably absent: `SORT` (can `STORE`), `GETEX`/
 /// `GETDEL` (mutate), `SUBSCRIBE`/`MONITOR` (use the realtime tails), `SELECT`/
-/// `MULTI`/`HELLO`/`AUTH` (stateful).
+/// `MULTI`/`HELLO`/`AUTH` (stateful), and `DUMP` (read-only, but returns opaque
+/// RDB-serialized bytes that are useless in a text console). `OBJECT` is gated
+/// per-subcommand instead (see [`SUBCOMMAND_COMMANDS`]).
+///
+/// Each `// group` comment heads the lines that follow it.
 const READONLY_COMMANDS: &[&str] = &[
     // strings
     "GET",
     "GETRANGE",
     "SUBSTR",
     "STRLEN",
-    "MGET", // generic / keyspace
+    "MGET",
+    // generic / keyspace
     "EXISTS",
     "TYPE",
     "TTL",
@@ -44,12 +49,12 @@ const READONLY_COMMANDS: &[&str] = &[
     "SCAN",
     "RANDOMKEY",
     "DBSIZE",
-    "DUMP",
-    "OBJECT", // bitmaps
+    // bitmaps
     "GETBIT",
     "BITCOUNT",
     "BITPOS",
-    "BITFIELD_RO", // hashes
+    "BITFIELD_RO",
+    // hashes
     "HGET",
     "HMGET",
     "HGETALL",
@@ -59,11 +64,13 @@ const READONLY_COMMANDS: &[&str] = &[
     "HEXISTS",
     "HSCAN",
     "HSTRLEN",
-    "HRANDFIELD", // lists
+    "HRANDFIELD",
+    // lists
     "LRANGE",
     "LLEN",
     "LINDEX",
-    "LPOS", // sets
+    "LPOS",
+    // sets
     "SMEMBERS",
     "SISMEMBER",
     "SMISMEMBER",
@@ -73,7 +80,8 @@ const READONLY_COMMANDS: &[&str] = &[
     "SINTER",
     "SUNION",
     "SDIFF",
-    "SINTERCARD", // sorted sets
+    "SINTERCARD",
+    // sorted sets
     "ZRANGE",
     "ZRANGEBYSCORE",
     "ZREVRANGE",
@@ -92,19 +100,24 @@ const READONLY_COMMANDS: &[&str] = &[
     "ZUNION",
     "ZINTER",
     "ZDIFF",
-    "ZINTERCARD", // streams
+    "ZINTERCARD",
+    // streams
     "XRANGE",
     "XREVRANGE",
     "XLEN",
-    "XPENDING", // hyperloglog
-    "PFCOUNT",  // geo (read-only forms)
+    "XPENDING",
+    // hyperloglog
+    "PFCOUNT",
+    // geo (read-only forms)
     "GEOPOS",
     "GEODIST",
     "GEOHASH",
     "GEOSEARCH",
     "GEORADIUS_RO",
     "GEORADIUSBYMEMBER_RO",
-    "SORT_RO", // server / connection (read-only)
+    // sort (read-only form)
+    "SORT_RO",
+    // server / connection (read-only)
     "INFO",
     "TIME",
     "LASTSAVE",
@@ -469,6 +482,50 @@ mod tests {
             validate_readonly("CONFIG").is_err(),
             "a subcommand command with no subcommand is rejected"
         );
+    }
+
+    #[test]
+    fn subcommand_gate_covers_every_subcommand_command() {
+        // Subcommand-bearing commands have NO server-side backstop
+        // (`ensure_server_readonly` skips them), so the static table is the only
+        // gate — exercise a safe and an unsafe subcommand for each.
+        for ok in [
+            "CONFIG GET maxmemory",
+            "CLIENT INFO",
+            "CLUSTER INFO",
+            "COMMAND COUNT",
+            "OBJECT ENCODING k",
+            "MEMORY USAGE k",
+            "LATENCY LATEST",
+            "SLOWLOG GET",
+            "XINFO STREAM s",
+            "PUBSUB CHANNELS",
+        ] {
+            assert!(validate_readonly(ok).is_ok(), "should allow `{ok}`");
+        }
+        for bad in [
+            "CONFIG RESETSTAT", // resets server stats
+            "CLIENT KILL 1.2.3.4:5",
+            "CLUSTER RESET",
+            "CLUSTER FORGET nodeid",
+            "COMMAND BOGUS", // unknown subcommand
+            "OBJECT FREQX k",
+            "MEMORY PURGE",        // frees memory (admin)
+            "MEMORY MALLOC-STATS", // not on the allowlist
+            "LATENCY RESET",       // clears latency history
+            "SLOWLOG RESET",       // clears the slow log
+            "XINFO HELPER s",
+            "PUBSUB SHARDNUMSUBX",
+        ] {
+            assert!(validate_readonly(bad).is_err(), "should refuse `{bad}`");
+        }
+    }
+
+    #[test]
+    fn dump_is_no_longer_allowed() {
+        // DUMP is read-only but returns opaque RDB bytes; it was dropped from the
+        // allowlist as part of keeping the console deliberately conservative.
+        assert!(validate_readonly("DUMP k").is_err());
     }
 
     #[test]

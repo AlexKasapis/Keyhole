@@ -397,6 +397,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "tui-tree-widget",
+ "unicode-width",
 ]
 
 [[package]]

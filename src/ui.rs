@@ -132,32 +132,36 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
-        InputMode::Normal => {
-            let [hints_area, status_area] =
-                Layout::horizontal([Constraint::Min(0), Constraint::Length(44)]).areas(area);
-            frame.render_widget(
-                Paragraph::new(Line::from(hints(app.screen))).style(theme.status_bar),
-                hints_area,
-            );
-            match &app.status {
-                Some(status) => {
-                    let style = if status.is_error {
-                        theme.error
-                    } else {
-                        theme.success
-                    };
-                    frame.render_widget(
-                        Paragraph::new(Line::styled(format!("{} ", status.message), style))
-                            .alignment(Alignment::Right)
-                            .style(theme.status_bar),
-                        status_area,
-                    );
-                }
-                None => {
-                    frame.render_widget(Paragraph::new("").style(theme.status_bar), status_area)
-                }
+        InputMode::Normal => match &app.status {
+            // A status message shares the row: hints left, status right.
+            Some(status) => {
+                let [hints_area, status_area] =
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(44)]).areas(area);
+                frame.render_widget(
+                    Paragraph::new(Line::from(hints(app.screen))).style(theme.status_bar),
+                    hints_area,
+                );
+                let style = if status.is_error {
+                    theme.error
+                } else {
+                    theme.success
+                };
+                frame.render_widget(
+                    Paragraph::new(Line::styled(format!("{} ", status.message), style))
+                        .alignment(Alignment::Right)
+                        .style(theme.status_bar),
+                    status_area,
+                );
             }
-        }
+            // No status: give the whole row to the hints so they aren't clipped
+            // by an empty reserved status column.
+            None => {
+                frame.render_widget(
+                    Paragraph::new(Line::from(hints(app.screen))).style(theme.status_bar),
+                    area,
+                );
+            }
+        },
     }
 }
 
@@ -324,6 +328,20 @@ mod tests {
         let text = screen_text(&mut app);
         assert!(text.contains("[amqp]"));
         assert!(text.contains("DB is ignored"), "AMQP hint shown");
+    }
+
+    #[test]
+    fn connection_form_renders_validation_error() {
+        let (mut app, _rx) = test_app();
+        let mut form = ConnForm::new();
+        form.error = Some("port must be a number 0-65535".into());
+        app.form = Some(form);
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("port must be a number"),
+            "the form's error line renders"
+        );
     }
 
     #[test]
@@ -582,7 +600,7 @@ mod tests {
     // key screens. State is pinned (fixed clock + fixed data) so the output is
     // deterministic. Regenerate after an intentional UI change with:
     //   INSTA_UPDATE=always cargo test
-    // then review/commit the updated `src/ui/snapshots/*.snap`.
+    // then review/commit the updated `src/snapshots/*.snap`.
 
     /// Render one frame and return it as trimmed rows joined by newlines.
     fn render_lines(app: &mut App, width: u16, height: u16) -> String {

@@ -38,6 +38,8 @@ const STATS_REFRESH_TICKS: u32 = 8;
 /// Inspect window / SCAN look-ahead margin for auto load-more.
 const VALUE_LIMIT: usize = 200;
 const LOAD_MORE_MARGIN: usize = 5;
+/// Lines the Browser value pane scrolls per PageUp/PageDown.
+const VALUE_SCROLL_STEP: i32 = 10;
 
 /// The whole application as seen by the render loop.
 pub struct App {
@@ -438,8 +440,23 @@ impl App {
             Action::Quit => self.running = false,
             Action::Up => self.nav(-1),
             Action::Down => self.nav(1),
-            Action::PageUp => self.nav(-10),
-            Action::PageDown => self.nav(10),
+            // In the Browser these page the focused value pane (the key list
+            // still has ↑↓ / g / G / n); on every other screen they page the
+            // focused list.
+            Action::PageUp => {
+                if self.screen == Screen::Browser {
+                    self.scroll_value(-VALUE_SCROLL_STEP);
+                } else {
+                    self.nav(-10);
+                }
+            }
+            Action::PageDown => {
+                if self.screen == Screen::Browser {
+                    self.scroll_value(VALUE_SCROLL_STEP);
+                } else {
+                    self.nav(10);
+                }
+            }
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
             Action::Enter => {
@@ -714,6 +731,16 @@ impl App {
                 }
             }
             Screen::Dashboard => {}
+        }
+    }
+
+    /// Scroll the Browser value pane by `delta` logical lines (negative = up).
+    /// The offset is clamped against the value's height when rendered, so an
+    /// over-scroll just rests at the bottom.
+    fn scroll_value(&mut self, delta: i32) {
+        if let Some(conn) = self.active_conn_mut() {
+            let next = conn.value_scroll as i32 + delta;
+            conn.value_scroll = next.clamp(0, u16::MAX as i32) as u16;
         }
     }
 
@@ -1567,6 +1594,40 @@ mod tests {
         assert!(!status.is_error);
         assert!(status.message.contains("Connected to prod"));
         assert_eq!(app.active_conn().unwrap().label(), "prod (db0)");
+    }
+
+    #[tokio::test]
+    async fn page_keys_scroll_value_pane_in_browser() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Browser;
+        assert_eq!(app.active_conn().unwrap().value_scroll, 0);
+        // PageDown scrolls the value pane down; repeated PageUp clamps at the top.
+        app.apply(Action::PageDown);
+        assert!(
+            app.active_conn().unwrap().value_scroll > 0,
+            "PageDown scrolls the Browser value pane"
+        );
+        app.apply(Action::PageUp);
+        app.apply(Action::PageUp);
+        assert_eq!(
+            app.active_conn().unwrap().value_scroll,
+            0,
+            "PageUp clamps at the top"
+        );
+    }
+
+    #[test]
+    fn page_keys_navigate_list_outside_browser() {
+        // On non-Browser screens the page keys still page the focused list.
+        let (mut app, _rx) = build_app(config_with(&["a", "b", "c"]), unique_config_path(), None);
+        assert_eq!(app.profile_state.selected(), Some(0));
+        app.apply(Action::PageDown);
+        assert_eq!(
+            app.profile_state.selected(),
+            Some(2),
+            "PageDown pages the connections list (clamped to the last profile)"
+        );
     }
 
     #[tokio::test]
