@@ -52,19 +52,28 @@ percent-encoding = "2.3.2"
 # enables `amqps://` for Amazon MQ's TLS endpoint (:5671). Optional so the
 # minimal headless/musl build can drop it (and its TLS-crypto C dependencies).
 fe2o3-amqp = { version = "0.15.1", features = ["rustls"], optional = true }
+# AMQP 0.9.1 client (Phase 5): RabbitMQ (all versions). lapin's default features
+# are `rustls` + `default-runtime` (= tokio), so it binds to the app's existing
+# tokio runtime out of the box (`ConnectionProperties::default()`) and speaks
+# `amqps://` over rustls — no extra executor/reactor shims, no OpenSSL. Optional,
+# so the minimal headless/musl build drops it like the AMQP 1.0 stack.
+lapin = { version = "4", optional = true }
 
 [dev-dependencies]
 # Snapshot testing of rendered TUI frames (see src/ui — snapshot module).
 insta = "1"
 
 [features]
-default = ["keyring", "amqp"]
+default = ["keyring", "amqp", "rabbitmq"]
 # OS keyring support. Disable for headless/musl builds (env-var secrets only):
 #   cargo build --no-default-features
 keyring = ["dep:keyring"]
 # AMQP 1.0 broker support (Redis is always built in). Off in the minimal
 # headless/musl build, whose rustls/aws-lc TLS stack is awkward to link static.
 amqp = ["dep:fe2o3-amqp"]
+# RabbitMQ (AMQP 0.9.1) broker support, via lapin bound to the tokio runtime.
+# Off in the minimal headless/musl build for the same TLS-linking reason as AMQP.
+rabbitmq = ["dep:lapin"]
 # Gate integration tests that require a live broker (e.g. dockerized Redis).
 integration = []
 

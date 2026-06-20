@@ -314,6 +314,9 @@ impl BrokerConnection for RedisConnection {
             SubSpec::Topic(_) | SubSpec::Queue(_) => {
                 anyhow::bail!("topic/queue specs require an AMQP connection")
             }
+            SubSpec::Exchange { .. } => {
+                anyhow::bail!("exchange specs require a RabbitMQ connection")
+            }
         }
     }
 

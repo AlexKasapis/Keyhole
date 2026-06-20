@@ -25,6 +25,21 @@ jobs:
         image: apache/activemq-classic:latest
         ports:
           - 5672:5672
+      rabbitmq:
+        image: rabbitmq:3-management
+        # A non-`guest` user: RabbitMQ restricts `guest` to loopback, and the
+        # runner reaches the service container over its network, not loopback.
+        env:
+          RABBITMQ_DEFAULT_USER: brokertui
+          RABBITMQ_DEFAULT_PASS: brokertui
+        ports:
+          - 5673:5672
+        # The health check makes the job wait until RabbitMQ is ready to serve.
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +78,7 @@ jobs:
         env:
           BROKERTUI_TEST_REDIS_PORT: "6379"
           BROKERTUI_TEST_AMQP_PORT: "5672"
+          BROKERTUI_TEST_RABBITMQ_PORT: "5673"
         run: cargo test --features integration -- --include-ignored
 
   # Headless, statically-linked build (env-var secrets only; no keyring backend).

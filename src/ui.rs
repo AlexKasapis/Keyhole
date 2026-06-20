@@ -10,6 +10,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, InputMode, Screen};
+use crate::broker::BrokerKind;
 use crate::theme::Theme;
 
 /// Draw one frame from the current application state.
@@ -98,13 +99,17 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             );
         }
         InputMode::Subscribe => {
+            // The accepted source specs depend on the active broker, so the
+            // prompt's hint follows its kind (falling back to Redis if somehow
+            // there is no active connection).
+            let hint = app
+                .active_conn()
+                .map(|c| c.caps.kind.sub_spec_hint())
+                .unwrap_or_else(|| BrokerKind::Redis.sub_spec_hint());
             let line = Line::from(vec![
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
-                Span::styled(
-                    "   pubsub:ch · psub:ch.* · stream:key · keyspace · monitor   Enter start · Esc cancel",
-                    theme.dim,
-                ),
+                Span::styled(format!("   {hint}   Enter start · Esc cancel"), theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -331,6 +336,22 @@ mod tests {
     }
 
     #[test]
+    fn connection_form_shows_rabbitmq_hint_and_vhost_label() {
+        let (mut app, _rx) = test_app();
+        let mut form = ConnForm::new();
+        form.toggle_kind(); // Redis -> AMQP
+        form.toggle_kind(); // AMQP  -> RabbitMQ
+        app.form = Some(form);
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(text.contains("[rabbitmq]"));
+        // The shared DB slot is relabelled "Vhost" for RabbitMQ …
+        assert!(text.contains("Vhost"));
+        // … and the RabbitMQ-specific hint is shown.
+        assert!(text.contains("Vhost defaults to /"));
+    }
+
+    #[test]
     fn connection_form_renders_validation_error() {
         let (mut app, _rx) = test_app();
         let mut form = ConnForm::new();
@@ -533,7 +554,29 @@ mod tests {
     async fn realtime_with_no_tails_shows_hint() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Realtime;
-        assert!(screen_text(&mut app).contains("No live tails"));
+        let text = screen_text(&mut app);
+        assert!(text.contains("No live tails"));
+        // A Redis connection's hint mentions pub/sub and offers the stream shortcut.
+        assert!(text.contains("pubsub:"));
+        assert!(text.contains("stream key in the Browser"));
+    }
+
+    #[tokio::test]
+    async fn realtime_hint_is_exchange_for_rabbitmq() {
+        let (mut app, _rx) = test_app();
+        let handle = mock::rabbitmq_handle(1, "rmq").await;
+        app.connections.push(Connection::new(handle));
+        app.active = Some(0);
+        app.screen = Screen::Realtime;
+        let text = screen_text(&mut app);
+        assert!(text.contains("No live tails"));
+        // RabbitMQ taps exchanges, so the hint points at the exchange spec rather
+        // than Redis pub/sub — and there is no Browser stream shortcut.
+        assert!(
+            text.contains("exchange:"),
+            "rabbitmq realtime hint: {text:?}"
+        );
+        assert!(!text.contains("stream key in the Browser"));
     }
 
     #[tokio::test]

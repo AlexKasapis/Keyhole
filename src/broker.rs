@@ -15,6 +15,8 @@
 pub mod actor;
 #[cfg(feature = "amqp")]
 pub mod amqp;
+#[cfg(feature = "rabbitmq")]
+pub mod rabbitmq;
 pub mod redis;
 
 use std::collections::BTreeMap;
@@ -33,7 +35,10 @@ pub struct ConnId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrokerKind {
     Redis,
+    /// AMQP 1.0 (ActiveMQ / Amazon MQ / RabbitMQ 4.x).
     Amqp,
+    /// RabbitMQ over AMQP 0.9.1 (all RabbitMQ versions).
+    Rabbitmq,
 }
 
 impl BrokerKind {
@@ -42,6 +47,19 @@ impl BrokerKind {
         match self {
             BrokerKind::Redis => "redis",
             BrokerKind::Amqp => "amqp",
+            BrokerKind::Rabbitmq => "rabbitmq",
+        }
+    }
+
+    /// A compact one-line hint of the source specs this broker accepts, shown in
+    /// the subscribe prompt and the empty Realtime view so the user knows what
+    /// to type. AMQP 1.0 and RabbitMQ share the Realtime page but tail different
+    /// kinds of destination, so the hint is broker-specific.
+    pub fn sub_spec_hint(self) -> &'static str {
+        match self {
+            BrokerKind::Redis => "pubsub:ch · psub:ch.* · stream:key · keyspace · monitor",
+            BrokerKind::Amqp => "topic:name · queue:name",
+            BrokerKind::Rabbitmq => "exchange:name · exchange:name/binding-key",
         }
     }
 }
@@ -81,6 +99,22 @@ impl Capabilities {
     pub fn amqp() -> Self {
         Self {
             kind: BrokerKind::Amqp,
+            databases: 1,
+            can_browse: false,
+            can_dashboard: false,
+            can_console: false,
+        }
+    }
+
+    /// RabbitMQ (AMQP 0.9.1): realtime tail + record only, exactly like the
+    /// AMQP 1.0 broker — it reuses the same Realtime page. The one tail is a
+    /// non-destructive exchange tap (see [`crate::broker::rabbitmq`]). Only
+    /// constructed by the RabbitMQ impl / tests, so it is dead code in a build
+    /// without the `rabbitmq` feature.
+    #[cfg_attr(not(feature = "rabbitmq"), allow(dead_code))]
+    pub fn rabbitmq() -> Self {
+        Self {
+            kind: BrokerKind::Rabbitmq,
             databases: 1,
             can_browse: false,
             can_dashboard: false,
@@ -280,6 +314,15 @@ pub enum SubSpec {
     Topic(String),
     /// An AMQP 1.0 queue address.
     Queue(String),
+    /// A RabbitMQ (AMQP 0.9.1) exchange tap: bind a temporary, exclusive,
+    /// auto-delete queue to `exchange` with `binding_key` and consume the
+    /// copies routed to it. Non-destructive — real queues and their consumers
+    /// never lose a message. `binding_key` defaults to `#` (matches every
+    /// routing key on a topic exchange; ignored by a fanout exchange).
+    Exchange {
+        exchange: String,
+        binding_key: String,
+    },
 }
 
 impl SubSpec {
@@ -318,9 +361,32 @@ impl SubSpec {
             }
             "topic" => Ok(SubSpec::Topic(target.to_string())),
             "queue" => Ok(SubSpec::Queue(target.to_string())),
+            "exchange" => {
+                // Optional `/binding-key` suffix. Exchange names don't contain
+                // `/`, so splitting on the first `/` cleanly separates the two
+                // (a routing key may itself contain `/`, which stays in the key).
+                // An absent or empty key defaults to `#` — every routing key on a
+                // topic exchange, ignored by a fanout exchange.
+                let (exchange, binding_key) = match target.split_once('/') {
+                    Some((ex, key)) => (ex.trim(), key.trim()),
+                    None => (target, ""),
+                };
+                if exchange.is_empty() {
+                    anyhow::bail!("missing exchange name before `/`");
+                }
+                let binding_key = if binding_key.is_empty() {
+                    "#"
+                } else {
+                    binding_key
+                };
+                Ok(SubSpec::Exchange {
+                    exchange: exchange.to_string(),
+                    binding_key: binding_key.to_string(),
+                })
+            }
             other => anyhow::bail!(
-                "unknown source kind `{other}` \
-                 (redis: pubsub/psub/stream/keyspace/monitor · amqp: topic/queue)"
+                "unknown source kind `{other}` (redis: pubsub/psub/stream/keyspace/monitor \
+                 · amqp: topic/queue · rabbitmq: exchange)"
             ),
         }
     }
@@ -335,6 +401,7 @@ impl SubSpec {
             SubSpec::Monitor => "monitor",
             SubSpec::Topic(_) => "amqp-topic",
             SubSpec::Queue(_) => "amqp-queue",
+            SubSpec::Exchange { .. } => "rabbitmq-exchange",
         }
     }
 
@@ -347,6 +414,7 @@ impl SubSpec {
             SubSpec::Stream { key, .. } => key.clone(),
             SubSpec::Keyspace { db } => format!("db{db}"),
             SubSpec::Monitor => "all".to_string(),
+            SubSpec::Exchange { exchange, .. } => exchange.clone(),
         }
     }
 
@@ -360,6 +428,17 @@ impl SubSpec {
             SubSpec::Stream { .. } => format!("stream:{}", self.target()),
             SubSpec::Topic(_) => format!("topic:{}", self.target()),
             SubSpec::Queue(_) => format!("queue:{}", self.target()),
+            // The default `#` binding key is implicit in the short form.
+            SubSpec::Exchange {
+                exchange,
+                binding_key,
+            } => {
+                if binding_key == "#" {
+                    format!("exchange:{exchange}")
+                } else {
+                    format!("exchange:{exchange}/{binding_key}")
+                }
+            }
         }
     }
 }
@@ -603,6 +682,52 @@ mod tests {
     }
 
     #[test]
+    fn parses_rabbitmq_exchange_specs() {
+        // Bare exchange → default `#` binding key.
+        assert_eq!(
+            SubSpec::parse("exchange:events", 0).unwrap(),
+            SubSpec::Exchange {
+                exchange: "events".into(),
+                binding_key: "#".into()
+            }
+        );
+        // Explicit binding key after `/` (may contain dots, as topic keys do).
+        assert_eq!(
+            SubSpec::parse("exchange:amq.topic/orders.*", 0).unwrap(),
+            SubSpec::Exchange {
+                exchange: "amq.topic".into(),
+                binding_key: "orders.*".into()
+            }
+        );
+        // Only the first `/` splits, so a routing key may itself contain `/`.
+        assert_eq!(
+            SubSpec::parse("exchange:ex/a/b", 0).unwrap(),
+            SubSpec::Exchange {
+                exchange: "ex".into(),
+                binding_key: "a/b".into()
+            }
+        );
+        // A trailing slash / empty key falls back to the `#` default.
+        assert_eq!(
+            SubSpec::parse("exchange:ex/", 0).unwrap(),
+            SubSpec::Exchange {
+                exchange: "ex".into(),
+                binding_key: "#".into()
+            }
+        );
+        // Whitespace tolerated; kind is case-insensitive; names keep their case.
+        assert_eq!(
+            SubSpec::parse("  EXCHANGE : my.ex / key ", 0).unwrap(),
+            SubSpec::Exchange {
+                exchange: "my.ex".into(),
+                binding_key: "key".into()
+            }
+        );
+        // An empty exchange name (key given but no name) is rejected.
+        assert!(SubSpec::parse("exchange:/key", 0).is_err());
+    }
+
+    #[test]
     fn rejects_bad_specs() {
         assert!(SubSpec::parse("news", 0).is_err()); // no kind
         assert!(SubSpec::parse("pubsub:", 0).is_err()); // empty target
@@ -622,6 +747,23 @@ mod tests {
         assert!(!a.can_browse && !a.can_dashboard && !a.can_console);
         assert_eq!(BrokerKind::Amqp.label(), "amqp");
         assert_eq!(BrokerKind::Redis.label(), "redis");
+
+        // RabbitMQ mirrors AMQP's capability shape (realtime tail + record only),
+        // which is what lets it reuse the Realtime page.
+        let rmq = Capabilities::rabbitmq();
+        assert_eq!(rmq.kind, BrokerKind::Rabbitmq);
+        assert_eq!(rmq.databases, 1);
+        assert!(!rmq.can_browse && !rmq.can_dashboard && !rmq.can_console);
+        assert_eq!(BrokerKind::Rabbitmq.label(), "rabbitmq");
+    }
+
+    #[test]
+    fn sub_spec_hint_is_broker_specific() {
+        assert!(BrokerKind::Redis.sub_spec_hint().contains("pubsub:"));
+        assert!(BrokerKind::Amqp.sub_spec_hint().contains("topic:"));
+        let rmq = BrokerKind::Rabbitmq.sub_spec_hint();
+        assert!(rmq.contains("exchange:"));
+        assert!(rmq.contains("binding-key"));
     }
 
     #[test]
@@ -642,6 +784,20 @@ mod tests {
         assert_eq!(SubSpec::Topic("e".into()).source_type(), "amqp-topic");
         assert_eq!(SubSpec::Queue("q".into()).label(), "queue:q");
         assert_eq!(SubSpec::Queue("q".into()).source_type(), "amqp-queue");
+        // The default `#` binding key is implicit in the label; a custom key shows.
+        let ex_default = SubSpec::Exchange {
+            exchange: "ex".into(),
+            binding_key: "#".into(),
+        };
+        assert_eq!(ex_default.label(), "exchange:ex");
+        assert_eq!(ex_default.source_type(), "rabbitmq-exchange");
+        let ex_keyed = SubSpec::Exchange {
+            exchange: "amq.topic".into(),
+            binding_key: "orders.*".into(),
+        };
+        assert_eq!(ex_keyed.label(), "exchange:amq.topic/orders.*");
+        // The label round-trips back to the same spec through the parser.
+        assert_eq!(SubSpec::parse(&ex_keyed.label(), 0).unwrap(), ex_keyed);
     }
 
     #[test]
@@ -660,6 +816,15 @@ mod tests {
         assert_eq!(SubSpec::Monitor.target(), "all");
         assert_eq!(SubSpec::Topic("e".into()).target(), "e");
         assert_eq!(SubSpec::Queue("q".into()).target(), "q");
+        // An exchange tap's target is the exchange name (the binding key is meta).
+        assert_eq!(
+            SubSpec::Exchange {
+                exchange: "ex".into(),
+                binding_key: "k".into()
+            }
+            .target(),
+            "ex"
+        );
     }
 
     #[test]

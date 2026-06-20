@@ -464,8 +464,10 @@ pub(crate) mod mock {
     /// A [`BrokerConnection`] whose every operation is scripted by its fields.
     pub struct MockBroker {
         pub databases: u32,
-        /// Report AMQP capabilities (no browse/dashboard/console) on connect.
+        /// Report AMQP 1.0 capabilities (no browse/dashboard/console) on connect.
         pub amqp: bool,
+        /// Report RabbitMQ capabilities (same shape as AMQP) on connect.
+        pub rabbitmq: bool,
         pub connect_err: Option<String>,
         pub ping_err: Option<String>,
         pub browse: Option<BrowsePage>,
@@ -483,6 +485,7 @@ pub(crate) mod mock {
             Self {
                 databases,
                 amqp: false,
+                rabbitmq: false,
                 connect_err: None,
                 ping_err: None,
                 browse: None,
@@ -504,6 +507,7 @@ pub(crate) mod mock {
         async fn connect(&mut self) -> anyhow::Result<Capabilities> {
             match &self.connect_err {
                 Some(e) => anyhow::bail!("{e}"),
+                None if self.rabbitmq => Ok(Capabilities::rabbitmq()),
                 None if self.amqp => Ok(Capabilities::amqp()),
                 None => Ok(Capabilities::redis(self.databases)),
             }
@@ -592,6 +596,28 @@ pub(crate) mod mock {
         )
         .await
         .expect("mock amqp connect")
+    }
+
+    /// Like [`amqp_handle`], but the mock reports RabbitMQ capabilities, for
+    /// testing the RabbitMQ-specific (but AMQP-shaped) Realtime UI.
+    pub async fn rabbitmq_handle(id: u32, name: &str) -> ConnHandle {
+        let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        let mut mock = MockBroker::new(1);
+        mock.rabbitmq = true;
+        spawn_connection(
+            ConnId(id),
+            name.to_string(),
+            mock.boxed(),
+            tx,
+            &tracker,
+            &cancel,
+            std::env::temp_dir(),
+        )
+        .await
+        .expect("mock rabbitmq connect")
     }
 }
 

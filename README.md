@@ -1,13 +1,15 @@
 # BrokerTUI
 
-A terminal UI to connect to message/data brokers — **Redis** and **AMQP 1.0**
-(ActiveMQ / Amazon MQ / RabbitMQ 4.x) — to browse their data, watch realtime
-activity, and **record live streams to disk** for later inspection. One
-self-contained binary you can run locally or over SSH.
+A terminal UI to connect to message/data brokers — **Redis**, **AMQP 1.0**
+(ActiveMQ / Amazon MQ / RabbitMQ 4.x), and **RabbitMQ** (AMQP 0.9.1, all
+versions) — to browse their data, watch realtime activity, and **record live
+streams to disk** for later inspection. One self-contained binary you can run
+locally or over SSH.
 
 All operations are **read-only / non-destructive** by design: the command
-console rejects writes, AMQP queues are opened in browse mode, and topic
-subscriptions take their own copy — observing never consumes or mutates data.
+console rejects writes, AMQP queues are opened in browse mode, topic
+subscriptions take their own copy, and a RabbitMQ exchange is observed through a
+temporary bound queue — observing never consumes or mutates data.
 
 ## Features
 
@@ -20,6 +22,12 @@ subscriptions take their own copy — observing never consumes or mutates data.
   non-destructively tail a **topic** (multicast — each subscriber gets a copy)
   or **queue** (browse mode — messages are read, not consumed). `amqps://` TLS
   supported for Amazon MQ. Optional at build time (`amqp` feature).
+- **RabbitMQ** — read + record surface over AMQP 0.9.1 (every RabbitMQ version):
+  non-destructively tap an **exchange** (`exchange:name`, or
+  `exchange:name/binding-key`) by binding a temporary, auto-deleting queue and
+  consuming the copies routed to it — real queues and their consumers never lose
+  a message. Virtual hosts and `amqps://` TLS supported. Reuses the same Realtime
+  page as AMQP 1.0. Optional at build time (`rabbitmq` feature).
 
 The broker is abstracted behind a trait, so each screen lights up only for the
 brokers that support it.
@@ -37,7 +45,8 @@ brokers that support it.
 
 - Live tails of **pub/sub** (`pubsub:ch`), **pattern pub/sub** (`psub:ch.*`),
   and **streams** (`stream:key`); plus **keyspace event** notifications and a
-  **MONITOR** command tail (Redis), and **topic**/**queue** tails (AMQP).
+  **MONITOR** command tail (Redis), **topic**/**queue** tails (AMQP 1.0), and
+  **exchange** taps (`exchange:name`) (RabbitMQ).
 - **Record** any live tail to a binary-safe **JSONL** file (lossless), toggleable
   on/off while it runs.
 - **Export** a finished recording to **CSV** for spreadsheets.
@@ -87,22 +96,23 @@ Logs are written to `~/.local/share/brokertui/logs/`.
 just fmt            # rustfmt
 just lint           # clippy -D warnings
 just test           # unit + snapshot tests
-just test-int       # integration tests against dockerized Redis + ActiveMQ
+just test-int       # integration tests against dockerized Redis + ActiveMQ + RabbitMQ
 ```
 
 ## Build variants
 
 ```sh
-just build-release  # optimized binary (default features: keyring + amqp)
-just build-musl     # static, headless binary (env-var secrets only; no keyring/amqp)
+just build-release  # optimized binary (default features: keyring + amqp + rabbitmq)
+just build-musl     # static, headless binary (env-var secrets only; no keyring/amqp/rabbitmq)
 ```
 
-| Feature   | Default | What it adds                                              |
-|-----------|:-------:|-----------------------------------------------------------|
-| `keyring` |   on    | OS keyring backend for secret resolution                  |
-| `amqp`    |   on    | AMQP 1.0 broker support (`fe2o3-amqp` + rustls for `amqps`)|
+| Feature    | Default | What it adds                                               |
+|------------|:-------:|------------------------------------------------------------|
+| `keyring`  |   on    | OS keyring backend for secret resolution                   |
+| `amqp`     |   on    | AMQP 1.0 broker support (`fe2o3-amqp` + rustls for `amqps`) |
+| `rabbitmq` |   on    | RabbitMQ / AMQP 0.9.1 support (`lapin` + rustls for `amqps`)|
 
-Disable both with `--no-default-features` for a minimal, statically-linkable
+Disable them all with `--no-default-features` for a minimal, statically-linkable
 build (Redis is always included).
 
 ## License

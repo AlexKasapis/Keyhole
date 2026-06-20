@@ -1,6 +1,6 @@
 # Local brokers for development & integration tests.
-#   docker compose up -d redis activemq   # Redis + ActiveMQ (AMQP 1.0)
-#   docker compose --profile rabbitmq up -d  # also start RabbitMQ (AMQP 0-9-1, future)
+#   docker compose up -d redis activemq          # Redis + ActiveMQ (AMQP 1.0)
+#   docker compose --profile rabbitmq up -d       # also start RabbitMQ (AMQP 0.9.1)
 #
 # Host ports are configurable to avoid clashes with an existing local stack.
 # Override in a (gitignored) .env file, e.g. BROKERTUI_REDIS_PORT=6380.
@@ -20,11 +20,21 @@ services:
       - "${BROKERTUI_ACTIVEMQ_PORT:-5674}:5672"  # AMQP 1.0
       - "${BROKERTUI_ACTIVEMQ_WEB_PORT:-8162}:8161" # web console
 
-  # AMQP 0-9-1 broker — a planned later addition (the trait abstracts the broker,
-  # so a RabbitMQ/lapin or AMQP-1.0-against-RabbitMQ-4.x impl can slot in).
+  # RabbitMQ — the Phase 5 AMQP 0.9.1 target (the `rabbitmq` broker, via lapin).
+  # Credentials are brokertui/brokertui: RabbitMQ restricts the built-in `guest`
+  # user to loopback, but the host reaches the container over the bridge network,
+  # so a non-`guest` user is required for the dockerized broker.
   rabbitmq:
     image: rabbitmq:3-management
     profiles: ["rabbitmq"]
+    environment:
+      RABBITMQ_DEFAULT_USER: brokertui
+      RABBITMQ_DEFAULT_PASS: brokertui
     ports:
-      - "${BROKERTUI_RABBITMQ_PORT:-5673}:5672"      # AMQP
+      - "${BROKERTUI_RABBITMQ_PORT:-5673}:5672"      # AMQP 0.9.1
       - "${BROKERTUI_RABBITMQ_MGMT_PORT:-15673}:15672" # management UI / HTTP API
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

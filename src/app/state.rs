@@ -287,7 +287,10 @@ impl Connection {
     pub fn label(&self) -> String {
         match self.caps.kind {
             BrokerKind::Redis => format!("{} (db{})", self.name, self.db),
-            BrokerKind::Amqp => format!("{} [{}]", self.name, self.caps.kind.label()),
+            // The AMQP brokers are not database-scoped, so just tag the kind.
+            BrokerKind::Amqp | BrokerKind::Rabbitmq => {
+                format!("{} [{}]", self.name, self.caps.kind.label())
+            }
         }
     }
 }
@@ -306,6 +309,9 @@ pub struct ConnForm {
 
 impl ConnForm {
     pub const FIELD_COUNT: usize = 6;
+    /// Index of the shared slot that carries a Redis DB index or a RabbitMQ
+    /// vhost, relabelled per kind (see [`Self::slot3_label`]).
+    pub const SLOT3_FIELD: usize = 3;
     /// Index of the synthetic "TLS toggle" focus position.
     pub const TLS_FOCUS: usize = Self::FIELD_COUNT;
     /// Index of the synthetic "broker kind toggle" focus position.
@@ -333,12 +339,51 @@ impl ConnForm {
         }
     }
 
-    /// Toggle between the Redis and AMQP broker kinds.
+    /// Cycle the broker kind Redis → AMQP → RabbitMQ → Redis. The Port and the
+    /// shared DB/Vhost field track each kind's defaults, but *only while they
+    /// still hold the previous kind's default* — so switching kinds fixes up the
+    /// obvious fields (e.g. 6379 → 5672, the DB index → the vhost "/") without
+    /// ever clobbering a value the user has typed.
     pub fn toggle_kind(&mut self) {
-        self.kind = match self.kind {
+        let prev = self.kind;
+        self.kind = match prev {
             BrokerKind::Redis => BrokerKind::Amqp,
-            BrokerKind::Amqp => BrokerKind::Redis,
+            BrokerKind::Amqp => BrokerKind::Rabbitmq,
+            BrokerKind::Rabbitmq => BrokerKind::Redis,
         };
+        if self.fields[2] == Self::default_port(prev) {
+            self.fields[2] = Self::default_port(self.kind).to_string();
+        }
+        if self.fields[3] == Self::default_slot3(prev) {
+            self.fields[3] = Self::default_slot3(self.kind).to_string();
+        }
+    }
+
+    /// The Port field's pre-filled default for a broker kind.
+    fn default_port(kind: BrokerKind) -> &'static str {
+        match kind {
+            BrokerKind::Redis => "6379",
+            BrokerKind::Amqp | BrokerKind::Rabbitmq => "5672",
+        }
+    }
+
+    /// The shared slot-3 field's default per kind: a Redis database index, a
+    /// RabbitMQ vhost, or empty (AMQP 1.0 ignores it). See [`Self::slot3_label`].
+    fn default_slot3(kind: BrokerKind) -> &'static str {
+        match kind {
+            BrokerKind::Redis => "0",
+            BrokerKind::Amqp => "",
+            BrokerKind::Rabbitmq => "/",
+        }
+    }
+
+    /// The label shown for the shared slot-3 field, which carries a Redis
+    /// database index or a RabbitMQ vhost depending on the selected kind.
+    pub fn slot3_label(kind: BrokerKind) -> &'static str {
+        match kind {
+            BrokerKind::Redis | BrokerKind::Amqp => "DB",
+            BrokerKind::Rabbitmq => "Vhost",
+        }
     }
 
     pub fn focus_next(&mut self) {
@@ -450,5 +495,54 @@ mod tests {
         let s = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 10);
         assert!(s.notice.is_none());
         assert_eq!(s.label, "keyspace:db0");
+    }
+
+    #[test]
+    fn connform_toggle_kind_cycles_and_tracks_field_defaults() {
+        let mut form = ConnForm::new();
+        // Fresh form starts as Redis with its defaults.
+        assert_eq!(form.kind, BrokerKind::Redis);
+        assert_eq!(form.fields[2], "6379");
+        assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "0");
+
+        // Redis → AMQP: port and the DB slot move to AMQP's defaults.
+        form.toggle_kind();
+        assert_eq!(form.kind, BrokerKind::Amqp);
+        assert_eq!(form.fields[2], "5672");
+        assert_eq!(
+            form.fields[ConnForm::SLOT3_FIELD],
+            "",
+            "AMQP ignores the slot"
+        );
+
+        // AMQP → RabbitMQ: port stays 5672, the slot becomes the vhost default.
+        form.toggle_kind();
+        assert_eq!(form.kind, BrokerKind::Rabbitmq);
+        assert_eq!(form.fields[2], "5672");
+        assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "/");
+        assert_eq!(ConnForm::slot3_label(form.kind), "Vhost");
+
+        // RabbitMQ → Redis: back to the Redis defaults — full cycle restored.
+        form.toggle_kind();
+        assert_eq!(form.kind, BrokerKind::Redis);
+        assert_eq!(form.fields[2], "6379");
+        assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "0");
+        assert_eq!(ConnForm::slot3_label(form.kind), "DB");
+    }
+
+    #[test]
+    fn connform_toggle_kind_preserves_user_edited_fields() {
+        let mut form = ConnForm::new();
+        // A user-typed port and DB must NOT be overwritten on a kind switch,
+        // because they no longer match the previous kind's default.
+        form.fields[2] = "7000".to_string();
+        form.fields[ConnForm::SLOT3_FIELD] = "3".to_string();
+        form.toggle_kind(); // -> AMQP
+        assert_eq!(form.fields[2], "7000", "custom port preserved");
+        assert_eq!(
+            form.fields[ConnForm::SLOT3_FIELD],
+            "3",
+            "custom slot preserved"
+        );
     }
 }

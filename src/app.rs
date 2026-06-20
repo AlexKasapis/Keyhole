@@ -23,12 +23,14 @@ use crate::app::action::Action;
 use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle};
 #[cfg(feature = "amqp")]
 use crate::broker::amqp::AmqpConnection;
+#[cfg(feature = "rabbitmq")]
+use crate::broker::rabbitmq::RabbitmqConnection;
 use crate::broker::redis::RedisConnection;
 use crate::broker::{
     BrokerConnection, BrokerEvent, BrokerKind, BrowsePage, BrowseReq, Capabilities, ConnId,
     InspectReq, ServerStats, SubSpec, ValueType, ValueView,
 };
-use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RedisProfile};
+use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;
 use crate::recording::RecordingStatus;
 use crate::theme::Theme;
@@ -798,6 +800,7 @@ impl App {
             let (spec, account) = match &profile {
                 ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
                 ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
+                ConnectionConfig::Rabbitmq(p) => (p.password_spec(), p.name.clone()),
             };
             let password = match override_password {
                 Some(pw) => Some(pw),
@@ -826,6 +829,19 @@ impl App {
                             id,
                             context: "connect".to_string(),
                             error: "AMQP support is not compiled in this build".to_string(),
+                        })
+                        .await;
+                    return;
+                }
+                #[cfg(feature = "rabbitmq")]
+                ConnectionConfig::Rabbitmq(p) => Box::new(RabbitmqConnection::new(p, password)),
+                #[cfg(not(feature = "rabbitmq"))]
+                ConnectionConfig::Rabbitmq(_) => {
+                    let _ = events
+                        .send(AppEvent::ConnError {
+                            id,
+                            context: "connect".to_string(),
+                            error: "RabbitMQ support is not compiled in this build".to_string(),
                         })
                         .await;
                     return;
@@ -916,6 +932,26 @@ impl App {
                 password: saved_spec,
                 tls,
             }),
+            BrokerKind::Rabbitmq => {
+                // The DB slot is relabelled "Vhost" for RabbitMQ; empty → default "/".
+                let vhost = {
+                    let v = form.fields[3].trim();
+                    if v.is_empty() {
+                        "/".to_string()
+                    } else {
+                        v.to_string()
+                    }
+                };
+                ConnectionConfig::Rabbitmq(RabbitmqProfile {
+                    name,
+                    host,
+                    port,
+                    vhost,
+                    username,
+                    password: saved_spec,
+                    tls,
+                })
+            }
         };
 
         // Persist (best effort) and keep the in-memory profile list in sync.
@@ -2398,6 +2434,60 @@ mod tests {
         let saved = std::fs::read_to_string(&path).expect("config written");
         assert!(saved.contains("c1"));
         assert!(!saved.contains("secret"), "the literal must not be written");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn form_submit_builds_rabbitmq_profile_with_vhost() {
+        let path = unique_config_path();
+        let (mut app, _rx) = build_app(Config::default(), path.clone(), None);
+        app.apply(Action::AddConnection);
+        {
+            let form = app.form.as_mut().unwrap();
+            form.toggle_kind(); // Redis -> AMQP
+            form.toggle_kind(); // AMQP  -> RabbitMQ
+            form.fields[0] = "rmq".into(); // name
+            form.fields[1] = "rabbit.local".into(); // host
+            form.fields[2] = "5672".into(); // port
+            form.fields[3] = "staging".into(); // slot 3 == Vhost for RabbitMQ
+            form.fields[4] = "app".into(); // username
+            form.fields[5] = "".into(); // password
+        }
+        app.submit_form();
+
+        assert_eq!(app.profiles.len(), 1);
+        let ConnectionConfig::Rabbitmq(p) = &app.profiles[0] else {
+            panic!("expected a rabbitmq profile");
+        };
+        assert_eq!(p.name, "rmq");
+        assert_eq!(p.host, "rabbit.local");
+        assert_eq!(p.port, 5672);
+        assert_eq!(p.vhost, "staging", "slot 3 is read as the vhost");
+        assert_eq!(p.username.as_deref(), Some("app"));
+
+        let saved = std::fs::read_to_string(&path).expect("config written");
+        assert!(saved.contains("type = \"rabbitmq\""));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn form_submit_rabbitmq_blank_vhost_defaults_to_root() {
+        let path = unique_config_path();
+        let (mut app, _rx) = build_app(Config::default(), path.clone(), None);
+        app.apply(Action::AddConnection);
+        {
+            let form = app.form.as_mut().unwrap();
+            form.toggle_kind(); // -> AMQP
+            form.toggle_kind(); // -> RabbitMQ
+            form.fields[0] = "rmq2".into();
+            form.fields[3] = "   ".into(); // whitespace-only vhost
+        }
+        app.submit_form();
+
+        let ConnectionConfig::Rabbitmq(p) = &app.profiles[0] else {
+            panic!("expected a rabbitmq profile");
+        };
+        assert_eq!(p.vhost, "/", "a blank vhost defaults to /");
         let _ = std::fs::remove_file(&path);
     }
 

@@ -57,12 +57,14 @@ pub struct ThemeConfig {
     pub gauge: Option<String>,
 }
 
-/// A saved connection, tagged by broker type (`type = "redis"` / `"amqp"`).
+/// A saved connection, tagged by broker type (`type = "redis"` / `"amqp"` /
+/// `"rabbitmq"`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ConnectionConfig {
     Redis(RedisProfile),
     Amqp(AmqpProfile),
+    Rabbitmq(RabbitmqProfile),
 }
 
 impl ConnectionConfig {
@@ -71,6 +73,7 @@ impl ConnectionConfig {
         match self {
             ConnectionConfig::Redis(p) => &p.name,
             ConnectionConfig::Amqp(p) => &p.name,
+            ConnectionConfig::Rabbitmq(p) => &p.name,
         }
     }
 
@@ -79,10 +82,11 @@ impl ConnectionConfig {
         match self {
             ConnectionConfig::Redis(_) => "redis",
             ConnectionConfig::Amqp(_) => "amqp",
+            ConnectionConfig::Rabbitmq(_) => "rabbitmq",
         }
     }
 
-    /// A `host:port[/db][ tls]` summary for the connections list.
+    /// A `host:port[/db|/vhost][ tls]` summary for the connections list.
     pub fn endpoint(&self) -> String {
         match self {
             ConnectionConfig::Redis(p) => {
@@ -97,6 +101,16 @@ impl ConnectionConfig {
             ConnectionConfig::Amqp(p) => {
                 let tls = if p.tls { " tls" } else { "" };
                 format!("{}:{}{tls}", p.host, p.port)
+            }
+            ConnectionConfig::Rabbitmq(p) => {
+                // Show the vhost only when it isn't the default "/".
+                let vhost = if p.vhost == "/" {
+                    String::new()
+                } else {
+                    format!("/{}", p.vhost)
+                };
+                let tls = if p.tls { " tls" } else { "" };
+                format!("{}:{}{vhost}{tls}", p.host, p.port)
             }
         }
     }
@@ -154,6 +168,36 @@ impl AmqpProfile {
     }
 }
 
+/// A RabbitMQ (AMQP 0.9.1) connection profile. The URL is
+/// `amqp[s]://[user:pass@]host:port/vhost`; `tls` selects `amqps://` (RabbitMQ's
+/// :5671 TLS listener). `vhost` is the AMQP virtual host (default `/`). Secrets
+/// follow the same spec rules as Redis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RabbitmqProfile {
+    pub name: String,
+    #[serde(default = "default_host")]
+    pub host: String,
+    #[serde(default = "default_amqp_port")]
+    pub port: u16,
+    /// AMQP virtual host (default `/`).
+    #[serde(default = "default_vhost")]
+    pub vhost: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Secret spec: `env:VAR`, `keyring[:account]`, `prompt`, or omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub tls: bool,
+}
+
+impl RabbitmqProfile {
+    /// Parse the profile's password field into a [`SecretSpec`].
+    pub fn password_spec(&self) -> SecretSpec {
+        SecretSpec::parse(self.password.as_deref().unwrap_or(""))
+    }
+}
+
 fn default_host() -> String {
     "127.0.0.1".to_string()
 }
@@ -164,6 +208,10 @@ fn default_redis_port() -> u16 {
 
 fn default_amqp_port() -> u16 {
     5672
+}
+
+fn default_vhost() -> String {
+    "/".to_string()
 }
 
 /// Global behavioural settings.
@@ -321,6 +369,57 @@ mod tests {
             cfg.connections[0].endpoint(),
             "b-x.mq.eu-west-1.amazonaws.com:5671 tls"
         );
+    }
+
+    #[test]
+    fn parses_rabbitmq_connection() {
+        let text = r#"
+            [[connection]]
+            type = "rabbitmq"
+            name = "rabbit"
+            host = "rabbit.example.com"
+            port = 5671
+            vhost = "prod"
+            username = "app"
+            password = "env:RABBIT_PW"
+            tls = true
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.connections.len(), 1);
+        let ConnectionConfig::Rabbitmq(p) = &cfg.connections[0] else {
+            panic!("expected a rabbitmq profile");
+        };
+        assert_eq!(p.name, "rabbit");
+        assert_eq!(p.port, 5671);
+        assert_eq!(p.vhost, "prod");
+        assert!(p.tls);
+        assert_eq!(p.password_spec(), SecretSpec::Env("RABBIT_PW".into()));
+        assert_eq!(cfg.connections[0].kind_label(), "rabbitmq");
+        // A non-default vhost is shown in the endpoint summary.
+        assert_eq!(
+            cfg.connections[0].endpoint(),
+            "rabbit.example.com:5671/prod tls"
+        );
+    }
+
+    #[test]
+    fn applies_defaults_for_minimal_rabbitmq_profile() {
+        let text = r#"
+            [[connection]]
+            type = "rabbitmq"
+            name = "local"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        let ConnectionConfig::Rabbitmq(p) = &cfg.connections[0] else {
+            panic!("expected a rabbitmq profile");
+        };
+        assert_eq!(p.host, "127.0.0.1");
+        assert_eq!(p.port, 5672, "RabbitMQ defaults to 5672");
+        assert_eq!(p.vhost, "/", "vhost defaults to /");
+        assert!(!p.tls);
+        assert_eq!(p.password_spec(), SecretSpec::None);
+        // The default vhost is omitted from the endpoint summary.
+        assert_eq!(cfg.connections[0].endpoint(), "127.0.0.1:5672");
     }
 
     #[test]

@@ -269,15 +269,21 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     };
     if conn.subs.is_empty() {
-        let body = Paragraph::new(vec![
+        // The accepted specs differ per broker (Redis pub/sub vs AMQP topic/queue
+        // vs RabbitMQ exchange), so the hint follows the active connection's kind.
+        let mut info = vec![
             Line::from(""),
             Line::styled("No live tails.", theme.dim),
             Line::from(""),
-            Line::from("Press 's' to subscribe (pubsub:ch · psub:ch.* · stream:key),"),
-            Line::from("or 't' on a stream key in the Browser."),
-        ])
-        .alignment(Alignment::Center)
-        .block(
+            Line::from("Press 's' to subscribe:"),
+            Line::styled(format!("  {}", conn.caps.kind.sub_spec_hint()), theme.dim),
+        ];
+        // The stream-tail shortcut only exists for Redis (it has a Browser).
+        if conn.caps.kind == BrokerKind::Redis {
+            info.push(Line::from(""));
+            info.push(Line::from("or 't' on a stream key in the Browser."));
+        }
+        let body = Paragraph::new(info).alignment(Alignment::Center).block(
             Block::bordered()
                 .title(" Realtime ")
                 .title_style(theme.heading)
@@ -592,7 +598,13 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(block, rect);
 
     let mut lines: Vec<Line> = Vec::new();
-    for (i, label) in ConnForm::LABELS.iter().enumerate() {
+    for (i, base_label) in ConnForm::LABELS.iter().enumerate() {
+        // Slot 3 is shared: a Redis DB index or a RabbitMQ vhost, relabelled to suit.
+        let label = if i == ConnForm::SLOT3_FIELD {
+            ConnForm::slot3_label(form.kind)
+        } else {
+            base_label
+        };
         let focused = form.focus == i;
         let cursor = if focused { "▏" } else { "" };
         let label_style = if focused { theme.accent } else { theme.dim };
@@ -614,6 +626,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let kind = match form.kind {
         BrokerKind::Redis => "redis",
         BrokerKind::Amqp => "amqp",
+        BrokerKind::Rabbitmq => "rabbitmq",
     };
     lines.push(Line::from(vec![
         Span::styled(
@@ -625,14 +638,19 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             },
         ),
         Span::raw(format!("[{kind}]")),
-        Span::styled("  (space switches redis/amqp)", theme.dim),
+        Span::styled("  (space cycles redis/amqp/rabbitmq)", theme.dim),
     ]));
     lines.push(Line::from(""));
-    if matches!(form.kind, BrokerKind::Amqp) {
-        lines.push(Line::styled(
-            "AMQP: DB is ignored; port is 5672 (amqp) or 5671 (amqps/TLS).",
+    match form.kind {
+        BrokerKind::Amqp => lines.push(Line::styled(
+            "AMQP 1.0: DB is ignored; port 5672 (amqp) or 5671 (amqps/TLS).",
             theme.dim,
-        ));
+        )),
+        BrokerKind::Rabbitmq => lines.push(Line::styled(
+            "RabbitMQ: Vhost defaults to /; port 5672 (amqp) or 5671 (amqps/TLS).",
+            theme.dim,
+        )),
+        BrokerKind::Redis => {}
     }
     lines.push(Line::styled(
         "Password: env:VAR · keyring · prompt · or a literal (session only)",
@@ -801,6 +819,11 @@ fn event_line(ev: &BrokerEvent, theme: &Theme) -> Line<'static> {
     ];
     if let Some(id) = ev.meta("id") {
         spans.push(Span::styled(format!("{id} "), theme.dim));
+    }
+    // A RabbitMQ exchange tap reports the exchange as the source; the per-message
+    // routing key rides in meta and is shown here, like a stream entry's id.
+    if let Some(rk) = ev.meta("routing_key") {
+        spans.push(Span::styled(format!("{rk} "), theme.dim));
     }
     spans.push(Span::raw(payload_preview(&ev.payload, 400)));
     Line::from(spans)

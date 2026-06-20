@@ -29,6 +29,8 @@ use tokio_util::task::TaskTracker;
 use crate::app::App;
 #[cfg(feature = "amqp")]
 use crate::broker::amqp::AmqpConnection;
+#[cfg(feature = "rabbitmq")]
+use crate::broker::rabbitmq::RabbitmqConnection;
 use crate::broker::redis::RedisConnection;
 use crate::broker::{BrokerConnection, SubSpec};
 use crate::cli::{Cli, Command};
@@ -178,16 +180,18 @@ async fn run_record(
 ) -> anyhow::Result<()> {
     let profile = find_connection(&config, profile_name)
         .ok_or_else(|| anyhow!("no connection profile named '{profile_name}'"))?;
-    // The stream/keyspace default db only applies to Redis; AMQP is db-agnostic.
+    // The stream/keyspace default db only applies to Redis; the AMQP brokers are
+    // db-agnostic.
     let default_db = match &profile {
         ConnectionConfig::Redis(p) => p.db,
-        ConnectionConfig::Amqp(_) => 0,
+        ConnectionConfig::Amqp(_) | ConnectionConfig::Rabbitmq(_) => 0,
     };
     let spec = SubSpec::parse(source, default_db)?;
 
     let (secret_spec, account) = match &profile {
         ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),
         ConnectionConfig::Amqp(p) => (p.password_spec(), p.name.clone()),
+        ConnectionConfig::Rabbitmq(p) => (p.password_spec(), p.name.clone()),
     };
     let password = resolve_secret(secret_spec, account).await?;
     let preview = config.settings.value_preview_bytes;
@@ -198,6 +202,12 @@ async fn run_record(
         ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
         #[cfg(not(feature = "amqp"))]
         ConnectionConfig::Amqp(_) => anyhow::bail!("AMQP support is not compiled in this build"),
+        #[cfg(feature = "rabbitmq")]
+        ConnectionConfig::Rabbitmq(p) => Box::new(RabbitmqConnection::new(p, password)),
+        #[cfg(not(feature = "rabbitmq"))]
+        ConnectionConfig::Rabbitmq(_) => {
+            anyhow::bail!("RabbitMQ support is not compiled in this build")
+        }
     };
     conn.connect().await.context("connecting")?;
     let mut stream = conn.subscribe(spec.clone()).await.context("subscribing")?;
