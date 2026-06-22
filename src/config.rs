@@ -6,7 +6,7 @@
 
 mod secret;
 
-pub use secret::{resolve as resolve_secret, SecretSpec};
+pub use secret::{resolve_async as resolve_secret_async, SecretSpec};
 
 use std::path::{Path, PathBuf};
 

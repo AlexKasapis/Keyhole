@@ -22,14 +22,10 @@ use tokio_util::task::TaskTracker;
 
 use crate::app::action::Action;
 use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle};
-#[cfg(feature = "amqp")]
-use crate::broker::amqp::AmqpConnection;
-#[cfg(feature = "rabbitmq")]
-use crate::broker::rabbitmq::RabbitmqConnection;
-use crate::broker::redis::RedisConnection;
+use crate::broker::factory::connection_for;
 use crate::broker::{
-    BrokerConnection, BrokerEvent, BrokerKind, BrowsePage, Capabilities, ConnId, InspectReq,
-    ServerStats, SubSpec, ValueType, ValueView,
+    BrokerEvent, BrokerKind, BrowsePage, Capabilities, ConnId, InspectReq, ServerStats, SubSpec,
+    ValueType, ValueView,
 };
 use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;
@@ -919,7 +915,7 @@ impl App {
             let (spec, account) = profile.secret_account();
             let password = match override_password {
                 Some(pw) => Some(pw),
-                None => match resolve_secret(spec, account).await {
+                None => match config::resolve_secret_async(spec, account).await {
                     Ok(pw) => pw,
                     Err(e) => {
                         let _ = events
@@ -933,30 +929,14 @@ impl App {
                     }
                 },
             };
-            let conn: Box<dyn BrokerConnection> = match profile {
-                ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview)),
-                #[cfg(feature = "amqp")]
-                ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
-                #[cfg(not(feature = "amqp"))]
-                ConnectionConfig::Amqp(_) => {
+            let conn = match connection_for(profile, password, preview) {
+                Ok(conn) => conn,
+                Err(e) => {
                     let _ = events
                         .send(AppEvent::ConnError {
                             id,
                             context: "connect".to_string(),
-                            error: "AMQP support is not compiled in this build".to_string(),
-                        })
-                        .await;
-                    return;
-                }
-                #[cfg(feature = "rabbitmq")]
-                ConnectionConfig::Rabbitmq(p) => Box::new(RabbitmqConnection::new(p, password)),
-                #[cfg(not(feature = "rabbitmq"))]
-                ConnectionConfig::Rabbitmq(_) => {
-                    let _ = events
-                        .send(AppEvent::ConnError {
-                            id,
-                            context: "connect".to_string(),
-                            error: "RabbitMQ support is not compiled in this build".to_string(),
+                            error: e.to_string(),
                         })
                         .await;
                     return;
@@ -1684,14 +1664,6 @@ impl App {
         }
         self.status = Some(Status { message, is_error });
     }
-}
-
-/// Resolve a secret spec off the render thread (keyring access can block).
-async fn resolve_secret(
-    spec: config::SecretSpec,
-    account: String,
-) -> anyhow::Result<Option<String>> {
-    tokio::task::spawn_blocking(move || config::resolve_secret(&spec, &account)).await?
 }
 
 /// The screen to show a freshly-focused connection: the key browser when the

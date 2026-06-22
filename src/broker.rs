@@ -15,6 +15,7 @@
 pub mod actor;
 #[cfg(feature = "amqp")]
 pub mod amqp;
+pub mod factory;
 #[cfg(feature = "rabbitmq")]
 pub mod rabbitmq;
 pub mod redis;

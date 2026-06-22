@@ -64,6 +64,13 @@ pub fn resolve(spec: &SecretSpec, account_hint: &str) -> anyhow::Result<Option<S
     }
 }
 
+/// Resolve a secret off the async runtime, since [`resolve`] can block (keyring
+/// access touches the OS secret service). Shared by the TUI connect path and the
+/// headless `record` command.
+pub async fn resolve_async(spec: SecretSpec, account: String) -> anyhow::Result<Option<String>> {
+    tokio::task::spawn_blocking(move || resolve(&spec, &account)).await?
+}
+
 #[cfg(feature = "keyring")]
 fn resolve_keyring(account: &str) -> anyhow::Result<Option<String>> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, account)

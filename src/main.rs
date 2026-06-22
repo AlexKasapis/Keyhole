@@ -27,12 +27,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::app::App;
-#[cfg(feature = "amqp")]
-use crate::broker::amqp::AmqpConnection;
-#[cfg(feature = "rabbitmq")]
-use crate::broker::rabbitmq::RabbitmqConnection;
-use crate::broker::redis::RedisConnection;
-use crate::broker::{BrokerConnection, SubSpec};
+use crate::broker::SubSpec;
 use crate::cli::{Cli, Command};
 use crate::config::{Config, ConnectionConfig};
 use crate::event::AppEvent;
@@ -209,22 +204,10 @@ async fn run_record(
     }
 
     let (secret_spec, account) = profile.secret_account();
-    let password = resolve_secret(secret_spec, account).await?;
+    let password = config::resolve_secret_async(secret_spec, account).await?;
     let preview = config.settings.value_preview_bytes;
     let name = profile.name().to_string();
-    let mut conn: Box<dyn BrokerConnection> = match profile {
-        ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview)),
-        #[cfg(feature = "amqp")]
-        ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
-        #[cfg(not(feature = "amqp"))]
-        ConnectionConfig::Amqp(_) => anyhow::bail!("AMQP support is not compiled in this build"),
-        #[cfg(feature = "rabbitmq")]
-        ConnectionConfig::Rabbitmq(p) => Box::new(RabbitmqConnection::new(p, password)),
-        #[cfg(not(feature = "rabbitmq"))]
-        ConnectionConfig::Rabbitmq(_) => {
-            anyhow::bail!("RabbitMQ support is not compiled in this build")
-        }
-    };
+    let mut conn = broker::factory::connection_for(profile, password, preview)?;
     conn.connect().await.context("connecting")?;
     let mut stream = conn.subscribe(spec.clone()).await.context("subscribing")?;
 
@@ -271,14 +254,6 @@ fn find_connection(config: &Config, name: &str) -> Option<ConnectionConfig> {
         .iter()
         .find(|c| c.name() == name)
         .cloned()
-}
-
-/// Resolve a secret spec off the async runtime (keyring access can block).
-async fn resolve_secret(
-    spec: config::SecretSpec,
-    account: String,
-) -> anyhow::Result<Option<String>> {
-    tokio::task::spawn_blocking(move || config::resolve_secret(&spec, &account)).await?
 }
 
 #[cfg(test)]
