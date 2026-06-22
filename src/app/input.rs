@@ -239,12 +239,14 @@ impl App {
                 self.mode = InputMode::Normal;
             }
             KeyCode::Enter => self.submit_form(),
-            KeyCode::Tab | KeyCode::Down => {
+            // Tab / Shift-Tab are the sole field-movement keys; the arrow keys
+            // were duplicate bindings and have been dropped.
+            KeyCode::Tab => {
                 if let Some(form) = &mut self.form {
                     form.focus_next();
                 }
             }
-            KeyCode::BackTab | KeyCode::Up => {
+            KeyCode::BackTab => {
                 if let Some(form) = &mut self.form {
                     form.focus_prev();
                 }
@@ -252,8 +254,10 @@ impl App {
             KeyCode::Char(c) => {
                 if let Some(form) = &mut self.form {
                     match form.focus {
+                        // Space is the sole toggle key (the old t/f/y/n aliases
+                        // were duplicates and have been dropped).
                         ConnForm::TLS_FOCUS => {
-                            if matches!(c, ' ' | 't' | 'f' | 'y' | 'n') {
+                            if c == ' ' {
                                 form.tls = !form.tls;
                             }
                         }

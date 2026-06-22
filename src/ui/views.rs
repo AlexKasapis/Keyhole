@@ -1020,7 +1020,11 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, base_label) in ConnForm::LABELS.iter().enumerate() {
-        // Slot 3 is shared: a Redis DB index or a RabbitMQ vhost, relabelled to suit.
+        // Slot 3 is shared: a Redis DB index or a RabbitMQ vhost, relabelled to
+        // suit. AMQP is not database-scoped, so the row is omitted entirely.
+        if i == ConnForm::SLOT3_FIELD && !ConnForm::slot3_shown(form.kind) {
+            continue;
+        }
         let label = if i == ConnForm::SLOT3_FIELD {
             ConnForm::slot3_label(form.kind)
         } else {
@@ -1059,20 +1063,11 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             },
         ),
         Span::raw(format!("[{kind}]")),
-        Span::styled("  (space cycles redis/amqp/rabbitmq)", theme.dim),
+        Span::styled("  (space cycles)", theme.dim),
     ]));
     lines.push(Line::from(""));
-    match form.kind {
-        BrokerKind::Amqp => lines.push(Line::styled(
-            "AMQP 1.0: DB is ignored; port 5672 (amqp) or 5671 (amqps/TLS).",
-            theme.dim,
-        )),
-        BrokerKind::Rabbitmq => lines.push(Line::styled(
-            "RabbitMQ: Vhost defaults to /; port 5672 (amqp) or 5671 (amqps/TLS).",
-            theme.dim,
-        )),
-        BrokerKind::Redis => {}
-    }
+    // One consolidated per-kind note (defined alongside each kind's defaults).
+    lines.push(Line::styled(ConnForm::kind_note(form.kind), theme.dim));
     lines.push(Line::styled(
         "Password: env:VAR · keyring · prompt · or a literal (session only)",
         theme.dim,
@@ -1082,7 +1077,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
     lines.push(Line::from(""));
     lines.push(Line::styled(
-        "Tab/↑↓ move · Enter save & connect · Esc cancel",
+        "Tab/Shift-Tab move · Enter save & connect · Esc cancel",
         theme.dim,
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);

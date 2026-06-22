@@ -522,10 +522,16 @@ mod tests {
         assert!(text.contains("Add connection"));
         assert!(text.contains("Password"));
         assert!(text.contains("Kind"), "the broker-kind toggle renders");
+        // Redis is database-scoped, so its DB row and consolidated note show.
+        assert!(text.contains("DB:"), "the Redis DB row renders");
+        assert!(
+            text.contains("DB selects the database index"),
+            "the consolidated Redis note renders"
+        );
     }
 
     #[test]
-    fn connection_form_shows_amqp_hint_when_amqp_kind() {
+    fn connection_form_amqp_omits_db_row_and_shows_note() {
         let (mut app, _rx) = test_app();
         let mut form = ConnForm::new();
         form.toggle_kind(); // -> AMQP
@@ -533,7 +539,13 @@ mod tests {
         app.mode = InputMode::Form;
         let text = screen_text(&mut app);
         assert!(text.contains("[amqp]"));
-        assert!(text.contains("DB is ignored"), "AMQP hint shown");
+        // The consolidated note replaces the per-kind blurb …
+        assert!(
+            text.contains("not database-scoped"),
+            "consolidated AMQP note shown"
+        );
+        // … and AMQP, not being database-scoped, drops the DB row entirely.
+        assert!(!text.contains("DB:"), "AMQP has no DB row");
     }
 
     #[test]

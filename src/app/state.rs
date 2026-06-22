@@ -961,6 +961,8 @@ struct KindDefaults {
     slot3: &'static str,
     /// Label shown for the slot-3 field.
     slot3_label: &'static str,
+    /// One-line note shown beneath the form to describe this broker kind.
+    note: &'static str,
 }
 
 /// The add-connection modal. Fields are plain strings edited in place; the
@@ -1038,16 +1040,22 @@ impl ConnForm {
                 port: "6379",
                 slot3: "0",
                 slot3_label: "DB",
+                note: "Redis: DB selects the database index (default 0); port 6379.",
             },
+            // AMQP is not database-scoped, so it has no slot-3 row (the label is
+            // unused). `slot3` stays empty and the field is hidden — see
+            // `slot3_shown`.
             BrokerKind::Amqp => KindDefaults {
                 port: "5672",
                 slot3: "",
                 slot3_label: "DB",
+                note: "AMQP 1.0: not database-scoped; port 5672, or 5671 with TLS.",
             },
             BrokerKind::Rabbitmq => KindDefaults {
                 port: "5672",
                 slot3: "/",
                 slot3_label: "Vhost",
+                note: "RabbitMQ: Vhost defaults to /; port 5672, or 5671 with TLS.",
             },
         }
     }
@@ -1058,12 +1066,42 @@ impl ConnForm {
         Self::kind_defaults(kind).slot3_label
     }
 
+    /// The one-line note describing the selected broker kind, shown beneath the
+    /// form. Consolidated here so each kind's blurb lives beside its defaults.
+    pub fn kind_note(kind: BrokerKind) -> &'static str {
+        Self::kind_defaults(kind).note
+    }
+
+    /// Whether the shared slot-3 field (DB / Vhost) is shown for this kind.
+    /// AMQP 1.0 is not database-scoped, so it has no slot-3 row at all and the
+    /// field is skipped both when rendering and when cycling focus.
+    pub fn slot3_shown(kind: BrokerKind) -> bool {
+        !matches!(kind, BrokerKind::Amqp)
+    }
+
     pub fn focus_next(&mut self) {
         self.focus = (self.focus + 1) % Self::FOCUS_COUNT;
+        self.skip_hidden_slot3_forward();
     }
 
     pub fn focus_prev(&mut self) {
         self.focus = (self.focus + Self::FOCUS_COUNT - 1) % Self::FOCUS_COUNT;
+        self.skip_hidden_slot3_backward();
+    }
+
+    /// Hop over the slot-3 position when it is hidden (AMQP). Only ever one
+    /// hidden slot, flanked by visible fields, so a single step always lands on
+    /// a shown position.
+    fn skip_hidden_slot3_forward(&mut self) {
+        if self.focus == Self::SLOT3_FIELD && !Self::slot3_shown(self.kind) {
+            self.focus = (self.focus + 1) % Self::FOCUS_COUNT;
+        }
+    }
+
+    fn skip_hidden_slot3_backward(&mut self) {
+        if self.focus == Self::SLOT3_FIELD && !Self::slot3_shown(self.kind) {
+            self.focus = (self.focus + Self::FOCUS_COUNT - 1) % Self::FOCUS_COUNT;
+        }
     }
 }
 
@@ -1341,6 +1379,60 @@ mod tests {
             "",
             "slot-3 reset to the new kind's default, not carried over"
         );
+    }
+
+    #[test]
+    fn connform_slot3_shown_only_when_database_scoped() {
+        assert!(ConnForm::slot3_shown(BrokerKind::Redis), "DB row");
+        assert!(ConnForm::slot3_shown(BrokerKind::Rabbitmq), "Vhost row");
+        assert!(
+            !ConnForm::slot3_shown(BrokerKind::Amqp),
+            "AMQP is not database-scoped: no slot-3 row"
+        );
+    }
+
+    #[test]
+    fn connform_focus_skips_hidden_db_row_on_amqp() {
+        let mut form = ConnForm::new();
+        form.toggle_kind(); // -> AMQP, where slot 3 (DB) is hidden
+        assert_eq!(form.kind, BrokerKind::Amqp);
+
+        // Forward: Port (2) → Username (4), hopping over the hidden DB slot (3).
+        form.focus = 2;
+        form.focus_next();
+        assert_eq!(form.focus, 4, "Tab skips the hidden DB row going forward");
+
+        // Backward: Username (4) → Port (2), again hopping over slot 3.
+        form.focus_prev();
+        assert_eq!(
+            form.focus, 2,
+            "Shift-Tab skips the hidden DB row going back"
+        );
+    }
+
+    #[test]
+    fn connform_focus_lands_on_db_row_when_shown() {
+        // Redis is database-scoped, so the DB slot is a normal focus stop.
+        let mut form = ConnForm::new();
+        form.focus = 2; // Port
+        form.focus_next();
+        assert_eq!(
+            form.focus,
+            ConnForm::SLOT3_FIELD,
+            "Redis stops on the DB row"
+        );
+    }
+
+    #[test]
+    fn connform_kind_note_is_distinct_per_kind() {
+        let redis = ConnForm::kind_note(BrokerKind::Redis);
+        let amqp = ConnForm::kind_note(BrokerKind::Amqp);
+        let rabbit = ConnForm::kind_note(BrokerKind::Rabbitmq);
+        assert!(redis.contains("DB"));
+        assert!(amqp.contains("not database-scoped"));
+        assert!(rabbit.contains("Vhost"));
+        assert_ne!(redis, amqp);
+        assert_ne!(amqp, rabbit);
     }
 
     #[test]

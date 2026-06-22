@@ -1667,6 +1667,39 @@ fn form_tab_moves_focus_and_tls_toggles() {
 }
 
 #[test]
+fn form_arrow_keys_no_longer_navigate() {
+    // Up/Down duplicated Tab/Shift-Tab and were removed: only Tab moves focus.
+    let (mut app, _rx) = test_app();
+    app.apply(Action::AddConnection);
+    assert_eq!(app.form.as_ref().unwrap().focus, 0);
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(
+        app.form.as_ref().unwrap().focus,
+        0,
+        "arrow keys are no longer bound in the form"
+    );
+}
+
+#[test]
+fn form_tls_toggle_only_responds_to_space() {
+    // The old t/f/y/n aliases duplicated Space and were removed: typing them on
+    // the TLS toggle is a no-op (Space remains the sole toggle key).
+    let (mut app, _rx) = test_app();
+    app.apply(Action::AddConnection);
+    app.form.as_mut().unwrap().focus = ConnForm::TLS_FOCUS;
+    for c in ['t', 'f', 'y', 'n'] {
+        app.handle_key(ch(c));
+        assert!(
+            !app.form.as_ref().unwrap().tls,
+            "'{c}' must not toggle TLS anymore"
+        );
+    }
+    app.handle_key(ch(' '));
+    assert!(app.form.as_ref().unwrap().tls, "Space still toggles TLS");
+}
+
+#[test]
 fn form_escape_cancels() {
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
