@@ -15,8 +15,8 @@ expression: "render_lines(&mut app, 90, 26)"
 │                                         ││                                             │
 │                                         ││                                             │
 └─────────────────────────────────────────┘└─────────────────────────────────────────────┘
-┌ keyspace:db0 ──────────────────────────────────────────────────────────────────────────┐
-│ Console │ keyspace:db0                                                                 │
+┌ Keyspace — db0 ────────────────────────────────────────────────────────────────────────┐
+│ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail                                          │
 │ live · 0 events                                                                        │
 │⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
 │                                                                                        │

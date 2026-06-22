@@ -36,10 +36,33 @@ pub enum InputMode {
     Normal,
     Filter,
     Form,
-    /// Entering a subscription spec (`pubsub:ch`, `psub:ch.*`, `stream:key`).
+    /// Entering a subscription spec on the Pub/Sub or Tail anchor tab. Which spec
+    /// is built on submit follows the focused tab, not the buffer.
     Subscribe,
     /// Typing a command in the read-only console.
     Command,
+}
+
+/// One tab in the Browser's bottom panel. The first five are fixed and always
+/// present; [`PanelTab::Sub`] is one tab per live pub/sub or stream tail, placed
+/// immediately after its anchor ([`PanelTab::PubSub`] for pub/sub channels and
+/// patterns, [`PanelTab::Tail`] for streams). Every tab is reached only by
+/// cycling with Tab / Shift-Tab. MONITOR and keyspace tails have no tab of their
+/// own — they live under their anchor and run only while it is focused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelTab {
+    /// Read-only command console: type a command, Enter to run.
+    Console,
+    /// Server-wide MONITOR feed; live only while this tab is focused.
+    Monitor,
+    /// Keyspace-notification feed for the active db; live only while focused.
+    Keyspace,
+    /// Pub/sub anchor: an always-shown input to subscribe to a channel or pattern.
+    PubSub,
+    /// Stream-tail anchor: an always-shown input to tail a stream key.
+    Tail,
+    /// A live pub/sub or stream tail at `subs[idx]`.
+    Sub(usize),
 }
 
 /// A transient status-bar message.
@@ -437,12 +460,14 @@ pub struct Connection {
     pub stat_ticks: u32,
     /// Ticks elapsed since the last automatic key-browser refresh.
     pub browse_ticks: u32,
-    /// Live tails for this connection, shown as tabs in the Browser's bottom
-    /// panel (after the Console tab).
+    /// Live tails for this connection. Pub/sub and stream tails each get their
+    /// own tab in the Browser's bottom panel (after the Pub/Sub and Tail anchors
+    /// respectively); MONITOR and keyspace tails live under their fixed anchor
+    /// tab and run only while it is focused. See [`Self::panel_slots`].
     pub subs: Vec<Subscription>,
-    /// Active tab in the Browser's bottom panel: `0` is the read-only Console,
-    /// and `1..=subs.len()` select `subs[panel_tab - 1]`. Cycled with Tab /
-    /// Shift-Tab. (Replaces the former standalone Realtime screen's tab index.)
+    /// Active tab in the Browser's bottom panel: an index into the computed
+    /// [`Self::panel_slots`] list. Cycled with Tab / Shift-Tab — the only way to
+    /// move between tabs.
     pub panel_tab: usize,
     /// Read-only command console state for this connection.
     pub console: Console,
@@ -719,22 +744,93 @@ impl Connection {
         self.rebuild_view();
     }
 
-    /// Number of tabs in the Browser's bottom panel: the Console tab plus one
-    /// tab per live tail.
+    /// The ordered list of bottom-panel tabs: the five fixed anchors plus one
+    /// tab per pub/sub tail (after the Pub/Sub anchor) and one per stream tail
+    /// (after the Tail anchor). MONITOR/keyspace tails are *not* listed — they
+    /// render under their anchor — so their focus-driven lifecycle never shifts
+    /// the tab indices. [`Self::panel_tab`] indexes into this.
+    pub fn panel_slots(&self) -> Vec<PanelTab> {
+        let mut slots = vec![
+            PanelTab::Console,
+            PanelTab::Monitor,
+            PanelTab::Keyspace,
+            PanelTab::PubSub,
+        ];
+        for (i, s) in self.subs.iter().enumerate() {
+            if matches!(s.spec, SubSpec::Channel(_) | SubSpec::Pattern(_)) {
+                slots.push(PanelTab::Sub(i));
+            }
+        }
+        slots.push(PanelTab::Tail);
+        for (i, s) in self.subs.iter().enumerate() {
+            if matches!(s.spec, SubSpec::Stream { .. }) {
+                slots.push(PanelTab::Sub(i));
+            }
+        }
+        slots
+    }
+
+    /// Number of tabs in the bottom panel: the five fixed anchors plus one per
+    /// pub/sub or stream tail. (MONITOR/keyspace tails have no tab of their own.)
     pub fn panel_tab_count(&self) -> usize {
-        1 + self.subs.len()
+        5 + self
+            .subs
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.spec,
+                    SubSpec::Channel(_) | SubSpec::Pattern(_) | SubSpec::Stream { .. }
+                )
+            })
+            .count()
     }
 
-    /// True when the bottom panel's Console tab (tab `0`) is the active one.
-    pub fn panel_is_console(&self) -> bool {
-        self.panel_tab == 0
+    /// The currently focused tab, clamping a stale index back into range.
+    pub fn active_panel(&self) -> PanelTab {
+        let slots = self.panel_slots();
+        slots[self.panel_tab.min(slots.len() - 1)]
     }
 
-    /// The tail shown in the bottom panel, if a tail tab (not the Console) is
-    /// active and still present. `panel_tab` of `0` is the Console; `n >= 1`
-    /// selects `subs[n - 1]`.
+    /// The MONITOR tail, if one is live (only while its tab is focused).
+    pub fn monitor_sub(&self) -> Option<&Subscription> {
+        self.subs
+            .iter()
+            .find(|s| matches!(s.spec, SubSpec::Monitor))
+    }
+
+    /// The keyspace tail, if one is live (only while its tab is focused).
+    pub fn keyspace_sub(&self) -> Option<&Subscription> {
+        self.subs
+            .iter()
+            .find(|s| matches!(s.spec, SubSpec::Keyspace { .. }))
+    }
+
+    /// The subscription the active tab shows, if any: the MONITOR/keyspace
+    /// singleton under its anchor, or the pub/sub / stream tail of a `Sub` tab.
     pub fn panel_subscription(&self) -> Option<&Subscription> {
-        self.panel_tab.checked_sub(1).and_then(|i| self.subs.get(i))
+        match self.active_panel() {
+            PanelTab::Monitor => self.monitor_sub(),
+            PanelTab::Keyspace => self.keyspace_sub(),
+            PanelTab::Sub(i) => self.subs.get(i),
+            PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
+        }
+    }
+
+    /// Mutable [`Self::panel_subscription`] — for the play/pause and recording
+    /// toggles that act on the focused feed.
+    pub fn panel_subscription_mut(&mut self) -> Option<&mut Subscription> {
+        match self.active_panel() {
+            PanelTab::Monitor => self
+                .subs
+                .iter_mut()
+                .find(|s| matches!(s.spec, SubSpec::Monitor)),
+            PanelTab::Keyspace => self
+                .subs
+                .iter_mut()
+                .find(|s| matches!(s.spec, SubSpec::Keyspace { .. })),
+            PanelTab::Sub(i) => self.subs.get_mut(i),
+            PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
+        }
     }
 
     /// The focused tail, if any — alias for [`Self::panel_subscription`], kept
@@ -743,16 +839,23 @@ impl Connection {
         self.panel_subscription()
     }
 
-    /// Cycle the bottom panel's active tab by `delta`, wrapping around the
-    /// Console tab and the live tails.
+    /// Cycle the bottom panel's active tab by `delta`, wrapping around the whole
+    /// tab list.
     pub fn cycle_panel(&mut self, delta: i32) {
         let n = self.panel_tab_count() as i32;
         self.panel_tab = (self.panel_tab as i32 + delta).rem_euclid(n) as usize;
     }
 
-    /// Focus the bottom panel on the tail at `sub_idx` (an index into `subs`).
-    pub fn focus_tail(&mut self, sub_idx: usize) {
-        self.panel_tab = sub_idx + 1;
+    /// Focus the bottom panel on the tail at `sub_idx` (an index into `subs`),
+    /// landing on whichever tab slot now holds it.
+    pub fn focus_sub(&mut self, sub_idx: usize) {
+        if let Some(pos) = self
+            .panel_slots()
+            .iter()
+            .position(|t| *t == PanelTab::Sub(sub_idx))
+        {
+            self.panel_tab = pos;
+        }
     }
 
     /// Find a tail by id (mutable).

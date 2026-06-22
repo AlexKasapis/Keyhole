@@ -24,22 +24,17 @@ pub enum Action {
     GotoBrowser,
     GotoRecordings,
     StartFilter,
-    /// Open the subscribe prompt.
-    Subscribe,
-    /// Start a MONITOR tail on the active connection.
-    StartMonitor,
-    /// Start a keyspace-notification tail on the active connection's db.
-    StartKeyspace,
-    /// Begin typing a command in the Browser's console tab.
-    ConsoleEdit,
-    /// Tail the selected key (Browser) as a stream.
-    TailKey,
-    /// Cycle the Browser's bottom panel to the previous / next tab (Console and
-    /// one tab per live tail). Bound to Shift-Tab / Tab.
+    /// Cycle the Browser's bottom panel to the previous / next tab. The tabs are
+    /// a fixed set (Console, Monitor, Keyspace, Pub/Sub, Tail) plus one tab per
+    /// live pub/sub or stream tail. Bound to Shift-Tab / Tab — the *only* way to
+    /// move between tabs.
     PrevTab,
     NextTab,
-    /// Stop the focused tail (the active Browser bottom-panel tab).
-    StopTail,
+    /// Play/pause the focused live feed (freeze or resume its view). Only acts on
+    /// a live-feed subpanel (Monitor / Keyspace / a pub-sub or tail tab).
+    PlayPause,
+    /// Close the focused pub/sub or stream tab. The fixed tabs cannot be closed.
+    CloseTab,
     DbPrev,
     DbNext,
     /// Cycle the key-list sort column (Browser).
@@ -50,7 +45,8 @@ pub enum Action {
     ToggleCollapse,
     /// Collapse or expand every group at once (Browser).
     ToggleAllGroups,
-    /// Context refresh: browse/stats, toggle recording (Realtime), rescan (Recordings).
+    /// Toggle recording on the focused live-feed subpanel (Browser); rescan on
+    /// the Recordings screen. No longer refreshes the key list.
     Refresh,
     ToggleHelp,
 }
@@ -73,12 +69,8 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('b')) => Some(Action::GotoBrowser),
         (false, Char('R')) => Some(Action::GotoRecordings),
-        (false, Char('s')) => Some(Action::Subscribe),
-        (false, Char('m')) => Some(Action::StartMonitor),
-        (false, Char('K')) => Some(Action::StartKeyspace),
-        (false, Char('i')) => Some(Action::ConsoleEdit),
-        (false, Char('t')) => Some(Action::TailKey),
-        (false, Char('x')) => Some(Action::StopTail),
+        (false, Char('p')) => Some(Action::PlayPause),
+        (false, Char('x')) => Some(Action::CloseTab),
         (false, Tab) => Some(Action::NextTab),
         (false, BackTab) => Some(Action::PrevTab),
         (false, Char('/')) => Some(Action::StartFilter),
@@ -124,12 +116,8 @@ mod tests {
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
         assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
-        assert_eq!(plain(Char('s')), Some(Action::Subscribe));
-        assert_eq!(plain(Char('m')), Some(Action::StartMonitor));
-        assert_eq!(plain(Char('K')), Some(Action::StartKeyspace));
-        assert_eq!(plain(Char('i')), Some(Action::ConsoleEdit));
-        assert_eq!(plain(Char('t')), Some(Action::TailKey));
-        assert_eq!(plain(Char('x')), Some(Action::StopTail));
+        assert_eq!(plain(Char('p')), Some(Action::PlayPause));
+        assert_eq!(plain(Char('x')), Some(Action::CloseTab));
         assert_eq!(plain(Tab), Some(Action::NextTab));
         assert_eq!(plain(BackTab), Some(Action::PrevTab));
         assert_eq!(plain(Char('/')), Some(Action::StartFilter));
@@ -173,5 +161,16 @@ mod tests {
         // `w` opened the standalone Realtime screen, which is gone: tails now
         // live in the Browser's bottom panel, cycled with Tab / Shift-Tab.
         assert_eq!(plain(Char('w')), None, "'w' is unbound: no Realtime screen");
+        // The former tail-management keys are gone: the panel's tabs are a fixed
+        // set, each driven from within its own subpanel and reached only by
+        // Tab / Shift-Tab. `s`/`m`/`K` started tails, `i` entered the console,
+        // and `t` tailed the selected key — all now unbound.
+        for c in ['s', 'm', 'K', 'i', 't'] {
+            assert_eq!(
+                plain(Char(c)),
+                None,
+                "'{c}' is unbound: panel tabs are fixed"
+            );
+        }
     }
 }

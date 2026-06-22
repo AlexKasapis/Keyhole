@@ -6,8 +6,8 @@ mod action;
 mod state;
 
 pub use state::{
-    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, RecordState, RecordingFile,
-    ScanStep, Screen, Status, SubState, Subscription, ViewRow,
+    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PanelTab, RecordState,
+    RecordingFile, ScanStep, Screen, Status, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -512,6 +512,18 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return; // ignore key-release/repeat (Windows emits these)
         }
+        // Keep the panel reconciled with the focused tab on every Browser key:
+        // the mode tracks the tab (so the Console / Pub/Sub / Tail prompts are
+        // always live) and the focused MONITOR/keyspace feed runs. The text-entry
+        // modals (Filter, Form) are excluded so their input is never clobbered.
+        if self.screen == Screen::Browser
+            && matches!(
+                self.mode,
+                InputMode::Normal | InputMode::Command | InputMode::Subscribe
+            )
+        {
+            self.sync_panel_focus();
+        }
         match self.mode {
             InputMode::Normal => {
                 if let Some(action) = action::map_key(&key) {
@@ -543,6 +555,10 @@ impl App {
                     self.show_help = false;
                     self.quit_armed = false;
                 } else if self.screen != Screen::Connections {
+                    // Leaving the Browser unfocuses the panel: stop the
+                    // focus-scoped feeds and drop back to normal navigation.
+                    self.stop_focus_feeds();
+                    self.mode = InputMode::Normal;
                     self.screen = Screen::Connections;
                     self.quit_armed = false;
                 } else if self.quit_armed {
@@ -587,7 +603,11 @@ impl App {
             // which only steps back to Connections.
             Action::GotoBrowser if self.screen != Screen::Recordings => {
                 match self.active_conn().map(|c| c.caps.can_browse) {
-                    Some(true) => self.screen = Screen::Browser,
+                    Some(true) => {
+                        self.screen = Screen::Browser;
+                        // Reconcile the panel (mode + focused feed) on entry.
+                        self.sync_panel_focus();
+                    }
                     Some(false) => {
                         self.set_status("this broker has no key browser".to_string(), true)
                     }
@@ -596,6 +616,9 @@ impl App {
             }
             Action::GotoBrowser => {}
             Action::GotoRecordings => {
+                // Leaving the Browser unfocuses the panel.
+                self.stop_focus_feeds();
+                self.mode = InputMode::Normal;
                 self.screen = Screen::Recordings;
                 self.scan_recordings();
             }
@@ -605,37 +628,15 @@ impl App {
                     self.mode = InputMode::Filter;
                 }
             }
-            Action::Subscribe => self.open_subscribe_prompt(),
-            Action::StartMonitor => self.start_special_tail(SubSpec::Monitor),
-            Action::StartKeyspace => {
-                let db = self.active_conn().map(|c| c.db).unwrap_or(0);
-                self.start_special_tail(SubSpec::Keyspace { db });
-            }
-            // `i` focuses the Browser's console tab to type a command (only on
-            // the Browser, and only for brokers that have a console). Switch the
-            // bottom panel to the Console tab first so the typing is visible.
-            Action::ConsoleEdit => {
-                let has_console = self
-                    .active_conn()
-                    .map(|c| c.caps.can_console)
-                    .unwrap_or(false);
-                if self.screen == Screen::Browser && has_console {
-                    if let Some(conn) = self.active_conn_mut() {
-                        conn.panel_tab = 0;
-                    }
-                    self.enter_command_mode();
-                }
-            }
-            Action::TailKey => self.tail_selected_key(),
-            // Tab / Shift-Tab cycle the Browser's bottom-panel tabs (Console and
-            // one tab per live tail).
+            // Tab / Shift-Tab cycle the Browser's bottom-panel tabs — the only
+            // way to move between them. Each cycle also starts/stops the
+            // focus-scoped MONITOR/keyspace feeds and sets the focused tab's mode.
             Action::PrevTab => self.cycle_panel(-1),
             Action::NextTab => self.cycle_panel(1),
-            Action::StopTail => {
-                if self.screen == Screen::Browser {
-                    self.stop_active_tail();
-                }
-            }
+            // `p` freezes/resumes the focused live feed's view.
+            Action::PlayPause => self.toggle_play_pause(),
+            // `x` closes the focused pub/sub or stream tab (the fixed tabs stay).
+            Action::CloseTab => self.close_active_tab(),
             // `[`/`]` change DB in the Browser.
             Action::DbPrev => self.change_db(-1),
             Action::DbNext => self.change_db(1),
@@ -654,26 +655,16 @@ impl App {
                 "toggled all groups".to_string()
             }),
             Action::ToggleCollapse => self.toggle_selected_group(),
-            // `r` on the Browser either toggles recording for the focused tail
-            // (when a tail tab is the active bottom-panel tab) or refreshes the
-            // keys + server-stats band (on the Console tab, where there is no
-            // tail to record). It does nothing on the other screens — the
-            // Recordings list (re)scans on entry, not on `r`.
-            Action::Refresh => match self.screen {
-                Screen::Browser => {
-                    let on_tail = self
-                        .active_conn()
-                        .map(|c| c.panel_subscription().is_some())
-                        .unwrap_or(false);
-                    if on_tail {
-                        self.toggle_recording();
-                    } else if let Some(id) = self.active_id() {
-                        self.start_scan(id, true);
-                        self.request_stats(id);
-                    }
+            // `r` on the Browser toggles recording for the focused live feed,
+            // and only there — it is a no-op on the Console / Pub/Sub / Tail
+            // anchors (no feed to record). Manual key-list refresh was dropped;
+            // the keyspace auto-refreshes on its own timer. It does nothing on
+            // the other screens — the Recordings list (re)scans on entry.
+            Action::Refresh => {
+                if self.screen == Screen::Browser {
+                    self.toggle_recording();
                 }
-                Screen::Recordings | Screen::Connections => {}
-            },
+            }
             Action::ToggleHelp => self.show_help = !self.show_help,
         }
     }
@@ -693,12 +684,28 @@ impl App {
         }
     }
 
-    fn handle_subscribe_key(&mut self, key: KeyEvent) {
+    /// Keys that work the same on every text-input anchor (Console / Pub/Sub /
+    /// Tail): Tab / Shift-Tab cycle tabs, Esc steps out of the Browser, and the
+    /// arrow keys still move the key list so browsing works while a prompt is
+    /// focused. Returns whether the key was consumed.
+    fn browser_input_nav(&mut self, key: &KeyEvent) -> bool {
         match key.code {
-            KeyCode::Esc => self.mode = InputMode::Normal,
-            KeyCode::Enter => {
-                self.submit_subscribe();
-            }
+            KeyCode::Tab => self.cycle_panel(1),
+            KeyCode::BackTab => self.cycle_panel(-1),
+            KeyCode::Esc => self.apply(Action::Back),
+            KeyCode::Up => self.nav(-1),
+            KeyCode::Down => self.nav(1),
+            _ => return false,
+        }
+        true
+    }
+
+    fn handle_subscribe_key(&mut self, key: KeyEvent) {
+        if self.browser_input_nav(&key) {
+            return;
+        }
+        match key.code {
+            KeyCode::Enter => self.submit_subscribe(),
             KeyCode::Char(c) => self.subscribe_buf.push(c),
             KeyCode::Backspace => {
                 self.subscribe_buf.pop();
@@ -842,6 +849,8 @@ impl App {
         let id = conn.id;
         self.set_status(format!("Switched to db{new_db}"), false);
         self.start_scan(id, true);
+        // A focused keyspace feed is db-scoped, so restart it on the new db.
+        self.sync_panel_focus();
     }
 
     /// Apply a view-setting mutation to the active connection while on the
@@ -1143,8 +1152,9 @@ impl App {
 
     // -- realtime tails / recordings -----------------------------------------
 
-    /// Cycle the Browser's bottom-panel tab (Console + one tab per live tail) by
-    /// `delta`. No-op off the Browser or without an active connection.
+    /// Cycle the Browser's bottom-panel tab by `delta` (Tab / Shift-Tab — the
+    /// only way to move between tabs), then reconcile the panel with the new
+    /// focus. No-op off the Browser or without an active connection.
     fn cycle_panel(&mut self, delta: i32) {
         if self.screen != Screen::Browser {
             return;
@@ -1152,6 +1162,163 @@ impl App {
         if let Some(conn) = self.active_conn_mut() {
             conn.cycle_panel(delta);
         }
+        // Moving focus gives the Pub/Sub and Tail anchors a fresh prompt.
+        self.subscribe_buf.clear();
+        self.sync_panel_focus();
+    }
+
+    /// Reconcile the bottom panel with the focused tab: start/stop the
+    /// focus-scoped MONITOR and keyspace feeds (live only while their tab is
+    /// focused), set the input mode the focused tab implies, and give the
+    /// Pub/Sub and Tail anchors a fresh prompt. No-op for brokers without a
+    /// panel (non-Redis) or off the Browser screen.
+    fn sync_panel_focus(&mut self) {
+        if self.screen != Screen::Browser || !self.active_can_tail() {
+            return;
+        }
+        let Some(conn) = self.active_conn() else {
+            return;
+        };
+        let active = conn.active_panel();
+        let db = conn.db;
+
+        // MONITOR runs only while its tab is focused.
+        let monitor_id = self.feed_id(|s| matches!(s, SubSpec::Monitor));
+        match (matches!(active, PanelTab::Monitor), monitor_id) {
+            (true, None) => self.start_feed(SubSpec::Monitor),
+            (false, Some(id)) => self.stop_feed(id),
+            _ => {}
+        }
+
+        // The keyspace feed runs only while focused and tracks the active db, so
+        // a db change while focused restarts it on the new db.
+        let keyspace = self.feed_id_if(
+            |s| matches!(s, SubSpec::Keyspace { .. }),
+            |s| matches!(s, SubSpec::Keyspace { db: d } if *d == db),
+        );
+        match (matches!(active, PanelTab::Keyspace), keyspace) {
+            (true, None) => self.start_feed(SubSpec::Keyspace { db }),
+            (true, Some((id, false))) => {
+                self.stop_feed(id);
+                self.start_feed(SubSpec::Keyspace { db });
+            }
+            (false, Some((id, _))) => self.stop_feed(id),
+            _ => {}
+        }
+
+        self.sync_panel_mode();
+    }
+
+    /// The input mode the focused tab implies: an always-shown prompt on the
+    /// Console / Pub/Sub / Tail anchors, normal navigation on the live-feed tabs.
+    /// Idempotent — safe to call on every Browser key so the mode always tracks
+    /// the focused tab regardless of how the screen was entered.
+    fn sync_panel_mode(&mut self) {
+        let Some(panel) = self.active_conn().map(|c| c.active_panel()) else {
+            return;
+        };
+        self.mode = match panel {
+            PanelTab::Console => InputMode::Command,
+            PanelTab::PubSub | PanelTab::Tail => InputMode::Subscribe,
+            PanelTab::Monitor | PanelTab::Keyspace | PanelTab::Sub(_) => InputMode::Normal,
+        };
+    }
+
+    /// Stop and drop every focus-scoped feed (MONITOR / keyspace) on the active
+    /// connection — called when the panel loses focus by leaving the Browser.
+    fn stop_focus_feeds(&mut self) {
+        let ids: Vec<u32> = self
+            .active_conn()
+            .map(|c| {
+                c.subs
+                    .iter()
+                    .filter(|s| matches!(s.spec, SubSpec::Monitor | SubSpec::Keyspace { .. }))
+                    .map(|s| s.sub_id)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in ids {
+            self.stop_feed(id);
+        }
+    }
+
+    /// The id of the active connection's first tail whose spec matches `pred`.
+    fn feed_id(&self, pred: impl Fn(&SubSpec) -> bool) -> Option<u32> {
+        self.active_conn()
+            .and_then(|c| c.subs.iter().find(|s| pred(&s.spec)).map(|s| s.sub_id))
+    }
+
+    /// Like [`Self::feed_id`], also reporting whether the found tail satisfies a
+    /// secondary `ok` predicate (used to detect a keyspace feed on a stale db).
+    fn feed_id_if(
+        &self,
+        pred: impl Fn(&SubSpec) -> bool,
+        ok: impl Fn(&SubSpec) -> bool,
+    ) -> Option<(u32, bool)> {
+        self.active_conn().and_then(|c| {
+            c.subs
+                .iter()
+                .find(|s| pred(&s.spec))
+                .map(|s| (s.sub_id, ok(&s.spec)))
+        })
+    }
+
+    /// Start a focus-scoped feed (MONITOR / keyspace) without changing the
+    /// focused tab — these render under their fixed anchor, not as a `Sub` tab.
+    fn start_feed(&mut self, spec: SubSpec) {
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let capacity = self.tail_scrollback;
+        let sub_id = self.next_sub_id;
+        self.next_sub_id += 1;
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            conn.handle.send(ConnCommand::Subscribe {
+                sub_id,
+                spec: spec.clone(),
+                record: false,
+            });
+            conn.subs.push(Subscription::new(sub_id, spec, capacity));
+        }
+    }
+
+    /// Stop and drop the tail with `sub_id` from the active connection.
+    fn stop_feed(&mut self, sub_id: u32) {
+        if let Some(conn) = self.active_conn_mut() {
+            if let Some(pos) = conn.subs.iter().position(|s| s.sub_id == sub_id) {
+                let sub = conn.subs.remove(pos);
+                conn.handle
+                    .send(ConnCommand::StopSubscription { sub_id: sub.sub_id });
+            }
+        }
+    }
+
+    /// Play/pause the focused live feed by freezing or resuming its view
+    /// (resuming snaps back to the newest event). Only acts on a feed tab.
+    fn toggle_play_pause(&mut self) {
+        if self.screen != Screen::Browser {
+            return;
+        }
+        let following = {
+            let Some(sub) = self
+                .active_conn_mut()
+                .and_then(|c| c.panel_subscription_mut())
+            else {
+                self.set_status("no live feed on this tab to pause".to_string(), true);
+                return;
+            };
+            sub.follow = !sub.follow;
+            if sub.follow {
+                sub.offset = 0;
+            }
+            sub.follow
+        };
+        let msg = if following {
+            "feed resumed"
+        } else {
+            "feed paused"
+        };
+        self.set_status(msg.to_string(), false);
     }
 
     /// Whether the active connection can open realtime tails. Tails live in the
@@ -1163,59 +1330,45 @@ impl App {
             .unwrap_or(false)
     }
 
-    fn open_subscribe_prompt(&mut self) {
-        if self.active.is_none() {
-            self.set_status("connect first, then subscribe".to_string(), true);
-            return;
-        }
-        if !self.active_can_tail() {
-            self.set_status(
-                "realtime tails are not available for this broker".to_string(),
-                true,
-            );
-            return;
-        }
-        self.subscribe_buf.clear();
-        self.mode = InputMode::Subscribe;
-    }
-
+    /// Submit the focused anchor's always-shown prompt: subscribe to a channel /
+    /// pattern on the Pub/Sub tab, or tail a stream on the Tail tab (an empty
+    /// Tail prompt tails the selected stream key). Which is built follows the
+    /// focused tab, not the buffer's contents.
     fn submit_subscribe(&mut self) {
         let raw = self.subscribe_buf.trim().to_string();
-        self.mode = InputMode::Normal;
-        if raw.is_empty() {
-            return;
-        }
-        let default_db = self.active_conn().map(|c| c.db).unwrap_or(0);
-        let spec = match SubSpec::parse(&raw, default_db) {
-            Ok(spec) => spec,
-            Err(e) => return self.set_status(format!("bad spec: {e}"), true),
+        self.subscribe_buf.clear();
+        let (panel, db) = match self.active_conn() {
+            Some(c) => (c.active_panel(), c.db),
+            None => return,
         };
-        // Reject a spec meant for a different broker up front, with a clear
-        // message, rather than opening a tail tab that immediately fails.
-        if let Some(kind) = self.active_conn().map(|c| c.caps.kind) {
-            let want = spec.supported_kind();
-            if want != kind {
-                return self.set_status(
-                    format!(
-                        "`{raw}` is a {} spec, but this connection is {}",
-                        want.label(),
-                        kind.label()
-                    ),
-                    true,
-                );
+        match panel {
+            PanelTab::PubSub => {
+                if !raw.is_empty() {
+                    self.start_subscribe(pubsub_spec(&raw));
+                }
             }
+            PanelTab::Tail => {
+                if raw.is_empty() {
+                    self.tail_selected_key();
+                } else {
+                    self.start_subscribe(SubSpec::Stream {
+                        key: stream_key(&raw),
+                        db,
+                    });
+                }
+            }
+            // Submit only does something while a text-input anchor is focused.
+            _ => {}
         }
-        self.start_subscribe(spec);
     }
 
+    /// Open (or focus, if it already exists) a pub/sub or stream tail tab. Only
+    /// reachable on a Redis browser, where the bottom panel hosts the tab.
     fn start_subscribe(&mut self, spec: SubSpec) {
         let Some(id) = self.active_id() else {
             self.set_status("no active connection".to_string(), true);
             return;
         };
-        // Tails are shown in the Browser's bottom panel, which only exists for
-        // brokers that have it (Redis). Refuse a tail on a broker with no panel
-        // to host it rather than opening one the user can never see.
         if !self.active_can_tail() {
             self.set_status(
                 "realtime tails are not available for this broker".to_string(),
@@ -1233,9 +1386,9 @@ impl App {
                 .iter()
                 .position(|s| s.spec == spec && !matches!(s.state, SubState::Ended(_)))
             {
-                conn.focus_tail(pos);
-                self.screen = Screen::Browser;
+                conn.focus_sub(pos);
                 self.set_status(format!("already tailing {label}"), false);
+                self.sync_panel_focus();
                 return;
             }
         }
@@ -1249,11 +1402,12 @@ impl App {
                 record: false,
             });
             conn.subs.push(Subscription::new(sub_id, spec, capacity));
-            // Focus the new tail's tab in the bottom panel so the user sees it.
-            conn.focus_tail(conn.subs.len() - 1);
+            // Jump focus to the new tail's tab so its feed is visible.
+            let new_idx = conn.subs.len() - 1;
+            conn.focus_sub(new_idx);
         }
-        self.screen = Screen::Browser;
         self.set_status(format!("subscribing to {label}…"), false);
+        self.sync_panel_focus();
     }
 
     fn tail_selected_key(&mut self) {
@@ -1264,13 +1418,13 @@ impl App {
             .active_conn()
             .and_then(|c| c.selected().map(|e| (e.key.clone(), e.vtype, c.db)));
         let Some((key, vtype, db)) = selected else {
-            self.set_status("no key selected".to_string(), true);
+            self.set_status("no stream key selected to tail".to_string(), true);
             return;
         };
         if vtype != ValueType::Stream {
             self.set_status(
                 format!(
-                    "'{key}' is a {} — only streams can be tailed (press s for pub/sub)",
+                    "'{key}' is a {} — only streams can be tailed",
                     vtype.label()
                 ),
                 true,
@@ -1309,57 +1463,48 @@ impl App {
         self.set_status(msg.to_string(), false);
     }
 
-    /// Stop the tail shown in the active bottom-panel tab. A no-op when the
-    /// Console tab (which is not a tail) is the active one.
-    fn stop_active_tail(&mut self) {
-        let label = {
+    /// Close the focused pub/sub or stream tab, stopping its tail. The five fixed
+    /// anchors (Console / Monitor / Keyspace / Pub/Sub / Tail) cannot be closed.
+    fn close_active_tab(&mut self) {
+        if self.screen != Screen::Browser {
+            return;
+        }
+        let removed = {
             let Some(conn) = self.active_conn_mut() else {
                 return;
             };
-            // Tab 0 is the Console; `n >= 1` selects the tail at `subs[n - 1]`.
-            let Some(pos) = conn.panel_tab.checked_sub(1) else {
-                return;
-            };
-            if pos >= conn.subs.len() {
-                return;
+            match conn.active_panel() {
+                PanelTab::Sub(i) if i < conn.subs.len() => {
+                    let sub = conn.subs.remove(i);
+                    conn.handle
+                        .send(ConnCommand::StopSubscription { sub_id: sub.sub_id });
+                    // Land focus back on the anchor the closed tail belonged to.
+                    let anchor = if matches!(sub.spec, SubSpec::Stream { .. }) {
+                        PanelTab::Tail
+                    } else {
+                        PanelTab::PubSub
+                    };
+                    if let Some(pos) = conn.panel_slots().iter().position(|t| *t == anchor) {
+                        conn.panel_tab = pos;
+                    }
+                    Some(sub.label)
+                }
+                _ => None,
             }
-            let sub = conn.subs.remove(pos);
-            conn.handle
-                .send(ConnCommand::StopSubscription { sub_id: sub.sub_id });
-            // Dropping a tail shifts later tabs down by one, so clamp the active
-            // tab back into range (landing on the next tail, or the Console).
-            let max_tab = conn.panel_tab_count().saturating_sub(1);
-            conn.panel_tab = conn.panel_tab.min(max_tab);
-            sub.label
         };
-        self.set_status(format!("stopped {label}"), false);
-    }
-
-    /// Start a keyspace or MONITOR tail on the active connection. These are just
-    /// more [`SubSpec`]s, so they reuse the whole subscribe/record/scrollback
-    /// path; `start_subscribe` focuses an existing identical tail rather than
-    /// duplicating it.
-    fn start_special_tail(&mut self, spec: SubSpec) {
-        if self.active.is_none() {
-            self.set_status("connect first, then start the tail".to_string(), true);
-            return;
+        match removed {
+            Some(label) => {
+                self.set_status(format!("closed {label}"), false);
+                self.sync_panel_focus();
+            }
+            None => self.set_status("only pub/sub and tail tabs can be closed".to_string(), true),
         }
-        self.start_subscribe(spec);
     }
 
     // -- command console -----------------------------------------------------
 
     fn active_console_mut(&mut self) -> Option<&mut Console> {
         self.active_conn_mut().map(|c| &mut c.console)
-    }
-
-    /// Begin typing a console command on a fresh prompt.
-    fn enter_command_mode(&mut self) {
-        if let Some(console) = self.active_console_mut() {
-            console.input.clear();
-            console.history_pos = None;
-        }
-        self.mode = InputMode::Command;
     }
 
     fn clear_console(&mut self) {
@@ -1381,20 +1526,29 @@ impl App {
 
     fn handle_command_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-P / Ctrl-N recall history: the Console prompt is always live now,
+        // so ↑/↓ are reserved for moving the key list (via `browser_input_nav`).
         match key.code {
-            KeyCode::Esc => self.mode = InputMode::Normal,
-            KeyCode::Enter => self.submit_command(),
-            KeyCode::Up => {
+            KeyCode::Char('p') if ctrl => {
                 if let Some(console) = self.active_console_mut() {
                     console.recall_prev();
                 }
+                return;
             }
-            KeyCode::Down => {
+            KeyCode::Char('n') if ctrl => {
                 if let Some(console) = self.active_console_mut() {
                     console.recall_next();
                 }
+                return;
             }
-            // ↑↓ recall history, so the output band scrolls with PageUp/PageDown.
+            _ => {}
+        }
+        if self.browser_input_nav(&key) {
+            return;
+        }
+        match key.code {
+            KeyCode::Enter => self.submit_command(),
+            // The output band scrolls with PageUp/PageDown.
             KeyCode::PageUp => self.scroll_console(-CONSOLE_SCROLL_STEP),
             KeyCode::PageDown => self.scroll_console(CONSOLE_SCROLL_STEP),
             // Ctrl-L clears the console (the standalone screen's `r`, now gone).
@@ -1599,6 +1753,30 @@ fn sort_arrow(desc: bool) -> &'static str {
     }
 }
 
+/// Build a pub/sub spec from a raw Pub/Sub-tab entry. An explicit `psub:` or
+/// `pubsub:` prefix is honoured; otherwise a glob (`*`, `?`, `[`) makes it a
+/// pattern (PSUBSCRIBE) and a plain name a channel (SUBSCRIBE).
+fn pubsub_spec(raw: &str) -> SubSpec {
+    if let Some(p) = raw.strip_prefix("psub:") {
+        return SubSpec::Pattern(p.trim().to_string());
+    }
+    let s = raw.strip_prefix("pubsub:").unwrap_or(raw).trim();
+    if s.contains(['*', '?', '[']) {
+        SubSpec::Pattern(s.to_string())
+    } else {
+        SubSpec::Channel(s.to_string())
+    }
+}
+
+/// The stream key from a raw Tail-tab entry, tolerating an explicit `stream:`
+/// prefix.
+fn stream_key(raw: &str) -> String {
+    raw.strip_prefix("stream:")
+        .unwrap_or(raw)
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1669,6 +1847,20 @@ mod tests {
         let handle = mock::handle(id, name, databases).await;
         app.handle_event(AppEvent::Connected { handle });
         ConnId(id)
+    }
+
+    /// Move the bottom-panel focus to a fixed anchor tab and reconcile the panel
+    /// (mode + focus-scoped feeds), mirroring what cycling there does.
+    fn focus_panel(app: &mut App, tab: PanelTab) {
+        let pos = app
+            .active_conn()
+            .unwrap()
+            .panel_slots()
+            .iter()
+            .position(|t| *t == tab)
+            .expect("panel tab present");
+        app.active_conn_mut().unwrap().panel_tab = pos;
+        app.sync_panel_focus();
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2705,35 +2897,155 @@ mod tests {
     // -- subscribe -----------------------------------------------------------
 
     #[test]
-    fn subscribe_without_connection_errors() {
-        let (mut app, _rx) = test_app();
-        app.apply(Action::Subscribe);
-        assert_eq!(app.mode, InputMode::Normal);
-        let status = app.status.as_ref().unwrap();
-        assert!(status.is_error);
-        assert!(status.message.contains("connect first"));
+    fn pubsub_spec_infers_channel_or_pattern() {
+        assert_eq!(pubsub_spec("news"), SubSpec::Channel("news".into()));
+        assert_eq!(pubsub_spec("news.*"), SubSpec::Pattern("news.*".into()));
+        assert_eq!(pubsub_spec("a?b"), SubSpec::Pattern("a?b".into()));
+        // Explicit prefixes win over glob inference.
+        assert_eq!(
+            pubsub_spec("pubsub:plain"),
+            SubSpec::Channel("plain".into())
+        );
+        assert_eq!(pubsub_spec("psub:foo"), SubSpec::Pattern("foo".into()));
     }
 
     #[test]
-    fn submit_subscribe_rejects_bad_spec() {
-        let (mut app, _rx) = test_app();
-        app.mode = InputMode::Subscribe;
-        app.subscribe_buf = "garbage".into();
-        app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.mode, InputMode::Normal);
-        let status = app.status.as_ref().unwrap();
-        assert!(status.is_error);
-        assert!(status.message.contains("bad spec"));
+    fn stream_key_strips_optional_prefix() {
+        assert_eq!(stream_key("orders"), "orders");
+        assert_eq!(stream_key("stream:orders"), "orders");
+        assert_eq!(stream_key("  spaced  "), "spaced");
     }
 
     #[test]
-    fn submit_subscribe_empty_is_noop() {
+    fn submit_subscribe_without_connection_is_noop() {
         let (mut app, _rx) = test_app();
         app.mode = InputMode::Subscribe;
-        app.subscribe_buf = "   ".into();
-        app.handle_key(key(KeyCode::Enter));
-        assert_eq!(app.mode, InputMode::Normal);
+        app.subscribe_buf = "news".into();
+        app.submit_subscribe();
+        assert!(app.active.is_none());
         assert!(app.status.is_none());
+    }
+
+    #[tokio::test]
+    async fn pubsub_anchor_subscribes_to_typed_channel() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        focus_panel(&mut app, PanelTab::PubSub);
+        // Type a channel into the always-shown prompt, then Enter.
+        for c in "news".chars() {
+            app.handle_key(ch(c));
+        }
+        assert_eq!(app.subscribe_buf, "news");
+        app.handle_key(key(KeyCode::Enter));
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(conn.subs[0].spec, SubSpec::Channel("news".into()));
+        // Focus jumps to the new pub/sub tail's tab; the buffer is cleared.
+        assert_eq!(conn.active_panel(), PanelTab::Sub(0));
+        assert!(app.subscribe_buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pubsub_anchor_empty_submit_is_noop() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        focus_panel(&mut app, PanelTab::PubSub);
+        app.submit_subscribe();
+        assert!(app.active_conn().unwrap().subs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tail_anchor_typed_key_opens_stream_tail() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].db = 2;
+        focus_panel(&mut app, PanelTab::Tail);
+        app.subscribe_buf = "orders".into();
+        app.submit_subscribe();
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(
+            conn.subs[0].spec,
+            SubSpec::Stream {
+                key: "orders".into(),
+                db: 2
+            }
+        );
+        assert_eq!(conn.active_panel(), PanelTab::Sub(0));
+    }
+
+    #[tokio::test]
+    async fn tail_anchor_empty_submit_tails_selected_key() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.connections[0].keys = vec![stream_entry("events", ValueType::Stream)];
+        app.connections[0].rebuild_view();
+        app.connections[0].table.select(Some(1)); // row 0 is the group header
+        focus_panel(&mut app, PanelTab::Tail);
+        app.submit_subscribe(); // empty prompt → tail the selected stream
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.subs.len(), 1);
+        assert_eq!(conn.subs[0].label, "stream:events");
+    }
+
+    #[tokio::test]
+    async fn play_pause_toggles_focused_feed_view() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        assert!(
+            app.active_conn()
+                .unwrap()
+                .panel_subscription()
+                .unwrap()
+                .follow
+        );
+        app.toggle_play_pause(); // pause: freeze the view
+        assert!(
+            !app.active_conn()
+                .unwrap()
+                .panel_subscription()
+                .unwrap()
+                .follow
+        );
+        app.toggle_play_pause(); // resume: follow the newest again
+        assert!(
+            app.active_conn()
+                .unwrap()
+                .panel_subscription()
+                .unwrap()
+                .follow
+        );
+    }
+
+    #[tokio::test]
+    async fn play_pause_on_an_anchor_reports_no_feed() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        focus_panel(&mut app, PanelTab::PubSub); // an input anchor, no feed
+        app.toggle_play_pause();
+        assert!(app.status.as_ref().unwrap().is_error);
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("no live feed"));
+    }
+
+    #[tokio::test]
+    async fn close_stream_tab_returns_focus_to_tail_anchor() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Stream {
+            key: "s".into(),
+            db: 0,
+        });
+        assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Sub(0));
+        app.close_active_tab();
+        let conn = app.active_conn().unwrap();
+        assert!(conn.subs.is_empty());
+        assert_eq!(conn.active_panel(), PanelTab::Tail);
     }
 
     #[tokio::test]
@@ -2742,13 +3054,13 @@ mod tests {
         connect(&mut app, 1, "prod", 16).await;
         let next_sub = app.next_sub_id;
         app.start_subscribe(SubSpec::Channel("news".into()));
-        // Tails now live in the Browser's bottom panel; the new tail's tab is
-        // focused (panel tab 1 == subs[0]; tab 0 is the Console).
+        // Pub/sub tails sit after the four leading anchors (Console, Monitor,
+        // Keyspace, Pub/Sub), so the first one's tab is panel index 4.
         assert_eq!(app.screen, Screen::Browser);
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.subs.len(), 1);
-        assert_eq!(conn.panel_tab, 1);
-        assert!(!conn.panel_is_console());
+        assert_eq!(conn.active_panel(), PanelTab::Sub(0));
+        assert_eq!(conn.panel_tab, 4);
         assert_eq!(
             conn.panel_subscription().map(|s| s.sub_id),
             Some(conn.subs[0].sub_id)
@@ -2920,63 +3232,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stop_active_tail_removes_focused_tab() {
+    async fn close_active_tab_removes_focused_pubsub_tab() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.start_subscribe(SubSpec::Channel("c".into()));
         app.start_subscribe(SubSpec::Channel("d".into()));
-        // Panel tab 0 is the Console; "c" is tab 1 and the just-added "d" is the
-        // focused tab 2.
-        assert_eq!(app.connections[0].panel_tab, 2);
-        app.stop_active_tail();
+        // "d" is the focused pub/sub tab (the last subscribe focused it).
+        assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Sub(1));
+        app.close_active_tab();
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.subs.len(), 1);
         assert_eq!(conn.subs[0].label, "pubsub:c");
-        // The active tab clamps back onto the remaining "c" tail (tab 1).
-        assert_eq!(conn.panel_tab, 1);
-        assert_eq!(
-            conn.panel_subscription().map(|s| s.label.as_str()),
-            Some("pubsub:c")
-        );
+        // Focus lands back on the Pub/Sub anchor the closed tail belonged to.
+        assert_eq!(conn.active_panel(), PanelTab::PubSub);
         assert!(app
             .status
             .as_ref()
             .unwrap()
             .message
-            .contains("stopped pubsub:d"));
+            .contains("closed pubsub:d"));
     }
 
     #[tokio::test]
-    async fn stop_active_tail_on_console_tab_is_a_noop() {
+    async fn close_active_tab_on_an_anchor_is_a_noop() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.start_subscribe(SubSpec::Channel("c".into()));
-        // Switch to the Console tab; `x` there has no tail to stop.
-        app.connections[0].panel_tab = 0;
-        app.stop_active_tail();
+        // The Console anchor (and the other fixed anchors) cannot be closed.
+        focus_panel(&mut app, PanelTab::Console);
+        app.close_active_tab();
         assert_eq!(app.connections[0].subs.len(), 1, "tail is left untouched");
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("only pub/sub and tail tabs"));
     }
 
     #[tokio::test]
-    async fn tab_cycles_through_console_and_tails() {
+    async fn tab_cycles_through_fixed_anchors_and_tails() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        for c in ['a', 'b', 'c'] {
-            app.start_subscribe(SubSpec::Channel(c.to_string()));
-        }
-        // Tabs: 0 Console, 1 a, 2 b, 3 c — the last subscribe focused tab 3.
+        app.start_subscribe(SubSpec::Channel("a".into()));
+        // Slots: 0 Console, 1 Monitor, 2 Keyspace, 3 Pub/Sub, 4 Sub(a), 5 Tail.
         assert_eq!(app.screen, Screen::Browser);
-        assert_eq!(app.connections[0].panel_tab, 3);
-        // Tab wraps past the last tail back to the Console …
-        app.apply(Action::NextTab);
-        assert_eq!(app.connections[0].panel_tab, 0, "wraps to the Console tab");
-        app.apply(Action::NextTab);
-        assert_eq!(app.connections[0].panel_tab, 1);
-        // … and Shift-Tab walks back, wrapping past the Console to the last tail.
-        app.apply(Action::PrevTab);
-        assert_eq!(app.connections[0].panel_tab, 0);
-        app.apply(Action::PrevTab);
-        assert_eq!(app.connections[0].panel_tab, 3, "wraps past the Console");
+        assert_eq!(app.active_conn().unwrap().panel_tab_count(), 6);
+        // The subscribe focused the pub/sub tail at slot 4.
+        assert_eq!(app.connections[0].panel_tab, 4);
+        app.apply(Action::NextTab); // 5 Tail
+        assert_eq!(app.connections[0].panel_tab, 5);
+        app.apply(Action::NextTab); // wraps to 0 Console
+        assert_eq!(app.connections[0].panel_tab, 0, "wraps to the first tab");
+        app.apply(Action::PrevTab); // wraps back past Console to 5 Tail
+        assert_eq!(app.connections[0].panel_tab, 5, "wraps past the first tab");
     }
 
     #[tokio::test]
@@ -2984,10 +3293,11 @@ mod tests {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.start_subscribe(SubSpec::Channel("a".into()));
+        let before = app.connections[0].panel_tab;
         app.screen = Screen::Connections;
         app.apply(Action::NextTab);
         assert_eq!(
-            app.connections[0].panel_tab, 1,
+            app.connections[0].panel_tab, before,
             "Tab is inert off the Browser"
         );
     }
@@ -3006,8 +3316,9 @@ mod tests {
         assert_eq!(app.screen, Screen::Browser);
         assert_eq!(app.active_conn().unwrap().subs.len(), 1);
         assert_eq!(app.active_conn().unwrap().subs[0].label, "stream:orders");
-        // The new stream tail's tab is focused in the bottom panel.
-        assert_eq!(app.active_conn().unwrap().panel_tab, 1);
+        // Stream tails sit after the Tail anchor; the new one's tab is focused.
+        assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Sub(0));
+        assert_eq!(app.active_conn().unwrap().panel_tab, 5);
     }
 
     #[tokio::test]
@@ -3039,7 +3350,7 @@ mod tests {
             .as_ref()
             .unwrap()
             .message
-            .contains("no key selected"));
+            .contains("no stream key selected"));
     }
 
     // -- form ----------------------------------------------------------------
@@ -3418,51 +3729,85 @@ mod tests {
     // -- monitor / keyspace tails --------------------------------------------
 
     #[tokio::test]
-    async fn start_monitor_opens_a_monitor_tail() {
+    async fn focusing_monitor_tab_starts_a_monitor_feed() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.apply(Action::StartMonitor);
-        assert_eq!(app.screen, Screen::Browser);
+        // No feed until the tab is focused.
+        assert!(app.active_conn().unwrap().monitor_sub().is_none());
+        focus_panel(&mut app, PanelTab::Monitor);
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.subs.len(), 1);
         assert_eq!(conn.subs[0].spec, SubSpec::Monitor);
         assert_eq!(conn.subs[0].label, "monitor");
-        // The MONITOR tail's tab is focused in the bottom panel (tab 1).
-        assert_eq!(conn.panel_tab, 1);
+        // The MONITOR feed lives under its anchor, not as its own Sub tab.
+        assert_eq!(conn.active_panel(), PanelTab::Monitor);
     }
 
     #[tokio::test]
-    async fn start_keyspace_uses_active_db() {
+    async fn leaving_monitor_tab_stops_the_feed() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        focus_panel(&mut app, PanelTab::Monitor);
+        assert!(app.active_conn().unwrap().monitor_sub().is_some());
+        // Cycling away stops and drops the focus-scoped feed.
+        focus_panel(&mut app, PanelTab::Keyspace);
+        assert!(app.active_conn().unwrap().monitor_sub().is_none());
+        // …and focusing Keyspace started its own feed instead.
+        assert!(app.active_conn().unwrap().keyspace_sub().is_some());
+    }
+
+    #[tokio::test]
+    async fn keyspace_feed_uses_active_db_and_restarts_on_db_change() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.connections[0].db = 3;
-        app.apply(Action::StartKeyspace);
-        let conn = app.active_conn().unwrap();
-        assert_eq!(conn.subs[0].spec, SubSpec::Keyspace { db: 3 });
-        assert_eq!(conn.subs[0].label, "keyspace:db3");
+        focus_panel(&mut app, PanelTab::Keyspace);
+        assert_eq!(
+            app.active_conn().unwrap().keyspace_sub().unwrap().spec,
+            SubSpec::Keyspace { db: 3 }
+        );
+        // A db change while focused restarts the keyspace feed on the new db.
+        app.change_db(1);
+        assert_eq!(
+            app.active_conn().unwrap().keyspace_sub().unwrap().spec,
+            SubSpec::Keyspace { db: 4 }
+        );
     }
 
-    #[test]
-    fn start_monitor_without_connection_errors() {
+    #[tokio::test]
+    async fn leaving_browser_stops_focus_feeds() {
         let (mut app, _rx) = test_app();
-        app.apply(Action::StartMonitor);
-        assert!(app.active_conn().is_none());
-        assert!(app.status.as_ref().unwrap().is_error);
+        connect(&mut app, 1, "prod", 16).await;
+        focus_panel(&mut app, PanelTab::Monitor);
+        assert!(app.active_conn().unwrap().monitor_sub().is_some());
+        app.apply(Action::Back); // Browser -> Connections
+        assert_eq!(app.screen, Screen::Connections);
+        assert!(
+            app.active_conn().unwrap().monitor_sub().is_none(),
+            "the MONITOR feed stops when the panel loses focus"
+        );
     }
 
     #[tokio::test]
     async fn sub_notice_is_stored_on_the_tail() {
         let (mut app, _rx) = test_app();
         let id = connect(&mut app, 1, "prod", 16).await;
-        app.start_subscribe(SubSpec::Keyspace { db: 0 });
-        let sub_id = app.connections[0].subs[0].sub_id;
+        // Focusing the Keyspace tab starts its (focus-scoped) feed; a notice for
+        // it lands on that tail and is surfaced as an error status.
+        focus_panel(&mut app, PanelTab::Keyspace);
+        let sub_id = app.active_conn().unwrap().keyspace_sub().unwrap().sub_id;
         app.handle_event(AppEvent::SubscriptionNotice {
             id,
             sub_id,
             notice: "notifications disabled".into(),
         });
         assert_eq!(
-            app.connections[0].subs[0].notice.as_deref(),
+            app.active_conn()
+                .unwrap()
+                .keyspace_sub()
+                .unwrap()
+                .notice
+                .as_deref(),
             Some("notifications disabled")
         );
         assert!(app.status.as_ref().unwrap().is_error);
@@ -3548,12 +3893,13 @@ mod tests {
     // -- console -------------------------------------------------------------
 
     #[tokio::test]
-    async fn console_edit_requires_browser_with_console() {
-        // The console is a band in the Browser, entered with `i` (ConsoleEdit).
+    async fn console_tab_drives_command_mode() {
+        // The Console tab's prompt is always live: focusing it (on a console-
+        // capable Browser) puts the app in command mode with no extra keypress.
         let (mut app, _rx) = test_app();
-        // No connection: `i` is inert.
+        // No connection on the Browser: the panel reconcile is inert.
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        app.sync_panel_focus();
         assert_eq!(
             app.mode,
             InputMode::Normal,
@@ -3563,35 +3909,35 @@ mod tests {
         connect(&mut app, 1, "prod", 16).await;
         // Console-capable, but not on the Browser screen: still inert.
         app.screen = Screen::Connections;
-        app.apply(Action::ConsoleEdit);
+        app.sync_panel_focus();
         assert_eq!(
             app.mode,
             InputMode::Normal,
             "the console tab only lives in the Browser"
         );
-        // On the Browser with a console-capable broker: enters command mode.
+        // On the Browser with the Console tab focused: command mode.
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        focus_panel(&mut app, PanelTab::Console);
         assert_eq!(app.mode, InputMode::Command);
     }
 
     #[tokio::test]
-    async fn console_edit_inert_without_console_capability() {
+    async fn console_mode_inert_without_console_capability() {
         // A broker with no console (AMQP), even forced onto a Browser screen,
         // must not enter command mode — the capability gate, not just the screen.
         let (mut app, _rx) = test_app();
         connect_amqp(&mut app, 1, "mq").await;
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        app.sync_panel_focus();
         assert_eq!(app.mode, InputMode::Normal);
     }
 
     #[tokio::test]
-    async fn console_edit_and_submit_records_command() {
+    async fn console_typing_and_submit_records_command() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        focus_panel(&mut app, PanelTab::Console);
         assert_eq!(app.mode, InputMode::Command);
         for c in "GET k".chars() {
             app.handle_key(ch(c));
@@ -3603,8 +3949,9 @@ mod tests {
         assert_eq!(console.history, vec!["GET k"]);
         assert!(console.input.is_empty(), "input cleared after submit");
         assert_eq!(app.mode, InputMode::Command, "stays in command mode");
-        // Esc leaves command mode.
+        // Esc steps out of the Browser entirely (and back to normal navigation).
         app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.screen, Screen::Connections);
         assert_eq!(app.mode, InputMode::Normal);
     }
 
@@ -3639,7 +3986,7 @@ mod tests {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        focus_panel(&mut app, PanelTab::Console);
         app.handle_key(key(KeyCode::Enter)); // empty
         assert!(app.connections[0].console.history.is_empty());
         assert!(app.connections[0].console.pending.is_none());
@@ -3657,7 +4004,7 @@ mod tests {
         assert_eq!(app.connections[0].console.entries.len(), 1);
         // Ctrl-L clears the console while it is focused (command mode).
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        focus_panel(&mut app, PanelTab::Console);
         app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
         assert!(app.connections[0].console.entries.is_empty());
     }
@@ -3667,9 +4014,9 @@ mod tests {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         // The console band scrolls with PageUp/PageDown while focused (command
-        // mode), since ↑↓ are taken by command history recall.
+        // mode); ↑↓ now move the key list and Ctrl-P/N recall history.
         app.screen = Screen::Browser;
-        app.apply(Action::ConsoleEdit);
+        focus_panel(&mut app, PanelTab::Console);
         app.handle_key(key(KeyCode::PageUp)); // scroll back a page
         assert_eq!(
             app.connections[0].console.scroll,

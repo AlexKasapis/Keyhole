@@ -16,7 +16,7 @@ expression: "render_lines(&mut app, 90, 26)"
 │                                         ││                                             │
 └─────────────────────────────────────────┘└─────────────────────────────────────────────┘
 ┌ pubsub:orders ─────────────────────────────────────────────────────────────────────────┐
-│ Console │ pubsub:orders ●                                                              │
+│ Console │ Monitor │ Keyspace │ Pub/Sub │ pubsub:orders ● │ Tail                        │
 │ live · 6 events                                           ● REC 6 (4.0 KiB) · ⏸ paused │
 │12:34:56.000  orders             event 0                                                │
 │12:34:56.000  orders             event 1                                                │

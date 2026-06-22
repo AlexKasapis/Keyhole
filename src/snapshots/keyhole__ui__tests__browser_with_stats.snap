@@ -10,10 +10,10 @@ expression: "render_lines(&mut app, 90, 20)"
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ───────────────────────────────────┐┌ user:1 ─────────────────────────────────────┐
 ┌ Console — prod (read-only) ────────────────────────────────────────────────────────────┐
-│ Console                                                                                │
+│ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail                                          │
 │Read-only command console.                                                              │
 │                                                                                        │
-│Press 'i', type a command, Enter to run. Writes and admin commands are refused.         │
+│Just type a command and press Enter to run. Writes and admin commands are refused.      │
 │Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1               │
 │                                                                                        │
 │                                                                                        │

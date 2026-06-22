@@ -125,7 +125,10 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
-                Span::styled(format!("   {hint}   Enter start · Esc cancel"), theme.dim),
+                Span::styled(
+                    format!("   {hint}   Enter start · Tab tabs · Esc back"),
+                    theme.dim,
+                ),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -138,7 +141,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Span::styled(" cmd ", theme.accent),
                 Span::raw(format!("{input}▏")),
                 Span::styled(
-                    "   ↑↓ history · PgUp/PgDn scroll · ^L clear · Enter run · Esc done",
+                    "   ^P/^N history · PgUp/PgDn scroll · ^L clear · Enter run · Esc back",
                     theme.dim,
                 ),
             ]);
@@ -190,12 +193,12 @@ fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
         ],
         // Keys are always grouped by prefix, so the footer always offers the
         // collapse/expand controls — there is no grouping toggle. The bottom
-        // panel (Console + live tails) is cycled with Tab / Shift-Tab.
+        // panel's fixed tabs are cycled with Tab / Shift-Tab (the only way).
         Screen::Browser => vec![
             ("nav", "↑↓ keys · [ ] db"),
             ("groups", "⏎/Space collapse · z all"),
-            ("view", "/ filter · o sort · O dir · r refresh"),
-            ("panel", "Tab tabs · i cmd · s/m/K/t tail · x stop · r rec"),
+            ("view", "/ filter · o sort · O dir"),
+            ("panel", "Tab tabs · p play/pause · r rec · x close"),
             ("go", "R recordings"),
             ("app", "? help · Esc back"),
         ],
@@ -847,8 +850,9 @@ mod tests {
             });
         }
         app.connections[0].subs.push(sub);
-        // Focus the tail's tab (tab 1; tab 0 is the Console).
-        app.connections[0].panel_tab = 1;
+        // Focus the tail's tab: pub/sub tails sit after the four leading anchors
+        // (Console, Monitor, Keyspace, Pub/Sub), so the first one is slot 4.
+        app.connections[0].panel_tab = 4;
         let text = screen_text(&mut app);
         assert!(
             text.contains("pubsub:news"),
@@ -880,23 +884,27 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/r.jsonl"),
         };
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 1;
+        app.connections[0].panel_tab = 4; // the pub/sub tail tab
         let text = screen_text(&mut app);
         assert!(text.contains("paused"));
         assert!(text.contains("REC"));
     }
 
     #[tokio::test]
-    async fn panel_tab_strip_lists_console_and_tails() {
-        // The Console tab is always present; each live tail adds a tab. The strip
-        // shows both even when the Console tab is the active one.
+    async fn panel_tab_strip_lists_fixed_anchors_and_tails() {
+        // The five fixed anchors are always present; each pub/sub or stream tail
+        // adds a tab. The strip shows them all even when the Console is active.
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
         let sub = Subscription::new(1, SubSpec::Channel("news".into()), 100);
         app.connections[0].subs.push(sub);
         app.connections[0].panel_tab = 0; // Console active
         let text = screen_text(&mut app);
-        assert!(text.contains("Console"), "the Console tab is listed");
+        assert!(text.contains("Console"), "the Console anchor is listed");
+        assert!(text.contains("Monitor"), "the Monitor anchor is listed");
+        assert!(text.contains("Keyspace"), "the Keyspace anchor is listed");
+        assert!(text.contains("Pub/Sub"), "the Pub/Sub anchor is listed");
+        assert!(text.contains("Tail"), "the Tail anchor is listed");
         assert!(text.contains("pubsub:news"), "the tail tab is listed too");
     }
 
@@ -908,9 +916,10 @@ mod tests {
         sub.state = SubState::Active;
         sub.notice = Some("keyspace notifications are disabled".into());
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 1;
+        // The keyspace feed renders under its anchor (slot 2), not its own tab.
+        app.connections[0].panel_tab = 2;
         let text = screen_text(&mut app);
-        assert!(text.contains("keyspace:db0"), "the tail tab label renders");
+        assert!(text.contains("Keyspace"), "the Keyspace anchor renders");
         assert!(text.contains("disabled"), "the notice banner renders");
     }
 
@@ -1178,8 +1187,8 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_browser_panel_keyspace_notice() {
-        // A keyspace tail focused in the Browser's bottom panel, showing the tab
-        // strip (Console + the tail) and the advisory notice banner.
+        // The keyspace feed focused under its fixed anchor (slot 2), showing the
+        // tab strip (the five anchors) and the advisory notice banner.
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
@@ -1191,7 +1200,7 @@ mod tests {
         sub.notice =
             Some("keyspace notifications are disabled (notify-keyspace-events is empty)".into());
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 1;
+        app.connections[0].panel_tab = 2;
         insta::assert_snapshot!(
             "browser_panel_keyspace_notice",
             render_lines(&mut app, 90, 26)
@@ -1228,7 +1237,7 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/orders.jsonl"),
         };
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 1;
+        app.connections[0].panel_tab = 4; // the pub/sub tail tab
         insta::assert_snapshot!(
             "browser_panel_tail_recording",
             render_lines(&mut app, 90, 26)

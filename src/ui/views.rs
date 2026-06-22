@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, ConnForm, Connection, InputMode, RecordState, SubState, Subscription, ViewRow,
+    App, ConnForm, Connection, InputMode, PanelTab, RecordState, SubState, Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
@@ -148,9 +148,11 @@ fn visible_offset(prev: usize, selected: Option<usize>, viewport: usize, total: 
 
 /// Browser screen: key table + value pane for the active connection.
 pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    // The console band shows a typing cursor only in command mode; capture the
-    // mode before the `&mut` borrow of the active connection below.
+    // The panel's input tabs show a typing cursor and echo the typed text;
+    // capture the mode and the shared subscribe buffer before the `&mut` borrow
+    // of the active connection below.
     let mode = app.mode;
+    let subscribe_buf = app.subscribe_buf.clone();
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
             .style(theme.dim)
@@ -343,7 +345,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     frame.render_widget(value, value_area);
 
     if let Some(panel_area) = panel_area {
-        panel_band(frame, conn, mode, theme, panel_area);
+        panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
     }
 }
 
@@ -507,21 +509,32 @@ fn meter(frame: &mut Frame, area: Rect, theme: &Theme, label: &str, ratio: f64, 
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// The Browser's tabbed bottom panel: a tab strip (Console first, then one tab
-/// per live tail) over the active tab's content. The console tab shows command
-/// output with an input prompt; a tail tab shows the tail's live status row and
-/// event scrollback. Tabs are cycled with Tab / Shift-Tab. Only drawn for
-/// brokers with a console (Redis) — the former standalone Console and Realtime
-/// screens, now folded into one panel. The no-connection case is handled by the
-/// Browser, so this only runs with a live connection.
-fn panel_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &Theme, area: Rect) {
-    // Title follows the active tab: the console's read-only affordance, or the
-    // focused tail's label.
-    let on_console = conn.panel_is_console();
-    let title = match conn.panel_subscription() {
-        _ if on_console => format!(" Console — {} (read-only) ", conn.name),
-        Some(sub) => format!(" {} ", sub.label),
-        None => " Panel ".to_string(),
+/// The Browser's tabbed bottom panel: a tab strip over the active tab's content.
+/// The five fixed anchors (Console, Monitor, Keyspace, Pub/Sub, Tail) are always
+/// present and joined by one tab per live pub/sub or stream tail; tabs are
+/// reached only by cycling with Tab / Shift-Tab. The Console and the Pub/Sub /
+/// Tail anchors carry always-shown input prompts; Monitor/Keyspace and the
+/// per-tail tabs show a live feed. Only drawn for brokers with a panel (Redis).
+fn panel_band(
+    frame: &mut Frame,
+    conn: &Connection,
+    mode: InputMode,
+    subscribe_buf: &str,
+    theme: &Theme,
+    area: Rect,
+) {
+    let active = conn.active_panel();
+    // Title follows the active tab.
+    let title = match active {
+        PanelTab::Console => format!(" Console — {} (read-only) ", conn.name),
+        PanelTab::Monitor => format!(" Monitor — {} ", conn.name),
+        PanelTab::Keyspace => format!(" Keyspace — db{} ", conn.db),
+        PanelTab::PubSub => " Pub/Sub ".to_string(),
+        PanelTab::Tail => " Tail ".to_string(),
+        PanelTab::Sub(_) => match conn.panel_subscription() {
+            Some(sub) => format!(" {} ", sub.label),
+            None => " Panel ".to_string(),
+        },
     };
     let block = Block::bordered()
         .title(title)
@@ -533,23 +546,114 @@ fn panel_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &The
     let [tabs_area, content_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
 
-    // Tab strip: Console first, then one tab per live tail (carrying the same
-    // recording/lifecycle indicators the Realtime tabs used to). A dim divider
-    // keeps the separators quiet next to the highlighted active tab.
-    let mut titles: Vec<Line> = vec![Line::from("Console")];
-    titles.extend(conn.subs.iter().map(|s| sub_tab_title(s, theme)));
+    // Tab strip: the fixed anchors plus the live-tail tabs, in panel order. A dim
+    // divider keeps the separators quiet next to the highlighted active tab.
+    let slots = conn.panel_slots();
+    let selected = conn.panel_tab.min(slots.len().saturating_sub(1));
+    let titles: Vec<Line> = slots
+        .iter()
+        .map(|t| match t {
+            PanelTab::Console => Line::from("Console"),
+            PanelTab::Monitor => anchor_tab_title("Monitor", conn.monitor_sub(), theme),
+            PanelTab::Keyspace => anchor_tab_title("Keyspace", conn.keyspace_sub(), theme),
+            PanelTab::PubSub => Line::from("Pub/Sub"),
+            PanelTab::Tail => Line::from("Tail"),
+            PanelTab::Sub(i) => match conn.subs.get(*i) {
+                Some(sub) => sub_tab_title(sub, theme),
+                None => Line::from("?"),
+            },
+        })
+        .collect();
     let tabs = Tabs::new(titles)
-        .select(conn.panel_tab)
+        .select(selected)
         .style(theme.dim)
         .highlight_style(theme.selected)
         .divider(Span::styled("│", theme.dim));
     frame.render_widget(tabs, tabs_area);
 
-    if on_console {
-        console_content(frame, conn, mode, theme, content_area);
-    } else if let Some(sub) = conn.panel_subscription() {
-        tail_content(frame, sub, theme, content_area);
+    // Content follows the active tab.
+    match active {
+        PanelTab::Console => console_content(frame, conn, mode, theme, content_area),
+        PanelTab::PubSub => anchor_input(
+            frame,
+            theme,
+            content_area,
+            mode,
+            subscribe_buf,
+            "channel or pattern",
+            "Enter subscribes · a glob (* ? [) makes it a pattern (PSUBSCRIBE)",
+        ),
+        PanelTab::Tail => anchor_input(
+            frame,
+            theme,
+            content_area,
+            mode,
+            subscribe_buf,
+            "stream key",
+            "Enter tails · leave empty to tail the selected stream key",
+        ),
+        PanelTab::Monitor | PanelTab::Keyspace | PanelTab::Sub(_) => {
+            match conn.panel_subscription() {
+                Some(sub) => tail_content(frame, sub, theme, content_area),
+                None => {
+                    frame.render_widget(
+                        Paragraph::new(Line::styled("starting feed…", theme.dim)),
+                        content_area,
+                    );
+                }
+            }
+        }
     }
+}
+
+/// A fixed anchor tab's strip title (Monitor / Keyspace), tagged with a recording
+/// dot and a paused marker when its feed is live.
+fn anchor_tab_title(
+    name: &'static str,
+    sub: Option<&Subscription>,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw(name)];
+    if let Some(sub) = sub {
+        if sub.recording.is_on() {
+            spans.push(Span::styled(" ●", theme.error));
+        }
+        if !sub.follow {
+            spans.push(Span::styled(" ⏸", theme.accent));
+        }
+    }
+    Line::from(spans)
+}
+
+/// An input-anchor's content: the always-shown prompt echoing the typed text
+/// (with a cursor while the tab is focused) over a one-line hint.
+fn anchor_input(
+    frame: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    mode: InputMode,
+    buf: &str,
+    label: &str,
+    hint: &str,
+) {
+    let [prompt_area, _gap, hint_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let cursor = if mode == InputMode::Subscribe {
+        "▏"
+    } else {
+        ""
+    };
+    let prompt = Line::from(vec![
+        Span::styled(format!("{label}: "), theme.dim),
+        Span::raw(buf.to_string()),
+        Span::styled(cursor, theme.accent),
+    ]);
+    frame.render_widget(Paragraph::new(prompt), prompt_area);
+    frame.render_widget(Paragraph::new(Line::styled(hint, theme.dim)), hint_area);
 }
 
 /// One bottom-panel tail tab's title: the tail label plus its recording (●) and
@@ -679,8 +783,8 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             Line::from(""),
             Line::styled("No recordings found.", theme.dim),
             Line::from(""),
-            Line::from("Start a tail with 's', then 'r' to record — files land in the"),
-            Line::from("recordings directory."),
+            Line::from("Open a feed tab in the Browser, then 'r' to record — files land"),
+            Line::from("in the recordings directory."),
         ])
         .alignment(Alignment::Center)
         .block(block);
@@ -835,7 +939,7 @@ fn console_content(
         lines.push(Line::styled("Read-only command console.", theme.dim));
         lines.push(Line::from(""));
         lines.push(Line::styled(
-            "Press 'i', type a command, Enter to run. Writes and admin commands are refused.",
+            "Just type a command and press Enter to run. Writes and admin commands are refused.",
             theme.dim,
         ));
         lines.push(Line::styled(
@@ -988,24 +1092,23 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(""),
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
-        Line::from("  / filter   [ ] change DB   r refresh (keys auto-refresh)"),
-        Line::from("  o sort column   O direction"),
-        Line::from("  keys are always grouped by prefix into collapsible sections"),
-        Line::from("  Enter/Space collapse/expand group (from header or key)"),
-        Line::from("  z fold/unfold all groups"),
-        Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),
+        Line::from("  / filter   [ ] change DB   o sort column   O direction"),
+        Line::from("  keys are grouped by prefix into collapsible sections"),
+        Line::from("  Enter/Space collapse/expand group   z fold/unfold all"),
+        Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),
         Line::from(""),
         Line::styled("Bottom panel (Redis)", theme.heading),
-        Line::from("  a tabbed panel along the bottom: Console first, then one tab per tail"),
-        Line::from("  Tab / Shift-Tab cycle the tabs"),
-        Line::from("  s subscribe (pub/sub or stream)   m MONITOR   K keyspace"),
-        Line::from("  t tail the selected stream key    x stop the focused tail"),
-        Line::from("  r records on a tail tab (refreshes keys on the Console tab)"),
-        Line::from("  spec: pubsub:ch · psub:ch.* · stream:key · keyspace[:N] · monitor"),
+        Line::from("  fixed tabs: Console · Monitor · Keyspace · Pub/Sub · Tail"),
+        Line::from("  plus one tab per pub/sub or stream tail"),
+        Line::from("  Tab / Shift-Tab cycle tabs (the only way to switch)"),
+        Line::from("  Monitor/Keyspace live only while focused · p play/pause"),
+        Line::from("  Pub/Sub & Tail: type in the tab, Enter subscribes/tails"),
+        Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
+        Line::from("  r record the focused feed   x close a pub/sub or tail tab"),
         Line::from(""),
         Line::styled("Console tab (read-only)", theme.heading),
-        Line::from("  i type a command   Enter run   ↑↓ history   PgUp/PgDn scroll"),
-        Line::from("  Ctrl-L clear   writes and admin commands are refused"),
+        Line::from("  type a command, Enter runs   Ctrl-P/N history"),
+        Line::from("  Ctrl-L clear   PgUp/PgDn scroll   writes/admin refused"),
         Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  a add connection   ? toggle help   Esc back   Ctrl-c quit"),
