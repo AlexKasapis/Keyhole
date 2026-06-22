@@ -58,9 +58,9 @@ impl App {
         let on_browser = self.screen == Screen::Browser;
         let mut refresh_id = None;
         if let Some(conn) = self.active_conn_mut() {
-            conn.stat_ticks += 1;
-            if conn.stat_ticks >= STATS_REFRESH_TICKS {
-                conn.stat_ticks = 0;
+            conn.dashboard.stat_ticks += 1;
+            if conn.dashboard.stat_ticks >= STATS_REFRESH_TICKS {
+                conn.dashboard.stat_ticks = 0;
                 // Only brokers with a dashboard answer RefreshStats; others would
                 // just surface an "unsupported" error each tick.
                 if conn.caps.can_dashboard {
@@ -75,10 +75,10 @@ impl App {
             // re-scanning while a tail is on screen) and never stacked on top of
             // a scan that is still running.
             if refresh_ticks > 0 && on_browser && conn.caps.can_browse {
-                conn.browse_ticks += 1;
-                if conn.browse_ticks >= refresh_ticks {
-                    conn.browse_ticks = 0;
-                    if !conn.scanning {
+                conn.browser.browse_ticks += 1;
+                if conn.browser.browse_ticks >= refresh_ticks {
+                    conn.browser.browse_ticks = 0;
+                    if !conn.browser.scanning {
                         refresh_id = Some(conn.id);
                     }
                 }
@@ -147,7 +147,7 @@ impl App {
                 match &step {
                     ScanStep::Stale => return, // page from a superseded scan; drop it
                     ScanStep::Done => conn.rebuild_view(),
-                    ScanStep::Continue(_) if conn.scan_live => {
+                    ScanStep::Continue(_) if conn.browser.scan_live => {
                         conn.rebuild_view_throttled(VIEW_REBUILD_INTERVAL)
                     }
                     ScanStep::Continue(_) => {}
@@ -161,8 +161,8 @@ impl App {
         };
         // Land the highlight on the first row as soon as there is one to show.
         if let Some(conn) = self.conn_by_id_mut(id) {
-            if conn.table.selected().is_none() && !conn.view.is_empty() {
-                conn.table.select(Some(0));
+            if conn.browser.table.selected().is_none() && !conn.browser.view.is_empty() {
+                conn.browser.table.select(Some(0));
             }
         }
         if let Some(req) = next {
@@ -175,15 +175,15 @@ impl App {
 
     pub(super) fn on_value(&mut self, id: ConnId, key: String, value: ValueView) {
         if let Some(conn) = self.conn_by_id_mut(id) {
-            if conn.value_key.as_deref() == Some(key.as_str()) {
-                conn.value = Some(value);
+            if conn.inspector.value_key.as_deref() == Some(key.as_str()) {
+                conn.inspector.value = Some(value);
             }
         }
     }
 
     pub(super) fn on_stats(&mut self, id: ConnId, stats: ServerStats) {
         if let Some(conn) = self.conn_by_id_mut(id) {
-            conn.stats = Some(stats);
+            conn.dashboard.stats = Some(stats);
         }
     }
 

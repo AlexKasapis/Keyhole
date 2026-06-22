@@ -223,10 +223,10 @@ impl App {
     pub(super) fn request_selected_value(&mut self, id: ConnId) {
         if let Some(conn) = self.conn_by_id_mut(id) {
             if let Some(entry) = conn.selected().cloned() {
-                if conn.value_key.as_deref() != Some(entry.key.as_str()) {
-                    conn.value = None;
-                    conn.value_key = Some(entry.key.clone());
-                    conn.value_scroll = 0;
+                if conn.inspector.value_key.as_deref() != Some(entry.key.as_str()) {
+                    conn.inspector.value = None;
+                    conn.inspector.value_key = Some(entry.key.clone());
+                    conn.inspector.value_scroll = 0;
                     conn.handle.send(ConnCommand::Inspect(InspectReq {
                         db: conn.db,
                         key: entry.key,
@@ -254,7 +254,7 @@ impl App {
             format!("*{raw}*")
         };
         if let Some(conn) = self.active_conn_mut() {
-            conn.pattern = pattern;
+            conn.browser.pattern = pattern;
         }
         if let Some(id) = self.active_id() {
             self.start_scan(id, true);

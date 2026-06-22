@@ -655,7 +655,7 @@ mod tests {
         // "cache" is connected with server stats; "spare" stays offline.
         let handle = mock::handle(1, "cache", 16).await;
         let mut conn = Connection::new(handle);
-        conn.stats = Some(ServerStats {
+        conn.dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             connected_clients: Some(7),
             instantaneous_ops_per_sec: Some(120),
@@ -774,10 +774,10 @@ mod tests {
         for view in views {
             let (mut app, _rx) = app_with_connection().await;
             app.screen = Screen::Browser;
-            app.connections[0].keys = vec![entry("mykey", ValueType::String)];
-            app.connections[0].table.select(Some(0));
-            app.connections[0].value_key = Some("mykey".into());
-            app.connections[0].value = Some(view);
+            app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
+            app.connections[0].browser.table.select(Some(0));
+            app.connections[0].inspector.value_key = Some("mykey".into());
+            app.connections[0].inspector.value = Some(view);
             // The assertion is implicit: render_value must not panic for any view.
             let text = screen_text(&mut app);
             assert!(text.contains("mykey"), "the key table should render");
@@ -790,7 +790,7 @@ mod tests {
         // compact band atop the keys/value panes (Redis has `can_dashboard`).
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        app.connections[0].stats = Some(ServerStats {
+        app.connections[0].dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             connected_clients: Some(7),
             used_memory: Some(1024),
@@ -825,7 +825,7 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
         app.connections[0].caps.can_dashboard = false;
-        app.connections[0].keys = vec![entry("mykey", ValueType::String)];
+        app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
         let text = screen_text(&mut app);
         assert!(text.contains("mykey"), "the key table still renders");
         assert!(!text.contains("Server"), "no stats band title");
@@ -927,7 +927,7 @@ mod tests {
     async fn browser_console_band_renders_prompt_and_entries() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        app.connections[0].keys = vec![entry("mykey", ValueType::String)];
+        app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
         app.connections[0]
             .console
             .entries
@@ -1096,7 +1096,7 @@ mod tests {
         // "cache" is live with stats; the AMQP brokers stay offline.
         let handle = mock::handle(1, "cache", 16).await;
         let mut conn = Connection::new(handle);
-        conn.stats = Some(ServerStats {
+        conn.dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             connected_clients: Some(7),
             instantaneous_ops_per_sec: Some(120),
@@ -1124,12 +1124,12 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
-        app.connections[0].keys = vec![
+        app.connections[0].browser.keys = vec![
             entry("user:1", ValueType::String),
             entry("session:abc", ValueType::Hash),
         ];
-        app.connections[0].complete = true;
-        app.connections[0].table.select(Some(0));
+        app.connections[0].browser.complete = true;
+        app.connections[0].browser.table.select(Some(0));
         app.connections[0]
             .console
             .entries
@@ -1156,20 +1156,20 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
-        app.connections[0].keys = vec![
+        app.connections[0].browser.keys = vec![
             entry("user:1", ValueType::String),
             entry("session:abc", ValueType::Hash),
         ];
-        app.connections[0].complete = true;
-        app.connections[0].table.select(Some(0));
-        app.connections[0].value_key = Some("user:1".into());
-        app.connections[0].value = Some(ValueView::Str {
+        app.connections[0].browser.complete = true;
+        app.connections[0].browser.table.select(Some(0));
+        app.connections[0].inspector.value_key = Some("user:1".into());
+        app.connections[0].inspector.value = Some(ValueView::Str {
             total_bytes: 5,
             shown_bytes: 5,
             text: "alice".into(),
             encoding: PayloadEncoding::Utf8,
         });
-        app.connections[0].stats = Some(ServerStats {
+        app.connections[0].dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             uptime_seconds: Some(3661),
             connected_clients: Some(7),
@@ -1192,9 +1192,9 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
-        app.connections[0].keys = vec![entry("user:1", ValueType::String)];
-        app.connections[0].complete = true;
-        app.connections[0].table.select(Some(0));
+        app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].browser.complete = true;
+        app.connections[0].browser.table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
         sub.state = SubState::Active;
         sub.notice =
@@ -1215,9 +1215,9 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
-        app.connections[0].keys = vec![entry("user:1", ValueType::String)];
-        app.connections[0].complete = true;
-        app.connections[0].table.select(Some(0));
+        app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].browser.complete = true;
+        app.connections[0].browser.table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Channel("orders".into()), 100);
         sub.state = SubState::Active;
         for i in 0..6 {

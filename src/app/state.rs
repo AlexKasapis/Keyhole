@@ -403,22 +403,23 @@ pub enum ScanStep {
     Done,
 }
 
-/// An open connection plus its per-connection browse/inspect/dashboard state.
-pub struct Connection {
-    pub id: ConnId,
-    pub name: String,
-    pub caps: Capabilities,
-    pub db: u32,
+/// The keyspace-browser state for one connection: the scanned keys, the derived
+/// grouped/sorted view and its selection, the scan-in-progress bookkeeping, the
+/// match pattern, and the auto-refresh timer. Owns the browse half of a
+/// [`Connection`]; the scan/view methods live on [`Connection`] since they also
+/// coordinate the value inspector and the connection's selected database.
+pub struct KeyBrowser {
+    /// SCAN match pattern (`*` by default).
     pub pattern: String,
-    /// The keys currently shown in the browser — the result of the most
-    /// recently *completed* keyspace scan. A background refresh accumulates
-    /// into [`Self::scan_buf`] and only swaps in here once finished, so the
-    /// list never flickers or empties mid-refresh.
+    /// The keys currently shown — the result of the most recently *completed*
+    /// keyspace scan. A background refresh accumulates into [`Self::scan_buf`]
+    /// and only swaps in here once finished, so the list never flickers or
+    /// empties mid-refresh.
     pub keys: Vec<EntryMeta>,
     /// SCAN cursor for the scan in progress (`0` once it finishes).
     pub next_cursor: u64,
-    /// Whether the most recent scan has finished (drives the "scanning…"
-    /// hint). A background refresh sets this `false` while it runs.
+    /// Whether the most recent scan has finished (drives the "scanning…" hint).
+    /// A background refresh sets this `false` while it runs.
     pub complete: bool,
     /// Generation of the current/most-recently-started scan. Stamped onto every
     /// [`BrowseReq`] of that scan; pages whose epoch no longer matches are from
@@ -446,20 +447,71 @@ pub struct Connection {
     pub collapsed: HashSet<String>,
     /// Rendered rows (group headers + keys) derived from `keys`, `sort`,
     /// `sort_desc`, and `collapsed`. The table's selected index points into
-    /// this, not into `keys`. Rebuilt via [`Self::rebuild_view`].
+    /// this, not into `keys`. Rebuilt via [`Connection::rebuild_view`].
     pub view: Vec<ViewRow>,
     /// When [`Self::view`] was last rebuilt during the scan in progress, used to
-    /// throttle progressive rebuilds (see [`Self::rebuild_view_throttled`]).
+    /// throttle progressive rebuilds (see [`Connection::rebuild_view_throttled`]).
     /// Reset at the start of every scan; `None` forces the first page to build.
     last_view_build: Option<Instant>,
     pub table: TableState,
+    /// Ticks elapsed since the last automatic key-browser refresh.
+    pub browse_ticks: u32,
+}
+
+impl KeyBrowser {
+    fn new() -> Self {
+        let mut table = TableState::default();
+        table.select(Some(0));
+        Self {
+            pattern: "*".to_string(),
+            keys: Vec::new(),
+            next_cursor: 0,
+            complete: false,
+            scan_epoch: 0,
+            scanning: false,
+            scan_buf: Vec::new(),
+            scan_live: false,
+            sort: SortKey::Name,
+            sort_desc: false,
+            collapsed: HashSet::new(),
+            view: Vec::new(),
+            last_view_build: None,
+            table,
+            browse_ticks: 0,
+        }
+    }
+}
+
+/// The value-inspector pane for one connection: the loaded value, the key it
+/// belongs to, and the pane's scroll offset.
+#[derive(Default)]
+pub struct ValueInspector {
     pub value: Option<ValueView>,
     pub value_key: Option<String>,
     pub value_scroll: u16,
+}
+
+/// The server-statistics dashboard band for one connection: the latest stats
+/// and the tick counter that paces their refresh.
+#[derive(Default)]
+pub struct StatsPanel {
     pub stats: Option<ServerStats>,
     pub stat_ticks: u32,
-    /// Ticks elapsed since the last automatic key-browser refresh.
-    pub browse_ticks: u32,
+}
+
+/// An open connection plus its per-connection browse / inspect / dashboard
+/// state, each grouped into a cohesive sub-struct.
+pub struct Connection {
+    pub id: ConnId,
+    pub name: String,
+    pub caps: Capabilities,
+    pub db: u32,
+    /// Keyspace browser (keys, view, scan, sort) — populated for Redis.
+    pub browser: KeyBrowser,
+    /// Value inspector pane — populated for Redis.
+    pub inspector: ValueInspector,
+    /// Server-statistics dashboard band — populated for Redis.
+    pub dashboard: StatsPanel,
     /// Live tails for this connection. Pub/sub and stream tails each get their
     /// own tab in the Browser's bottom panel (after the Pub/Sub and Tail anchors
     /// respectively); MONITOR and keyspace tails live under their fixed anchor
@@ -476,33 +528,14 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(handle: ConnHandle) -> Self {
-        let mut table = TableState::default();
-        table.select(Some(0));
         Self {
             id: handle.id,
             name: handle.name.clone(),
             caps: handle.caps.clone(),
             db: 0,
-            pattern: "*".to_string(),
-            keys: Vec::new(),
-            next_cursor: 0,
-            complete: false,
-            scan_epoch: 0,
-            scanning: false,
-            scan_buf: Vec::new(),
-            scan_live: false,
-            sort: SortKey::Name,
-            sort_desc: false,
-            collapsed: HashSet::new(),
-            view: Vec::new(),
-            last_view_build: None,
-            table,
-            value: None,
-            value_key: None,
-            value_scroll: 0,
-            stats: None,
-            stat_ticks: 0,
-            browse_ticks: 0,
+            browser: KeyBrowser::new(),
+            inspector: ValueInspector::default(),
+            dashboard: StatsPanel::default(),
             subs: Vec::new(),
             panel_tab: 0,
             console: Console::default(),
@@ -513,8 +546,13 @@ impl Connection {
     /// The currently highlighted key, if a key row (not a group header) is
     /// selected.
     pub fn selected(&self) -> Option<&EntryMeta> {
-        match self.table.selected().and_then(|i| self.view.get(i)) {
-            Some(ViewRow::Entry(i)) => self.keys.get(*i),
+        match self
+            .browser
+            .table
+            .selected()
+            .and_then(|i| self.browser.view.get(i))
+        {
+            Some(ViewRow::Entry(i)) => self.browser.keys.get(*i),
             _ => None,
         }
     }
@@ -525,9 +563,18 @@ impl Connection {
     /// collapse/expand act on the current group from anywhere inside it, not
     /// just from the header row.
     pub fn cursor_group_prefix(&self) -> Option<String> {
-        match self.table.selected().and_then(|i| self.view.get(i)) {
+        match self
+            .browser
+            .table
+            .selected()
+            .and_then(|i| self.browser.view.get(i))
+        {
             Some(ViewRow::Group { prefix, .. }) => Some(prefix.clone()),
-            Some(ViewRow::Entry(i)) => self.keys.get(*i).map(|e| key_prefix(&e.key).to_string()),
+            Some(ViewRow::Entry(i)) => self
+                .browser
+                .keys
+                .get(*i)
+                .map(|e| key_prefix(&e.key).to_string()),
             None => None,
         }
     }
@@ -537,9 +584,14 @@ impl Connection {
     /// range when that row no longer exists).
     pub fn rebuild_view(&mut self) {
         let anchor = self.selected_anchor();
-        self.view = build_view(&self.keys, self.sort, self.sort_desc, &self.collapsed);
+        self.browser.view = build_view(
+            &self.browser.keys,
+            self.browser.sort,
+            self.browser.sort_desc,
+            &self.browser.collapsed,
+        );
         self.restore_selection(anchor);
-        self.last_view_build = Some(Instant::now());
+        self.browser.last_view_build = Some(Instant::now());
     }
 
     /// Rebuild the view during a progressive (foreground) scan, but at most once
@@ -552,7 +604,7 @@ impl Connection {
     /// final page rebuilds unconditionally via [`Self::rebuild_view`] so the
     /// finished list is always exact.
     pub fn rebuild_view_throttled(&mut self, min_interval: Duration) {
-        let due = match self.last_view_build {
+        let due = match self.browser.last_view_build {
             Some(last) => last.elapsed() >= min_interval,
             None => true,
         };
@@ -574,30 +626,30 @@ impl Connection {
     /// Either way the scan epoch is bumped, so pages still in flight from a
     /// previous scan are recognised as stale when they arrive.
     pub fn begin_scan(&mut self, live: bool, page_size: usize) -> BrowseReq {
-        self.scan_epoch = self.scan_epoch.wrapping_add(1);
-        self.scanning = true;
-        self.complete = false;
-        self.next_cursor = 0;
-        self.scan_buf.clear();
-        self.scan_live = live;
+        self.browser.scan_epoch = self.browser.scan_epoch.wrapping_add(1);
+        self.browser.scanning = true;
+        self.browser.complete = false;
+        self.browser.next_cursor = 0;
+        self.browser.scan_buf.clear();
+        self.browser.scan_live = live;
         // A fresh scan: force the first arriving page to rebuild immediately,
         // then throttle subsequent progressive rebuilds.
-        self.last_view_build = None;
+        self.browser.last_view_build = None;
         if live {
             // The whole result set is being replaced; drop the old selection and
             // value so nothing briefly points at a key from the previous result.
-            self.keys.clear();
-            self.value = None;
-            self.value_key = None;
-            self.value_scroll = 0;
+            self.browser.keys.clear();
+            self.inspector.value = None;
+            self.inspector.value_key = None;
+            self.inspector.value_scroll = 0;
             self.rebuild_view();
         }
         BrowseReq {
             db: self.db,
-            pattern: self.pattern.clone(),
+            pattern: self.browser.pattern.clone(),
             cursor: 0,
             page_size,
-            epoch: self.scan_epoch,
+            epoch: self.browser.scan_epoch,
         }
     }
 
@@ -608,16 +660,16 @@ impl Connection {
         // A page whose epoch no longer matches (or that targets a DB we have
         // since left) belongs to a scan we have abandoned — ignore it so it
         // can't contaminate the current scan's results.
-        if page.epoch != self.scan_epoch || page.db != self.db {
+        if page.epoch != self.browser.scan_epoch || page.db != self.db {
             return ScanStep::Stale;
         }
-        self.next_cursor = page.next_cursor;
-        if self.scan_live {
+        self.browser.next_cursor = page.next_cursor;
+        if self.browser.scan_live {
             // Foreground: reveal keys as they load.
-            self.keys.extend(page.entries);
+            self.browser.keys.extend(page.entries);
         } else {
             // Background: stage until complete, leaving the visible list intact.
-            self.scan_buf.extend(page.entries);
+            self.browser.scan_buf.extend(page.entries);
         }
         // The view rebuild is deliberately *not* done here. The caller decides:
         // a foreground scan rebuilds the view progressively but throttled (so a
@@ -626,19 +678,19 @@ impl Connection {
         if page.next_cursor != 0 {
             return ScanStep::Continue(BrowseReq {
                 db: self.db,
-                pattern: self.pattern.clone(),
+                pattern: self.browser.pattern.clone(),
                 cursor: page.next_cursor,
                 page_size,
-                epoch: self.scan_epoch,
+                epoch: self.browser.scan_epoch,
             });
         }
-        self.scanning = false;
-        self.complete = true;
-        if !self.scan_live {
+        self.browser.scanning = false;
+        self.browser.complete = true;
+        if !self.browser.scan_live {
             // Atomically swap in the freshly scanned set; the caller's
             // completion rebuild then reflects it, keeping the highlight on the
             // same key/group where it still exists.
-            self.keys = std::mem::take(&mut self.scan_buf);
+            self.browser.keys = std::mem::take(&mut self.browser.scan_buf);
         }
         ScanStep::Done
     }
@@ -646,8 +698,14 @@ impl Connection {
     /// Capture the identity of the currently selected row so it can be re-found
     /// after the view is rebuilt.
     fn selected_anchor(&self) -> SelAnchor {
-        match self.table.selected().and_then(|i| self.view.get(i)) {
+        match self
+            .browser
+            .table
+            .selected()
+            .and_then(|i| self.browser.view.get(i))
+        {
             Some(ViewRow::Entry(i)) => self
+                .browser
                 .keys
                 .get(*i)
                 .map(|e| SelAnchor::Entry(e.key.clone()))
@@ -660,36 +718,42 @@ impl Connection {
     /// Re-select the row matching `anchor` in the freshly built view, falling
     /// back to the clamped previous index, or `None` when the view is empty.
     fn restore_selection(&mut self, anchor: SelAnchor) {
-        if self.view.is_empty() {
-            self.table.select(None);
+        if self.browser.view.is_empty() {
+            self.browser.table.select(None);
             return;
         }
-        let keys = &self.keys;
+        let keys = &self.browser.keys;
         let found = match anchor {
-            SelAnchor::Entry(key) => self.view.iter().position(|r| match r {
+            SelAnchor::Entry(key) => self.browser.view.iter().position(|r| match r {
                 ViewRow::Entry(i) => keys[*i].key == key,
                 ViewRow::Group { .. } => false,
             }),
             SelAnchor::Group(prefix) => self
+                .browser
                 .view
                 .iter()
                 .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix)),
             SelAnchor::None => None,
         };
-        let idx =
-            found.unwrap_or_else(|| self.table.selected().unwrap_or(0).min(self.view.len() - 1));
-        self.table.select(Some(idx));
+        let idx = found.unwrap_or_else(|| {
+            self.browser
+                .table
+                .selected()
+                .unwrap_or(0)
+                .min(self.browser.view.len() - 1)
+        });
+        self.browser.table.select(Some(idx));
     }
 
     /// Advance the sort key to the next column and re-sort.
     pub fn cycle_sort(&mut self) {
-        self.sort = self.sort.next();
+        self.browser.sort = self.browser.sort.next();
         self.rebuild_view();
     }
 
     /// Flip between ascending and descending order and re-sort.
     pub fn toggle_sort_dir(&mut self) {
-        self.sort_desc = !self.sort_desc;
+        self.browser.sort_desc = !self.browser.sort_desc;
         self.rebuild_view();
     }
 
@@ -705,16 +769,17 @@ impl Connection {
         let Some(prefix) = self.cursor_group_prefix() else {
             return false;
         };
-        if !self.collapsed.remove(&prefix) {
-            self.collapsed.insert(prefix.clone());
+        if !self.browser.collapsed.remove(&prefix) {
+            self.browser.collapsed.insert(prefix.clone());
         }
         self.rebuild_view();
         if let Some(idx) = self
+            .browser
             .view
             .iter()
             .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix))
         {
-            self.table.select(Some(idx));
+            self.browser.table.select(Some(idx));
         }
         true
     }
@@ -723,6 +788,7 @@ impl Connection {
     /// them all. No-op when grouping is off.
     pub fn toggle_all_groups(&mut self) {
         let prefixes: Vec<String> = self
+            .browser
             .view
             .iter()
             .filter_map(|r| match r {
@@ -733,12 +799,12 @@ impl Connection {
         if prefixes.is_empty() {
             return;
         }
-        let any_expanded = prefixes.iter().any(|p| !self.collapsed.contains(p));
+        let any_expanded = prefixes.iter().any(|p| !self.browser.collapsed.contains(p));
         if any_expanded {
-            self.collapsed.extend(prefixes);
+            self.browser.collapsed.extend(prefixes);
         } else {
             for p in &prefixes {
-                self.collapsed.remove(p);
+                self.browser.collapsed.remove(p);
             }
         }
         self.rebuild_view();
@@ -1265,5 +1331,28 @@ mod tests {
             "",
             "slot-3 reset to the new kind's default, not carried over"
         );
+    }
+
+    #[test]
+    fn connection_substructs_start_with_documented_defaults() {
+        // Browse state lives under `browser`, the value pane under `inspector`,
+        // and the dashboard under `dashboard`. Pin the defaults so the grouping
+        // can't silently drift.
+        let b = KeyBrowser::new();
+        assert_eq!(b.pattern, "*");
+        assert!(matches!(b.sort, SortKey::Name));
+        assert!(!b.sort_desc);
+        assert_eq!(b.table.selected(), Some(0));
+        assert!(b.keys.is_empty() && b.view.is_empty());
+        assert!(!b.complete && !b.scanning);
+
+        let i = ValueInspector::default();
+        assert!(i.value.is_none());
+        assert!(i.value_key.is_none());
+        assert_eq!(i.value_scroll, 0);
+
+        let d = StatsPanel::default();
+        assert!(d.stats.is_none());
+        assert_eq!(d.stat_ticks, 0);
     }
 }

@@ -142,11 +142,19 @@ impl App {
             // connection's view and reports the new state in the status bar.
             Action::CycleSort => self.browser_view(|c| {
                 c.cycle_sort();
-                format!("sort: {} {}", c.sort.label(), sort_arrow(c.sort_desc))
+                format!(
+                    "sort: {} {}",
+                    c.browser.sort.label(),
+                    sort_arrow(c.browser.sort_desc)
+                )
             }),
             Action::ToggleSortDir => self.browser_view(|c| {
                 c.toggle_sort_dir();
-                format!("sort: {} {}", c.sort.label(), sort_arrow(c.sort_desc))
+                format!(
+                    "sort: {} {}",
+                    c.browser.sort.label(),
+                    sort_arrow(c.browser.sort_desc)
+                )
             }),
             Action::ToggleAllGroups => self.browser_view(|c| {
                 c.toggle_all_groups();
@@ -272,8 +280,12 @@ impl App {
                     let conn = &mut self.connections[idx];
                     // Selection moves through rendered rows (group headers +
                     // keys), so it ranges over the view, not the raw key list.
-                    let next = move_selection(conn.table.selected(), conn.view.len(), delta);
-                    conn.table.select(next);
+                    let next = move_selection(
+                        conn.browser.table.selected(),
+                        conn.browser.view.len(),
+                        delta,
+                    );
+                    conn.browser.table.select(next);
                 }
                 // Navigation only moves the highlight; the key list refreshes on
                 // its own timer (see `on_tick`), not as a side effect of moving.
@@ -302,9 +314,11 @@ impl App {
             Screen::Browser => {
                 if let Some(idx) = self.active {
                     let conn = &mut self.connections[idx];
-                    let len = conn.view.len();
+                    let len = conn.browser.view.len();
                     if len > 0 {
-                        conn.table.select(Some(if top { 0 } else { len - 1 }));
+                        conn.browser
+                            .table
+                            .select(Some(if top { 0 } else { len - 1 }));
                     }
                 }
                 if let Some(id) = self.active_id() {
@@ -327,8 +341,8 @@ impl App {
     /// over-scroll just rests at the bottom.
     pub(super) fn scroll_value(&mut self, delta: i32) {
         if let Some(conn) = self.active_conn_mut() {
-            let next = conn.value_scroll as i32 + delta;
-            conn.value_scroll = next.clamp(0, u16::MAX as i32) as u16;
+            let next = conn.inspector.value_scroll as i32 + delta;
+            conn.inspector.value_scroll = next.clamp(0, u16::MAX as i32) as u16;
         }
     }
 

@@ -96,7 +96,7 @@ fn connection_info(conn: &Connection) -> String {
     match conn.caps.kind {
         BrokerKind::Redis => {
             let mut parts: Vec<String> = Vec::new();
-            if let Some(stats) = &conn.stats {
+            if let Some(stats) = &conn.dashboard.stats {
                 if let Some(version) = &stats.redis_version {
                     parts.push(format!("v{version}"));
                 }
@@ -164,7 +164,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // The view (sorted/grouped rows) is a cache derived from `keys`; if keys
     // were populated without a rebuild (it is always built on a SCAN page in
     // normal use), bring it up to date before rendering.
-    if conn.view.is_empty() && !conn.keys.is_empty() {
+    if conn.browser.view.is_empty() && !conn.browser.keys.is_empty() {
         conn.rebuild_view();
     }
 
@@ -195,23 +195,23 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // and fills what was dead space. Labels are dim, values inherit the bar's
     // foreground, and the db anchor is accented. A single `·` separates fields
     // for an even rhythm.
-    let sort_dir = if conn.sort_desc { "↓" } else { "↑" };
+    let sort_dir = if conn.browser.sort_desc { "↓" } else { "↑" };
     let left = Line::from(vec![
         Span::raw(" "),
         Span::styled("db ", theme.dim),
         Span::styled(conn.db.to_string(), theme.accent),
         Span::styled(" · ", theme.dim),
         Span::styled("match ", theme.dim),
-        Span::raw(conn.pattern.clone()),
+        Span::raw(conn.browser.pattern.clone()),
         Span::styled(" · ", theme.dim),
         Span::styled("sort ", theme.dim),
-        Span::raw(format!("{} {sort_dir}", conn.sort.label())),
+        Span::raw(format!("{} {sort_dir}", conn.browser.sort.label())),
     ]);
     let mut right = vec![
-        Span::raw(conn.keys.len().to_string()),
+        Span::raw(conn.browser.keys.len().to_string()),
         Span::styled(" keys", theme.dim),
     ];
-    if !conn.complete {
+    if !conn.browser.complete {
         right.push(Span::styled(" · scanning…", theme.accent));
     }
     right.push(Span::raw(" "));
@@ -240,25 +240,25 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // We therefore compute the scroll window ourselves and hand the widget just
     // that slice. The viewport excludes the two border rows and the one header
     // row.
-    let total = conn.view.len();
+    let total = conn.browser.view.len();
     let viewport = table_area.height.saturating_sub(3) as usize;
-    let selected = conn.table.selected();
-    // Track the scroll offset on `conn.table` so it persists across frames
+    let selected = conn.browser.table.selected();
+    // Track the scroll offset on `conn.browser.table` so it persists across frames
     // (the window only shifts when the selection would leave it, matching
     // ratatui's own follow behaviour) and so a shrunken view can't strand rows.
-    let offset = visible_offset(conn.table.offset(), selected, viewport, total);
-    *conn.table.offset_mut() = offset;
+    let offset = visible_offset(conn.browser.table.offset(), selected, viewport, total);
+    *conn.browser.table.offset_mut() = offset;
     let end = offset.saturating_add(viewport).min(total);
 
     // One rendered row per *visible* view entry: a styled, key-count-bearing
     // header for a group (with a fold marker), or a key with its type / TTL /
     // size. Keys are always grouped, so each key is indented under its prefix
     // header.
-    let rows: Vec<Row> = conn.view[offset..end]
+    let rows: Vec<Row> = conn.browser.view[offset..end]
         .iter()
         .filter_map(|vr| match vr {
             ViewRow::Group { prefix, count } => {
-                let marker = if conn.collapsed.contains(prefix) {
+                let marker = if conn.browser.collapsed.contains(prefix) {
                     "▸"
                 } else {
                     "▾"
@@ -280,7 +280,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             }
             // `get` rather than indexing: a stale view (keys mutated without a
             // rebuild) must skip the row, never panic.
-            ViewRow::Entry(i) => conn.keys.get(*i).map(|e| {
+            ViewRow::Entry(i) => conn.browser.keys.get(*i).map(|e| {
                 let ttl = match e.ttl {
                     Ttl::NoExpire => "—".to_string(),
                     Ttl::Seconds(s) => human_duration(s.max(0) as u64),
@@ -317,22 +317,22 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .highlight_symbol("▶ ");
     // The rows are already sliced to the window, so the widget gets a
     // viewport-local state: the selection rebased onto the slice and a zero
-    // offset. (The canonical selection/offset stay on `conn.table` above.)
+    // offset. (The canonical selection/offset stay on `conn.browser.table` above.)
     let mut win = TableState::default();
     win.select(selected.map(|s| s.saturating_sub(offset)));
     frame.render_stateful_widget(table, table_area, &mut win);
 
-    let title = match &conn.value_key {
+    let title = match &conn.inspector.value_key {
         Some(k) => format!(" {k} "),
         None => " Value ".to_string(),
     };
-    let value_lines = render_value(theme, conn.value.as_ref());
+    let value_lines = render_value(theme, conn.inspector.value.as_ref());
     // Clamp the scroll offset so paging can't run off the end of the value. The
     // bound uses logical line count (wrapping may split lines further, as the
     // console's scroll does too); inner height excludes the two border rows.
     let inner_h = value_area.height.saturating_sub(2) as usize;
     let max_scroll = value_lines.len().saturating_sub(inner_h) as u16;
-    conn.value_scroll = conn.value_scroll.min(max_scroll);
+    conn.inspector.value_scroll = conn.inspector.value_scroll.min(max_scroll);
     let value = Paragraph::new(value_lines)
         .block(
             Block::bordered()
@@ -341,7 +341,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
                 .border_style(theme.border),
         )
         .wrap(Wrap { trim: false })
-        .scroll((conn.value_scroll, 0));
+        .scroll((conn.inspector.value_scroll, 0));
     frame.render_widget(value, value_area);
 
     if let Some(panel_area) = panel_area {
@@ -374,7 +374,7 @@ fn server_stats_band(frame: &mut Frame, conn: &Connection, theme: &Theme, area: 
 
     // Stats arrive asynchronously after connect; until the first reply, hold the
     // band's height with a placeholder so the panes below don't jump.
-    let Some(stats) = conn.stats.as_ref() else {
+    let Some(stats) = conn.dashboard.stats.as_ref() else {
         frame.render_widget(
             Paragraph::new(Line::styled("Loading server stats…", theme.dim)).block(block),
             area,

@@ -250,17 +250,17 @@ async fn page_keys_scroll_value_pane_in_browser() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.screen = Screen::Browser;
-    assert_eq!(app.active_conn().unwrap().value_scroll, 0);
+    assert_eq!(app.active_conn().unwrap().inspector.value_scroll, 0);
     // PageDown scrolls the value pane down; repeated PageUp clamps at the top.
     app.apply(Action::PageDown);
     assert!(
-        app.active_conn().unwrap().value_scroll > 0,
+        app.active_conn().unwrap().inspector.value_scroll > 0,
         "PageDown scrolls the Browser value pane"
     );
     app.apply(Action::PageUp);
     app.apply(Action::PageUp);
     assert_eq!(
-        app.active_conn().unwrap().value_scroll,
+        app.active_conn().unwrap().inspector.value_scroll,
         0,
         "PageUp clamps at the top"
     );
@@ -341,7 +341,7 @@ async fn keys_page_extends_and_tracks_cursor() {
     let id = connect(&mut app, 1, "prod", 16).await;
     // The initial (foreground) scan was kicked off on connect; its pages
     // carry the current scan epoch.
-    let epoch = app.active_conn().unwrap().scan_epoch;
+    let epoch = app.active_conn().unwrap().browser.scan_epoch;
     app.handle_event(AppEvent::KeysPage {
         id,
         page: BrowsePage {
@@ -352,10 +352,10 @@ async fn keys_page_extends_and_tracks_cursor() {
         },
     });
     let conn = app.active_conn().unwrap();
-    assert_eq!(conn.keys.len(), 1);
-    assert_eq!(conn.next_cursor, 5);
-    assert!(!conn.complete);
-    assert!(conn.scanning, "scan still in progress mid-page");
+    assert_eq!(conn.browser.keys.len(), 1);
+    assert_eq!(conn.browser.next_cursor, 5);
+    assert!(!conn.browser.complete);
+    assert!(conn.browser.scanning, "scan still in progress mid-page");
 
     app.handle_event(AppEvent::KeysPage {
         id,
@@ -367,16 +367,16 @@ async fn keys_page_extends_and_tracks_cursor() {
         },
     });
     let conn = app.active_conn().unwrap();
-    assert_eq!(conn.keys.len(), 2, "second page appended");
-    assert!(conn.complete, "cursor 0 marks the scan complete");
-    assert!(!conn.scanning, "scan finished");
+    assert_eq!(conn.browser.keys.len(), 2, "second page appended");
+    assert!(conn.browser.complete, "cursor 0 marks the scan complete");
+    assert!(!conn.browser.scanning, "scan finished");
 }
 
 #[tokio::test]
 async fn keys_page_from_stale_db_is_ignored() {
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
-    let epoch = app.active_conn().unwrap().scan_epoch;
+    let epoch = app.active_conn().unwrap().browser.scan_epoch;
     app.connections[0].db = 1;
     app.handle_event(AppEvent::KeysPage {
         id,
@@ -387,7 +387,7 @@ async fn keys_page_from_stale_db_is_ignored() {
             epoch,
         },
     });
-    assert!(app.active_conn().unwrap().keys.is_empty());
+    assert!(app.active_conn().unwrap().browser.keys.is_empty());
 }
 
 #[tokio::test]
@@ -396,7 +396,12 @@ async fn keys_page_from_superseded_scan_is_ignored() {
     let id = connect(&mut app, 1, "prod", 16).await;
     // A page stamped with an older epoch (e.g. from a scan abandoned when
     // the user changed the filter) must not contaminate the current scan.
-    let stale_epoch = app.active_conn().unwrap().scan_epoch.wrapping_sub(1);
+    let stale_epoch = app
+        .active_conn()
+        .unwrap()
+        .browser
+        .scan_epoch
+        .wrapping_sub(1);
     app.handle_event(AppEvent::KeysPage {
         id,
         page: BrowsePage {
@@ -407,7 +412,7 @@ async fn keys_page_from_superseded_scan_is_ignored() {
         },
     });
     assert!(
-        app.active_conn().unwrap().keys.is_empty(),
+        app.active_conn().unwrap().browser.keys.is_empty(),
         "page from a superseded scan is dropped"
     );
 }
@@ -415,7 +420,7 @@ async fn keys_page_from_superseded_scan_is_ignored() {
 /// Completes the connection's initial (foreground) scan with `entries`,
 /// leaving the browser idle and showing those keys.
 fn finish_initial_scan(app: &mut App, id: ConnId, entries: Vec<EntryMeta>) {
-    let epoch = app.active_conn().unwrap().scan_epoch;
+    let epoch = app.active_conn().unwrap().browser.scan_epoch;
     app.handle_event(AppEvent::KeysPage {
         id,
         page: BrowsePage {
@@ -425,8 +430,8 @@ fn finish_initial_scan(app: &mut App, id: ConnId, entries: Vec<EntryMeta>) {
             epoch,
         },
     });
-    assert!(app.active_conn().unwrap().complete);
-    assert!(!app.active_conn().unwrap().scanning);
+    assert!(app.active_conn().unwrap().browser.complete);
+    assert!(!app.active_conn().unwrap().browser.scanning);
 }
 
 #[test]
@@ -455,7 +460,7 @@ async fn navigation_does_not_trigger_a_scan() {
             stream_entry("c", ValueType::String),
         ],
     );
-    let epoch_after_load = app.active_conn().unwrap().scan_epoch;
+    let epoch_after_load = app.active_conn().unwrap().browser.scan_epoch;
 
     // Spamming up/down must only move the highlight — the whole point of the
     // change: the key set never re-fetches as a side effect of navigating.
@@ -466,10 +471,13 @@ async fn navigation_does_not_trigger_a_scan() {
     }
     let conn = app.active_conn().unwrap();
     assert_eq!(
-        conn.scan_epoch, epoch_after_load,
+        conn.browser.scan_epoch, epoch_after_load,
         "navigation must not start a scan"
     );
-    assert!(!conn.scanning, "navigation must not leave a scan running");
+    assert!(
+        !conn.browser.scanning,
+        "navigation must not leave a scan running"
+    );
 }
 
 #[tokio::test]
@@ -477,7 +485,7 @@ async fn tick_auto_refreshes_keys_independently_of_navigation() {
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
     finish_initial_scan(&mut app, id, vec![stream_entry("a", ValueType::String)]);
-    let epoch_before = app.active_conn().unwrap().scan_epoch;
+    let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
     // With auto-refresh due every tick and the browser on screen, one tick
     // starts a fresh background scan on its own — no key was pressed.
@@ -486,13 +494,13 @@ async fn tick_auto_refreshes_keys_independently_of_navigation() {
     app.on_tick();
     let conn = app.active_conn().unwrap();
     assert_eq!(
-        conn.scan_epoch,
+        conn.browser.scan_epoch,
         epoch_before + 1,
         "the tick started a new scan"
     );
-    assert!(conn.scanning, "background scan in progress");
+    assert!(conn.browser.scanning, "background scan in progress");
     assert!(
-        !conn.scan_live,
+        !conn.browser.scan_live,
         "auto-refresh stages into scan_buf rather than clearing the list"
     );
 }
@@ -502,7 +510,7 @@ async fn auto_refresh_is_disabled_when_interval_is_zero() {
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
     finish_initial_scan(&mut app, id, vec![]);
-    let epoch_before = app.active_conn().unwrap().scan_epoch;
+    let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
     app.screen = Screen::Browser;
     app.browse_refresh_ticks = 0; // disabled
@@ -510,7 +518,7 @@ async fn auto_refresh_is_disabled_when_interval_is_zero() {
         app.on_tick();
     }
     assert_eq!(
-        app.active_conn().unwrap().scan_epoch,
+        app.active_conn().unwrap().browser.scan_epoch,
         epoch_before,
         "no scans when auto-refresh is disabled"
     );
@@ -521,7 +529,7 @@ async fn auto_refresh_does_not_run_off_the_browser_screen() {
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
     finish_initial_scan(&mut app, id, vec![]);
-    let epoch_before = app.active_conn().unwrap().scan_epoch;
+    let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
     // Off the Browser (e.g. on the Recordings screen): re-scanning the
     // keyspace would be pointless work, so the auto-refresh holds off until
@@ -532,7 +540,7 @@ async fn auto_refresh_does_not_run_off_the_browser_screen() {
         app.on_tick();
     }
     assert_eq!(
-        app.active_conn().unwrap().scan_epoch,
+        app.active_conn().unwrap().browser.scan_epoch,
         epoch_before,
         "no background scan while off the Browser screen"
     );
@@ -555,8 +563,8 @@ async fn background_refresh_swaps_in_atomically_without_flicker() {
     app.screen = Screen::Browser;
     app.browse_refresh_ticks = 1;
     app.on_tick();
-    let refresh_epoch = app.active_conn().unwrap().scan_epoch;
-    assert!(app.active_conn().unwrap().scanning);
+    let refresh_epoch = app.active_conn().unwrap().browser.scan_epoch;
+    assert!(app.active_conn().unwrap().browser.scanning);
 
     // The first page of the refresh arrives, but the scan is not finished:
     // the visible list must stay exactly as it was — no empty frame, no
@@ -574,6 +582,7 @@ async fn background_refresh_swaps_in_atomically_without_flicker() {
         let visible: Vec<&str> = app
             .active_conn()
             .unwrap()
+            .browser
             .keys
             .iter()
             .map(|k| k.key.as_str())
@@ -596,13 +605,13 @@ async fn background_refresh_swaps_in_atomically_without_flicker() {
         },
     });
     let conn = app.active_conn().unwrap();
-    let visible: Vec<&str> = conn.keys.iter().map(|k| k.key.as_str()).collect();
+    let visible: Vec<&str> = conn.browser.keys.iter().map(|k| k.key.as_str()).collect();
     assert_eq!(
         visible,
         ["new1", "new2"],
         "fresh set swapped in atomically on completion"
     );
-    assert!(conn.complete);
+    assert!(conn.browser.complete);
 }
 
 #[tokio::test]
@@ -614,7 +623,7 @@ async fn changing_filter_clears_list_and_rescans() {
         id,
         vec![stream_entry("user:1", ValueType::String)],
     );
-    let epoch_before = app.active_conn().unwrap().scan_epoch;
+    let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
     // A filter change is a foreground rescan: the stale result is cleared at
     // once (the keys no longer match) and a new scan generation begins.
@@ -622,20 +631,26 @@ async fn changing_filter_clears_list_and_rescans() {
     app.apply_filter();
     let conn = app.active_conn().unwrap();
     assert!(
-        conn.keys.is_empty(),
+        conn.browser.keys.is_empty(),
         "foreground rescan clears the previous result immediately"
     );
-    assert!(conn.scanning, "a fresh scan is underway");
-    assert!(conn.scan_live, "filter change is a live (foreground) scan");
-    assert_eq!(conn.pattern, "*session*");
-    assert!(conn.scan_epoch > epoch_before, "new scan generation");
+    assert!(conn.browser.scanning, "a fresh scan is underway");
+    assert!(
+        conn.browser.scan_live,
+        "filter change is a live (foreground) scan"
+    );
+    assert_eq!(conn.browser.pattern, "*session*");
+    assert!(
+        conn.browser.scan_epoch > epoch_before,
+        "new scan generation"
+    );
 }
 
 #[tokio::test]
 async fn value_loaded_only_applies_to_current_key() {
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
-    app.connections[0].value_key = Some("k".into());
+    app.connections[0].inspector.value_key = Some("k".into());
 
     app.handle_event(AppEvent::ValueLoaded {
         id,
@@ -643,7 +658,7 @@ async fn value_loaded_only_applies_to_current_key() {
         value: ValueView::Missing,
     });
     assert!(
-        app.active_conn().unwrap().value.is_none(),
+        app.active_conn().unwrap().inspector.value.is_none(),
         "mismatch ignored"
     );
 
@@ -652,7 +667,10 @@ async fn value_loaded_only_applies_to_current_key() {
         key: "k".into(),
         value: ValueView::Missing,
     });
-    assert!(app.active_conn().unwrap().value.is_some(), "match applied");
+    assert!(
+        app.active_conn().unwrap().inspector.value.is_some(),
+        "match applied"
+    );
 }
 
 #[tokio::test]
@@ -669,6 +687,7 @@ async fn stats_updated_sets_stats() {
     assert_eq!(
         app.active_conn()
             .unwrap()
+            .dashboard
             .stats
             .as_ref()
             .unwrap()
@@ -840,7 +859,7 @@ fn profile_navigation_moves_and_clamps() {
 async fn browser_navigation_updates_selected_value() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.connections[0].keys = vec![
+    app.connections[0].browser.keys = vec![
         stream_entry("k0", ValueType::String),
         stream_entry("k1", ValueType::String),
         stream_entry("k2", ValueType::String),
@@ -849,18 +868,22 @@ async fn browser_navigation_updates_selected_value() {
     // Keys are always grouped, so row 0 is the "(no prefix)" header and the
     // keys follow: k0 at row 1, k1 at row 2. From k0, Down lands on k1 and
     // inspects it.
-    app.connections[0].table.select(Some(1));
+    app.connections[0].browser.table.select(Some(1));
     app.apply(Action::Down);
-    assert_eq!(app.connections[0].table.selected(), Some(2));
-    assert_eq!(app.connections[0].value_key.as_deref(), Some("k1"));
+    assert_eq!(app.connections[0].browser.table.selected(), Some(2));
+    assert_eq!(
+        app.connections[0].inspector.value_key.as_deref(),
+        Some("k1")
+    );
 }
 
 /// The key names of the Entry rows in a connection's current view order.
 fn view_keys(conn: &Connection) -> Vec<String> {
-    conn.view
+    conn.browser
+        .view
         .iter()
         .filter_map(|r| match r {
-            ViewRow::Entry(i) => Some(conn.keys[*i].key.clone()),
+            ViewRow::Entry(i) => Some(conn.browser.keys[*i].key.clone()),
             ViewRow::Group { .. } => None,
         })
         .collect()
@@ -870,7 +893,7 @@ async fn browser_with_keys(keys: Vec<EntryMeta>) -> (App, Receiver<AppEvent>) {
     let (mut app, rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.screen = Screen::Browser;
-    app.connections[0].keys = keys;
+    app.connections[0].browser.keys = keys;
     app.connections[0].rebuild_view();
     (app, rx)
 }
@@ -886,7 +909,7 @@ async fn browser_cycle_sort_changes_order() {
     .await;
     assert_eq!(view_keys(&app.connections[0]), ["a", "b"]);
     app.apply(Action::CycleSort);
-    assert_eq!(app.connections[0].sort.label(), "type");
+    assert_eq!(app.connections[0].browser.sort.label(), "type");
     assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
 }
 
@@ -898,7 +921,7 @@ async fn browser_toggle_sort_direction_reverses_order() {
     ])
     .await;
     app.apply(Action::ToggleSortDir);
-    assert!(app.connections[0].sort_desc);
+    assert!(app.connections[0].browser.sort_desc);
     assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
 }
 
@@ -913,13 +936,14 @@ async fn browser_view_is_always_grouped_with_headers() {
     // Keys are always grouped by prefix — there is no ungrouped mode — so two
     // group headers (cache, user) are present from the start.
     let groups = app.connections[0]
+        .browser
         .view
         .iter()
         .filter(|r| matches!(r, ViewRow::Group { .. }))
         .count();
     assert_eq!(groups, 2);
     // Rows: [cache hdr, cache:x, user hdr, user:1, user:2]. Select user:1.
-    app.connections[0].table.select(Some(3));
+    app.connections[0].browser.table.select(Some(3));
     assert_eq!(app.connections[0].selected().unwrap().key, "user:1");
     // A re-sort keeps the highlight on the same key (across the rebuild).
     app.apply(Action::CycleSort);
@@ -934,18 +958,18 @@ async fn browser_enter_collapses_and_expands_selected_group() {
     ])
     .await;
     // Always grouped: the first row is the "user" group header.
-    app.connections[0].table.select(Some(0));
+    app.connections[0].browser.table.select(Some(0));
     assert_eq!(
         app.connections[0].cursor_group_prefix().as_deref(),
         Some("user")
     );
 
     app.apply(Action::Enter); // collapse
-    assert!(app.connections[0].collapsed.contains("user"));
+    assert!(app.connections[0].browser.collapsed.contains("user"));
     assert!(view_keys(&app.connections[0]).is_empty(), "keys hidden");
 
     app.apply(Action::Enter); // expand
-    assert!(!app.connections[0].collapsed.contains("user"));
+    assert!(!app.connections[0].browser.collapsed.contains("user"));
     assert_eq!(view_keys(&app.connections[0]), ["user:1", "user:2"]);
 }
 
@@ -962,12 +986,12 @@ async fn browser_collapse_works_from_a_key_inside_the_group() {
     .await;
     // Always grouped — rows: [cache hdr, cache:x, user hdr, user:1, user:2].
     // Select user:2.
-    app.connections[0].table.select(Some(4));
+    app.connections[0].browser.table.select(Some(4));
     assert_eq!(app.connections[0].selected().unwrap().key, "user:2");
 
     app.apply(Action::ToggleCollapse); // Space, from inside the group
     assert!(
-        app.connections[0].collapsed.contains("user"),
+        app.connections[0].browser.collapsed.contains("user"),
         "the cursor's group folds even from a key row"
     );
     // The "user" keys are hidden; "cache:x" remains.
@@ -979,7 +1003,7 @@ async fn browser_collapse_works_from_a_key_inside_the_group() {
     );
 
     app.apply(Action::Enter); // expand again from the header
-    assert!(!app.connections[0].collapsed.contains("user"));
+    assert!(!app.connections[0].browser.collapsed.contains("user"));
     assert_eq!(
         view_keys(&app.connections[0]),
         ["cache:x", "user:1", "user:2"]
@@ -994,12 +1018,12 @@ async fn browser_selecting_group_header_requests_no_value() {
     ])
     .await;
     // Always grouped: row 0 is the "user" group header.
-    app.connections[0].table.select(Some(0)); // the group header
+    app.connections[0].browser.table.select(Some(0)); // the group header
     let id = app.active_id().unwrap();
     app.request_selected_value(id);
     // A group row is not a key, so nothing is inspected.
     assert!(app.connections[0].selected().is_none());
-    assert!(app.connections[0].value_key.is_none());
+    assert!(app.connections[0].inspector.value_key.is_none());
 }
 
 #[tokio::test]
@@ -1025,14 +1049,14 @@ async fn browser_resort_keeps_highlight_on_same_key() {
     .await;
     // Always grouped: "a" and "b" share the empty prefix, so row 0 is the
     // "(no prefix)" header and "a" (name-asc) is row 1.
-    app.connections[0].table.select(Some(1));
+    app.connections[0].browser.table.select(Some(1));
     assert_eq!(app.connections[0].selected().unwrap().key, "a");
     // Sorting by type reorders the group's keys to [b, a]; the highlight
     // follows "a", which is now the second key (row 2, after the header).
     app.apply(Action::CycleSort);
     assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
     assert_eq!(app.connections[0].selected().unwrap().key, "a");
-    assert_eq!(app.connections[0].table.selected(), Some(2));
+    assert_eq!(app.connections[0].browser.table.selected(), Some(2));
 }
 
 // -- change_db -----------------------------------------------------------
@@ -1068,15 +1092,24 @@ async fn apply_filter_builds_scan_patterns() {
 
     app.filter = "foo".into();
     app.apply_filter();
-    assert_eq!(app.connections[0].pattern, "*foo*", "plain text is wrapped");
+    assert_eq!(
+        app.connections[0].browser.pattern, "*foo*",
+        "plain text is wrapped"
+    );
 
     app.filter = "a*b".into();
     app.apply_filter();
-    assert_eq!(app.connections[0].pattern, "a*b", "globs pass through");
+    assert_eq!(
+        app.connections[0].browser.pattern, "a*b",
+        "globs pass through"
+    );
 
     app.filter = "   ".into();
     app.apply_filter();
-    assert_eq!(app.connections[0].pattern, "*", "blank means match-all");
+    assert_eq!(
+        app.connections[0].browser.pattern, "*",
+        "blank means match-all"
+    );
 }
 
 #[test]
@@ -1197,9 +1230,9 @@ async fn tail_anchor_typed_key_opens_stream_tail() {
 async fn tail_anchor_empty_submit_tails_selected_key() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.connections[0].keys = vec![stream_entry("events", ValueType::Stream)];
+    app.connections[0].browser.keys = vec![stream_entry("events", ValueType::Stream)];
     app.connections[0].rebuild_view();
-    app.connections[0].table.select(Some(1)); // row 0 is the group header
+    app.connections[0].browser.table.select(Some(1)); // row 0 is the group header
     focus_panel(&mut app, PanelTab::Tail);
     app.submit_subscribe(); // empty prompt → tail the selected stream
     let conn = app.active_conn().unwrap();
@@ -1527,10 +1560,10 @@ async fn tab_does_not_cycle_off_the_browser() {
 async fn tail_selected_key_starts_stream_tail() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.connections[0].keys = vec![stream_entry("orders", ValueType::Stream)];
+    app.connections[0].browser.keys = vec![stream_entry("orders", ValueType::Stream)];
     app.connections[0].rebuild_view();
     // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
-    app.connections[0].table.select(Some(1));
+    app.connections[0].browser.table.select(Some(1));
     app.tail_selected_key();
     assert_eq!(app.screen, Screen::Browser);
     assert_eq!(app.active_conn().unwrap().subs.len(), 1);
@@ -1544,10 +1577,10 @@ async fn tail_selected_key_starts_stream_tail() {
 async fn tail_selected_key_rejects_non_stream() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.connections[0].keys = vec![stream_entry("greeting", ValueType::String)];
+    app.connections[0].browser.keys = vec![stream_entry("greeting", ValueType::String)];
     app.connections[0].rebuild_view();
     // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
-    app.connections[0].table.select(Some(1));
+    app.connections[0].browser.table.select(Some(1));
     app.tail_selected_key();
     assert!(app.active_conn().unwrap().subs.is_empty());
     assert!(app
@@ -1562,7 +1595,7 @@ async fn tail_selected_key_rejects_non_stream() {
 async fn tail_selected_key_without_selection_errors() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.connections[0].keys.clear();
+    app.connections[0].browser.keys.clear();
     app.tail_selected_key();
     assert!(app
         .status
@@ -2095,7 +2128,7 @@ async fn amqp_tick_skips_stats_refresh() {
     connect_amqp(&mut app, 1, "mq").await;
     // Drain the connect-time events.
     while rx.try_recv().is_ok() {}
-    app.connections[0].stat_ticks = STATS_REFRESH_TICKS - 1;
+    app.connections[0].dashboard.stat_ticks = STATS_REFRESH_TICKS - 1;
     app.on_tick();
     // The mock's stats() succeeds, so a RefreshStats would surface as
     // StatsUpdated. Give the actor a moment, then assert none arrived.
