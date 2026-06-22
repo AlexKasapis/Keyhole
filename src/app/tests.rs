@@ -2327,6 +2327,38 @@ fn mouse_scroll_ignored_during_text_entry() {
     );
 }
 
+#[test]
+fn m_toggles_mouse_capture() {
+    let (mut app, _rx) = build_app(config_with(&["a"]), unique_config_path(), None);
+    // Capture starts on (matching `tui::init`).
+    assert!(app.mouse_capture());
+
+    app.handle_key(key(KeyCode::Char('m')));
+    assert!(!app.mouse_capture(), "first 'm' turns capture off");
+    let status = app.status.as_ref().expect("status set");
+    assert!(!status.is_error);
+    assert!(
+        status.message.contains("off"),
+        "status reports capture is off: {}",
+        status.message
+    );
+
+    app.handle_key(key(KeyCode::Char('m')));
+    assert!(app.mouse_capture(), "second 'm' turns capture back on");
+}
+
+#[test]
+fn m_is_literal_text_during_entry_not_a_toggle() {
+    let (mut app, _rx) = build_app(config_with(&["a"]), unique_config_path(), None);
+    app.mode = InputMode::Filter;
+    app.handle_key(key(KeyCode::Char('m')));
+    assert!(
+        app.mouse_capture(),
+        "'m' while typing must not toggle capture"
+    );
+    assert_eq!(app.filter, "m", "'m' is typed into the filter instead");
+}
+
 // -- pure helpers --------------------------------------------------------
 
 #[test]

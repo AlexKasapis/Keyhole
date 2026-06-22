@@ -19,8 +19,22 @@ pub fn init() -> Tui {
     install_panic_hook();
     let terminal = ratatui::init();
     // Best-effort: a terminal without mouse support just yields no mouse events.
-    let _ = execute!(stdout(), EnableMouseCapture);
+    // Capture can be toggled off at runtime (see `set_mouse_capture`) to hand the
+    // terminal's own text selection back to the user.
+    set_mouse_capture(true);
     terminal
+}
+
+/// Turn mouse capture on or off mid-session. Capture lets the UI react to the
+/// scroll wheel but suppresses the terminal's own click-drag text selection;
+/// turning it off hands selection (and copy) back to the user. Best-effort: a
+/// terminal without mouse support simply ignores the request.
+pub fn set_mouse_capture(enabled: bool) {
+    if enabled {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    } else {
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
 }
 
 /// Disable mouse capture, leave the alternate screen, and disable raw mode.

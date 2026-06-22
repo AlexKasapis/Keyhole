@@ -172,6 +172,18 @@ impl App {
                 }
             }
             Action::ToggleHelp => self.show_help = !self.show_help,
+            // Flip the desired capture state and report it; the render loop
+            // applies the change to the real terminal (keeping terminal I/O out
+            // of `App`). Off hands native text selection back to the user.
+            Action::ToggleMouse => {
+                self.mouse_capture = !self.mouse_capture;
+                let msg = if self.mouse_capture {
+                    "Mouse capture on — scroll wheel scrolls (text selection off)"
+                } else {
+                    "Mouse capture off — drag to select/copy text (scroll wheel off)"
+                };
+                self.set_status(msg.to_string(), false);
+            }
         }
     }
 

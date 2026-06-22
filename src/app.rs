@@ -102,6 +102,11 @@ pub struct App {
     /// error). See [`Self::conn_health`].
     pub(crate) health: ConnHealth,
     pub(crate) show_help: bool,
+    /// Whether terminal mouse capture is on. While on, the scroll wheel scrolls
+    /// lists/panes; while off, the terminal's own text selection (and copy)
+    /// works. Toggled with `m`. The render loop reconciles the real terminal
+    /// state from this flag, so `App` stays free of terminal I/O.
+    pub(crate) mouse_capture: bool,
     pub(crate) recordings: Vec<RecordingFile>,
     pub(crate) recordings_state: ListState,
     /// Cached preview of the selected recording: `(file name, parsed head)`.
@@ -164,6 +169,8 @@ impl App {
             status: None,
             health: ConnHealth::Offline,
             show_help: false,
+            // Capture starts on, matching `tui::init`.
+            mouse_capture: true,
             recordings: Vec::new(),
             recordings_state: ListState::default(),
             recording_preview: None,
@@ -198,6 +205,12 @@ impl App {
     /// True if a profile of this name currently has an open connection.
     pub fn is_connected(&self, name: &str) -> bool {
         self.connections.iter().any(|c| c.name == name)
+    }
+
+    /// Whether the app wants terminal mouse capture on. The render loop reads
+    /// this to reconcile the real terminal state (see `crate::tui`).
+    pub fn mouse_capture(&self) -> bool {
+        self.mouse_capture
     }
 
     /// Connection health for the header indicator. An active connection always

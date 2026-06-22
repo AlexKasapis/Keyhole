@@ -138,6 +138,10 @@ async fn run(
     drop(tx);
     app.on_start();
 
+    // Tracks the mouse-capture state actually applied to the terminal, so we
+    // only issue an escape sequence when the app's desired state changes.
+    // `tui::init` enabled capture, so they start in agreement.
+    let mut mouse_capture = true;
     while app.running {
         terminal
             .draw(|frame| ui::render(frame, &mut app))
@@ -145,6 +149,12 @@ async fn run(
         match rx.recv().await {
             Some(event) => app.handle_event(event),
             None => break,
+        }
+        // Reconcile the terminal with the app's desired capture state. The app
+        // never touches the terminal itself, which keeps it fully testable.
+        if app.mouse_capture() != mouse_capture {
+            mouse_capture = app.mouse_capture();
+            tui::set_mouse_capture(mouse_capture);
         }
     }
 

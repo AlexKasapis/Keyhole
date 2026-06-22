@@ -49,6 +49,9 @@ pub enum Action {
     /// the Recordings screen. No longer refreshes the key list.
     Refresh,
     ToggleHelp,
+    /// Toggle terminal mouse capture. With capture on the scroll wheel scrolls;
+    /// with it off the terminal's own text selection (and copy) works again.
+    ToggleMouse,
 }
 
 /// Translate a key event into an [`Action`], if bound.
@@ -81,6 +84,7 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('z')) => Some(Action::ToggleAllGroups),
         (false, Char(' ')) => Some(Action::ToggleCollapse),
         (false, Char('r')) => Some(Action::Refresh),
+        (false, Char('m')) => Some(Action::ToggleMouse),
         (false, Char('?')) => Some(Action::ToggleHelp),
         (false, Esc) => Some(Action::Back),
         _ => None,
@@ -128,6 +132,7 @@ mod tests {
         assert_eq!(plain(Char('z')), Some(Action::ToggleAllGroups));
         assert_eq!(plain(Char(' ')), Some(Action::ToggleCollapse));
         assert_eq!(plain(Char('r')), Some(Action::Refresh));
+        assert_eq!(plain(Char('m')), Some(Action::ToggleMouse));
         assert_eq!(plain(Char('?')), Some(Action::ToggleHelp));
     }
 
@@ -163,9 +168,10 @@ mod tests {
         assert_eq!(plain(Char('w')), None, "'w' is unbound: no Realtime screen");
         // The former tail-management keys are gone: the panel's tabs are a fixed
         // set, each driven from within its own subpanel and reached only by
-        // Tab / Shift-Tab. `s`/`m`/`K` started tails, `i` entered the console,
-        // and `t` tailed the selected key — all now unbound.
-        for c in ['s', 'm', 'K', 'i', 't'] {
+        // Tab / Shift-Tab. `s`/`K` started tails, `i` entered the console, and
+        // `t` tailed the selected key — all now unbound. (`m`, once a tail key,
+        // is now the mouse-capture toggle — see `every_normal_binding_maps`.)
+        for c in ['s', 'K', 'i', 't'] {
             assert_eq!(
                 plain(Char(c)),
                 None,

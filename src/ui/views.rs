@@ -1120,6 +1120,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  a add connection   ? toggle help   Esc back   Ctrl-c quit"),
+        Line::from("  m toggle mouse capture (off = select/copy text)"),
     ];
     // Grow the overlay with its content (lines + 2 borders) so no row is
     // clipped, capped to the available height.

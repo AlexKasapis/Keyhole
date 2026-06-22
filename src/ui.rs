@@ -1116,7 +1116,7 @@ mod tests {
         let (mut app, _rx) = test_app();
         pin_clock(&mut app);
         app.show_help = true;
-        insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 32));
+        insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 33));
     }
 
     #[tokio::test]
