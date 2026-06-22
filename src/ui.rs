@@ -5,11 +5,12 @@
 mod views;
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, InputMode, Screen};
+use crate::app::{App, ConnHealth, InputMode, Screen};
 use crate::broker::BrokerKind;
 use crate::theme::Theme;
 
@@ -28,7 +29,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.screen {
         Screen::Connections => views::connections(frame, app, &theme, body_area),
         Screen::Browser => views::browser(frame, app, &theme, body_area),
-        Screen::Realtime => views::realtime(frame, app, &theme, body_area),
         Screen::Recordings => views::recordings(frame, app, &theme, body_area),
     }
     render_footer(frame, app, &theme, footer_area);
@@ -43,8 +43,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    // The right side carries the connection indicator (a coloured dot + word)
+    // followed by the clock, right-aligned. The column is wide enough for the
+    // longest label ("connecting") so nothing clips.
     let [left, right] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(13)]).areas(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(30)]).areas(area);
 
     let active = app
         .active_conn()
@@ -53,7 +56,6 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let screen = match app.screen {
         Screen::Connections => "connections",
         Screen::Browser => "browser",
-        Screen::Realtime => "realtime",
         Screen::Recordings => "recordings",
     };
     let line = Line::from(vec![
@@ -63,12 +65,33 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled(format!("  · {screen}"), theme.dim),
     ]);
     frame.render_widget(Paragraph::new(line).style(theme.status_bar), left);
+
+    let (dot, label, dot_style) = conn_indicator(app, theme);
+    let right_line = Line::from(vec![
+        Span::styled(format!("{dot} "), dot_style),
+        Span::raw(format!("{label}   ")),
+        Span::raw(format!("{} ", clock(app))),
+    ]);
     frame.render_widget(
-        Paragraph::new(Line::from(format!("{} ", clock(app))))
+        Paragraph::new(right_line)
             .alignment(Alignment::Right)
             .style(theme.status_bar),
         right,
     );
+}
+
+/// The header connection indicator: a status-dot glyph, a one-word label, and
+/// the style that colours the dot to convey connection health at a glance.
+/// A filled `●` marks any live or transitional state; a dim hollow `○` marks
+/// having no connection. The word keeps the state legible under `NO_COLOR`,
+/// where the dot colours collapse to modifiers.
+fn conn_indicator(app: &App, theme: &Theme) -> (&'static str, &'static str, Style) {
+    match app.conn_health() {
+        ConnHealth::Connected => ("●", "connected", theme.success),
+        ConnHealth::Connecting => ("●", "connecting", theme.warning),
+        ConnHealth::Error => ("●", "error", theme.error),
+        ConnHealth::Offline => ("○", "offline", theme.dim),
+    }
 }
 
 fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -166,25 +189,20 @@ fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
             ("app", "? help · Esc Esc quit"),
         ],
         // Keys are always grouped by prefix, so the footer always offers the
-        // collapse/expand controls — there is no grouping toggle.
+        // collapse/expand controls — there is no grouping toggle. The bottom
+        // panel (Console + live tails) is cycled with Tab / Shift-Tab.
         Screen::Browser => vec![
             ("nav", "↑↓ keys · [ ] db"),
             ("groups", "⏎/Space collapse · z all"),
-            ("view", "/ filter · o sort · O dir"),
-            ("data", "i cmd · t tail · r refresh"),
-            ("go", "c conns · w realtime · R recordings"),
-            ("app", "? help · Esc back"),
-        ],
-        Screen::Realtime => vec![
-            ("nav", "↑↓ scroll · Tab tab · G follow"),
-            ("tails", "s sub · m monitor · r rec · x stop"),
-            ("go", "c conns · b browser · R recordings"),
+            ("view", "/ filter · o sort · O dir · r refresh"),
+            ("panel", "Tab tabs · i cmd · s/m/K/t tail · x stop · r rec"),
+            ("go", "c conns · R recordings"),
             ("app", "? help · Esc back"),
         ],
         Screen::Recordings => vec![
             ("nav", "↑↓ move"),
             ("rec", "r rescan"),
-            ("go", "c conns · b browser · w realtime"),
+            ("go", "c conns · b browser"),
             ("app", "? help · Esc back"),
         ],
     }
@@ -277,6 +295,57 @@ mod tests {
     }
 
     #[test]
+    fn conn_indicator_maps_each_health_to_dot_word_and_colour() {
+        // The glyph/word/colour triple must be distinct per state: a filled dot
+        // for live or transitional states, a dim hollow one only when there is
+        // no connection. The word keeps states legible without colour.
+        let (mut app, _rx) = test_app();
+        let theme = app.theme;
+        let cases = [
+            (ConnHealth::Connecting, "●", "connecting", theme.warning),
+            (ConnHealth::Error, "●", "error", theme.error),
+            (ConnHealth::Offline, "○", "offline", theme.dim),
+            (ConnHealth::Connected, "●", "connected", theme.success),
+        ];
+        for (health, glyph, label, style) in cases {
+            // With no active connection, `conn_health` returns this field as-is,
+            // so each branch of `conn_indicator` is exercised.
+            app.health = health;
+            assert_eq!(
+                conn_indicator(&app, &theme),
+                (glyph, label, style),
+                "{health:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn header_connection_indicator_renders_in_the_top_right() {
+        // Offline: a hollow dim dot and the "offline" word render in the header.
+        let (mut app, _rx) = test_app();
+        assert!(screen_text(&mut app).contains("○ offline"));
+
+        // Connected: a filled dot and "connected", and the offline word is gone.
+        let handle = mock::handle(1, "prod", 16).await;
+        app.connections.push(Connection::new(handle));
+        app.active = Some(0);
+        app.health = ConnHealth::Connected;
+        let text = screen_text(&mut app);
+        assert!(text.contains("● connected"));
+        assert!(
+            !text.contains("offline"),
+            "offline label gone once connected"
+        );
+
+        // Dropped: the dot turns to the red "error" state.
+        app.handle_event(AppEvent::Disconnected {
+            id: crate::broker::ConnId(1),
+            reason: "bye".into(),
+        });
+        assert!(screen_text(&mut app).contains("● error"));
+    }
+
+    #[test]
     fn footer_reflects_filter_mode() {
         let (mut app, _rx) = test_app();
         app.mode = InputMode::Filter;
@@ -297,8 +366,7 @@ mod tests {
         // so nothing clips. The section labels and a key from each must appear.
         let cases = [
             (Screen::Connections, ["nav", "conn", "app"], "Enter connect"),
-            (Screen::Browser, ["nav", "view", "data"], "/ filter"),
-            (Screen::Realtime, ["nav", "tails", "app"], "m monitor"),
+            (Screen::Browser, ["nav", "view", "panel"], "/ filter"),
             (Screen::Recordings, ["nav", "rec", "app"], "r rescan"),
         ];
         for (screen, labels, key) in cases {
@@ -326,9 +394,8 @@ mod tests {
         // group, and the "app" group always offers help.
         let expected_go = [
             (Screen::Connections, vec!["recordings"]),
-            (Screen::Browser, vec!["conns", "realtime", "recordings"]),
-            (Screen::Realtime, vec!["conns", "browser", "recordings"]),
-            (Screen::Recordings, vec!["conns", "browser", "realtime"]),
+            (Screen::Browser, vec!["conns", "recordings"]),
+            (Screen::Recordings, vec!["conns", "browser"]),
         ];
         for (screen, targets) in expected_go {
             let (mut app, _rx) = test_app();
@@ -380,6 +447,12 @@ mod tests {
         assert!(text.contains("collapse"), "and advertises collapse/expand");
         assert!(!text.contains("p group"), "no `p group` toggle");
         assert!(!text.contains("ungroup"), "no `p ungroup` toggle");
+        // The bottom panel (Console + tails) is advertised, cycled with Tab.
+        assert!(text.contains("panel"), "browser footer has a panel section");
+        assert!(
+            text.contains("Tab tabs"),
+            "and advertises Tab to cycle tabs"
+        );
     }
 
     // -- connections screen --------------------------------------------------
@@ -393,15 +466,13 @@ mod tests {
     // -- placeholder screens with no connection ------------------------------
 
     #[test]
-    fn data_screens_render_no_connection_placeholders() {
-        for screen in [Screen::Browser, Screen::Realtime] {
-            let (mut app, _rx) = test_app();
-            app.screen = screen;
-            assert!(
-                screen_text(&mut app).contains("No active connection"),
-                "{screen:?} should show a placeholder"
-            );
-        }
+    fn browser_renders_no_connection_placeholder() {
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Browser;
+        assert!(
+            screen_text(&mut app).contains("No active connection"),
+            "the Browser should show a placeholder without a connection"
+        );
     }
 
     #[test]
@@ -745,9 +816,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn realtime_renders_tail_with_events() {
+    async fn panel_renders_active_tail_with_events() {
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Browser;
         let mut sub = Subscription::new(1, SubSpec::Channel("news".into()), 100);
         sub.state = SubState::Active;
         for i in 0..5 {
@@ -759,16 +830,20 @@ mod tests {
             });
         }
         app.connections[0].subs.push(sub);
-        app.connections[0].active_sub = Some(0);
+        // Focus the tail's tab (tab 1; tab 0 is the Console).
+        app.connections[0].panel_tab = 1;
         let text = screen_text(&mut app);
-        assert!(text.contains("pubsub:news"), "the tab label should render");
-        assert!(text.contains("live"));
+        assert!(
+            text.contains("pubsub:news"),
+            "the tail tab label should render"
+        );
+        assert!(text.contains("live"), "the tail status row renders");
     }
 
     #[tokio::test]
-    async fn realtime_renders_paused_and_recording_indicators() {
+    async fn panel_tail_renders_paused_and_recording_indicators() {
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Browser;
         let mut sub = Subscription::new(1, SubSpec::Channel("c".into()), 100);
         sub.state = SubState::Active;
         for i in 0..10 {
@@ -779,7 +854,7 @@ mod tests {
                 meta: Vec::new(),
             });
         }
-        // Scrolled up into history, with recording on.
+        // Paused (scrolled off newest) with recording on.
         sub.follow = false;
         sub.offset = 3;
         sub.recording = RecordState::On {
@@ -788,52 +863,37 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/r.jsonl"),
         };
         app.connections[0].subs.push(sub);
-        app.connections[0].active_sub = Some(0);
+        app.connections[0].panel_tab = 1;
         let text = screen_text(&mut app);
         assert!(text.contains("paused"));
         assert!(text.contains("REC"));
     }
 
     #[tokio::test]
-    async fn realtime_with_no_tails_shows_hint() {
+    async fn panel_tab_strip_lists_console_and_tails() {
+        // The Console tab is always present; each live tail adds a tab. The strip
+        // shows both even when the Console tab is the active one.
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Browser;
+        let sub = Subscription::new(1, SubSpec::Channel("news".into()), 100);
+        app.connections[0].subs.push(sub);
+        app.connections[0].panel_tab = 0; // Console active
         let text = screen_text(&mut app);
-        assert!(text.contains("No live tails"));
-        // A Redis connection's hint mentions pub/sub and offers the stream shortcut.
-        assert!(text.contains("pubsub:"));
-        assert!(text.contains("stream key in the Browser"));
+        assert!(text.contains("Console"), "the Console tab is listed");
+        assert!(text.contains("pubsub:news"), "the tail tab is listed too");
     }
 
     #[tokio::test]
-    async fn realtime_hint_is_exchange_for_rabbitmq() {
-        let (mut app, _rx) = test_app();
-        let handle = mock::rabbitmq_handle(1, "rmq").await;
-        app.connections.push(Connection::new(handle));
-        app.active = Some(0);
-        app.screen = Screen::Realtime;
-        let text = screen_text(&mut app);
-        assert!(text.contains("No live tails"));
-        // RabbitMQ taps exchanges, so the hint points at the exchange spec rather
-        // than Redis pub/sub — and there is no Browser stream shortcut.
-        assert!(
-            text.contains("exchange:"),
-            "rabbitmq realtime hint: {text:?}"
-        );
-        assert!(!text.contains("stream key in the Browser"));
-    }
-
-    #[tokio::test]
-    async fn realtime_renders_keyspace_notice_banner() {
+    async fn panel_renders_keyspace_notice_banner() {
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Browser;
         let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
         sub.state = SubState::Active;
         sub.notice = Some("keyspace notifications are disabled".into());
         app.connections[0].subs.push(sub);
-        app.connections[0].active_sub = Some(0);
+        app.connections[0].panel_tab = 1;
         let text = screen_text(&mut app);
-        assert!(text.contains("keyspace:db0"), "the tab label renders");
+        assert!(text.contains("keyspace:db0"), "the tail tab label renders");
         assert!(text.contains("disabled"), "the notice banner renders");
     }
 
@@ -868,9 +928,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_without_console_capability_hides_console_band() {
+    async fn browser_without_console_capability_hides_bottom_panel() {
         // An AMQP broker has no console, so the Browser (were it reachable) must
-        // not draw a console band. Force the screen to prove the capability gate.
+        // not draw the bottom panel at all. Force the screen to prove the gate.
         let (mut app, _rx) = test_app();
         let handle = mock::amqp_handle(1, "mq").await;
         app.connections.push(Connection::new(handle));
@@ -879,7 +939,11 @@ mod tests {
         let text = screen_text(&mut app);
         assert!(
             !text.contains("read-only"),
-            "no console band for a broker without a console"
+            "no console/panel for a broker without a console"
+        );
+        assert!(
+            !text.contains("Console"),
+            "no Console tab for a broker without a console"
         );
     }
 
@@ -992,8 +1056,9 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_browser_with_console() {
-        // The read-only console is now an always-visible band pinned to the
-        // bottom of the Browser (the former standalone Console screen).
+        // The read-only console is the first tab of the always-visible bottom
+        // panel (the former standalone Console screen). With no tails open, the
+        // tab strip shows just the Console tab.
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
@@ -1059,27 +1124,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_realtime_keyspace_notice() {
+    async fn snapshot_browser_panel_keyspace_notice() {
+        // A keyspace tail focused in the Browser's bottom panel, showing the tab
+        // strip (Console + the tail) and the advisory notice banner.
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Browser;
+        app.connections[0].keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].complete = true;
+        app.connections[0].table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
         sub.state = SubState::Active;
         sub.notice =
             Some("keyspace notifications are disabled (notify-keyspace-events is empty)".into());
         app.connections[0].subs.push(sub);
-        app.connections[0].active_sub = Some(0);
-        insta::assert_snapshot!("realtime_keyspace_notice", render_lines(&mut app, 90, 18));
+        app.connections[0].panel_tab = 1;
+        insta::assert_snapshot!(
+            "browser_panel_keyspace_notice",
+            render_lines(&mut app, 90, 26)
+        );
     }
 
     #[tokio::test]
-    async fn snapshot_realtime_tail_recording() {
-        // A live tail mid-scrollback with recording on: exercises the redesigned
-        // status row, where the state + event tally sit flush left and the REC /
-        // paused indicators are pinned to the right edge.
+    async fn snapshot_browser_panel_tail_recording() {
+        // A live tail focused in the bottom panel with recording on: exercises the
+        // tab strip plus the status row, where the state + event tally sit flush
+        // left and the REC / paused indicators are pinned to the right edge.
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Browser;
+        app.connections[0].keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].complete = true;
+        app.connections[0].table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Channel("orders".into()), 100);
         sub.state = SubState::Active;
         for i in 0..6 {
@@ -1090,7 +1166,7 @@ mod tests {
                 meta: Vec::new(),
             });
         }
-        // Scrolled up into history with recording active → paused + REC both show.
+        // Paused (scrolled off newest) with recording active → paused + REC show.
         sub.follow = false;
         sub.offset = 2;
         sub.recording = RecordState::On {
@@ -1099,7 +1175,10 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/orders.jsonl"),
         };
         app.connections[0].subs.push(sub);
-        app.connections[0].active_sub = Some(0);
-        insta::assert_snapshot!("realtime_tail_recording", render_lines(&mut app, 90, 14));
+        app.connections[0].panel_tab = 1;
+        insta::assert_snapshot!(
+            "browser_panel_tail_recording",
+            render_lines(&mut app, 90, 26)
+        );
     }
 }

@@ -8,29 +8,29 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │  Enter connect (Connections)   Esc step back / quit            │           │
 │           │                                                                │           │
 │           │Screens                                                         │           │
-│           │  c connections  b browser  w realtime  R recordings            │           │
+│           │  c connections  b browser  R recordings                        │           │
 │           │                                                                │           │
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │
-│           │  the read-only console (Redis) is a band along the bottom      │           │
 │           │  / filter   [ ] change DB   r refresh (keys auto-refresh)      │           │
 │           │  o sort column   O direction                                   │           │
 │           │  keys are always grouped by prefix into collapsible sections   │           │
 │           │  Enter/Space collapse/expand group (from header or key)        │           │
 │           │  z fold/unfold all groups                                      │           │
 │           │  PgUp/PgDn (or Ctrl-u/d) scroll the value pane                 │           │
-│           │  t tail selected stream    s subscribe (pub/sub or stream)     │           │
 │           │                                                                │           │
-│           │Realtime tails                                                  │           │
-│           │  s subscribe   m MONITOR   K keyspace   Tab/[ ] switch tab   x │           │
-│           │  ↑↓ scroll   G follow newest   r toggle recording              │           │
+│           │Bottom panel (Redis)                                            │           │
+│           │  a tabbed panel along the bottom: Console first, then one tab p│           │
+│           │  Tab / Shift-Tab cycle the tabs                                │           │
+│           │  s subscribe (pub/sub or stream)   m MONITOR   K keyspace      │           │
+│           │  t tail the selected stream key    x stop the focused tail     │           │
+│           │  r records on a tail tab (refreshes keys on the Console tab)   │           │
 │           │  spec: pubsub:ch · psub:ch.* · stream:key · keyspace[:N] · moni│           │
 │           │                                                                │           │
-│           │Console (read-only, Browser band)                               │           │
+│           │Console tab (read-only)                                         │           │
 │           │  i type a command   Enter run   ↑↓ history   PgUp/PgDn scroll  │           │
 │           │  Ctrl-L clear   writes and admin commands are refused          │           │
 │           │                                                                │           │
 │           │General                                                         │           │
-│           │  a add connection   ? toggle help   Esc back   Ctrl-c quit     │           │
-└───────────└────────────────────────────────────────────────────────────────┘───────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ go R recordings │ app ? help · Esc Esc quit
+└───────────│  a add connection   ? toggle help   Esc back   Ctrl-c quit     │───────────┘
+  nav ↑↓ mov└────────────────────────────────────────────────────────────────┘c Esc quit

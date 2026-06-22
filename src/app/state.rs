@@ -21,11 +21,11 @@ pub enum Screen {
     /// Key browser + value inspector for the active connection. For brokers with
     /// server statistics (Redis) it also carries a compact stats band up top —
     /// the former standalone Dashboard, now merged into this main panel. Brokers
-    /// with a read-only command console (Redis) also carry an always-visible
-    /// console band pinned to the bottom — the former standalone Console screen.
+    /// with a read-only command console (Redis) also carry a tabbed panel pinned
+    /// to the bottom: the read-only command console plus one tab per live tail
+    /// (pub/sub, streams, keyspace, MONITOR) — the former standalone Console and
+    /// Realtime screens, now folded in and cycled with Tab / Shift-Tab.
     Browser,
-    /// Live tails (pub/sub, streams, keyspace, MONITOR) for the active connection.
-    Realtime,
     /// On-disk recordings.
     Recordings,
 }
@@ -46,6 +46,20 @@ pub enum InputMode {
 pub struct Status {
     pub message: String,
     pub is_error: bool,
+}
+
+/// Health of the active broker connection, surfaced as a coloured dot in the
+/// header's top-right corner. `Connected` is derived from whether a connection
+/// is active (see [`crate::app::App::conn_health`]); the remaining variants
+/// describe the no-connection situation — nothing started yet (`Offline`), a
+/// connect in flight (`Connecting`), or a failed attempt / dropped connection
+/// (`Error`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnHealth {
+    Offline,
+    Connecting,
+    Connected,
+    Error,
 }
 
 /// Lifecycle of a subscription/tail tab.
@@ -423,10 +437,13 @@ pub struct Connection {
     pub stat_ticks: u32,
     /// Ticks elapsed since the last automatic key-browser refresh.
     pub browse_ticks: u32,
-    /// Live tails for this connection (Realtime screen tabs).
+    /// Live tails for this connection, shown as tabs in the Browser's bottom
+    /// panel (after the Console tab).
     pub subs: Vec<Subscription>,
-    /// Index into `subs` of the focused tail.
-    pub active_sub: Option<usize>,
+    /// Active tab in the Browser's bottom panel: `0` is the read-only Console,
+    /// and `1..=subs.len()` select `subs[panel_tab - 1]`. Cycled with Tab /
+    /// Shift-Tab. (Replaces the former standalone Realtime screen's tab index.)
+    pub panel_tab: usize,
     /// Read-only command console state for this connection.
     pub console: Console,
     pub handle: ConnHandle,
@@ -462,7 +479,7 @@ impl Connection {
             stat_ticks: 0,
             browse_ticks: 0,
             subs: Vec::new(),
-            active_sub: None,
+            panel_tab: 0,
             console: Console::default(),
             handle,
         }
@@ -702,17 +719,40 @@ impl Connection {
         self.rebuild_view();
     }
 
-    /// The focused tail, if any.
-    pub fn active_subscription(&self) -> Option<&Subscription> {
-        self.active_sub.and_then(|i| self.subs.get(i))
+    /// Number of tabs in the Browser's bottom panel: the Console tab plus one
+    /// tab per live tail.
+    pub fn panel_tab_count(&self) -> usize {
+        1 + self.subs.len()
     }
 
-    /// The focused tail (mutable), if any.
-    pub fn active_subscription_mut(&mut self) -> Option<&mut Subscription> {
-        match self.active_sub {
-            Some(i) => self.subs.get_mut(i),
-            None => None,
-        }
+    /// True when the bottom panel's Console tab (tab `0`) is the active one.
+    pub fn panel_is_console(&self) -> bool {
+        self.panel_tab == 0
+    }
+
+    /// The tail shown in the bottom panel, if a tail tab (not the Console) is
+    /// active and still present. `panel_tab` of `0` is the Console; `n >= 1`
+    /// selects `subs[n - 1]`.
+    pub fn panel_subscription(&self) -> Option<&Subscription> {
+        self.panel_tab.checked_sub(1).and_then(|i| self.subs.get(i))
+    }
+
+    /// The focused tail, if any — alias for [`Self::panel_subscription`], kept
+    /// for the tail/recording call sites that don't care it lives in a panel.
+    pub fn active_subscription(&self) -> Option<&Subscription> {
+        self.panel_subscription()
+    }
+
+    /// Cycle the bottom panel's active tab by `delta`, wrapping around the
+    /// Console tab and the live tails.
+    pub fn cycle_panel(&mut self, delta: i32) {
+        let n = self.panel_tab_count() as i32;
+        self.panel_tab = (self.panel_tab as i32 + delta).rem_euclid(n) as usize;
+    }
+
+    /// Focus the bottom panel on the tail at `sub_idx` (an index into `subs`).
+    pub fn focus_tail(&mut self, sub_idx: usize) {
+        self.panel_tab = sub_idx + 1;
     }
 
     /// Find a tail by id (mutable).

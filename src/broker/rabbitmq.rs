@@ -1,8 +1,8 @@
 //! RabbitMQ (AMQP 0.9.1) implementation of [`BrokerConnection`], built on
 //! `lapin`. Works against every RabbitMQ version (3.x and 4.x).
 //!
-//! Read + record only, exactly like the AMQP 1.0 broker — so it reuses the same
-//! Realtime page (see [`Capabilities::rabbitmq`]). The one capability is a
+//! Read + record only, exactly like the AMQP 1.0 broker (see
+//! [`Capabilities::rabbitmq`]). The one capability is a
 //! **non-destructive exchange tap**:
 //!  1. declare a temporary, server-named, `exclusive` + `auto_delete` queue;
 //!  2. bind it to the target exchange with the requested binding key;

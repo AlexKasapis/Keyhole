@@ -109,9 +109,8 @@ impl BrokerKind {
     }
 
     /// A compact one-line hint of the source specs this broker accepts, shown in
-    /// the subscribe prompt and the empty Realtime view so the user knows what
-    /// to type. AMQP 1.0 and RabbitMQ share the Realtime page but tail different
-    /// kinds of destination, so the hint is broker-specific.
+    /// the subscribe prompt so the user knows what to type. The brokers tail
+    /// different kinds of destination, so the hint is broker-specific.
     pub fn sub_spec_hint(self) -> &'static str {
         match self {
             BrokerKind::Redis => "pubsub:ch · psub:ch.* · stream:key · keyspace · monitor",
@@ -159,10 +158,12 @@ impl Capabilities {
         }
     }
 
-    /// AMQP (v1): realtime tail + record only — no key browser, dashboard, or
-    /// command console (the broker model and the read-only mandate don't fit
-    /// them yet). Only constructed by the AMQP impl / tests, so it is dead code
-    /// in a build without the `amqp` feature.
+    /// AMQP (v1): no key browser, dashboard, or command console (the broker
+    /// model and the read-only mandate don't fit them yet). The broker can still
+    /// tail + record at the protocol level, but the UI exposes no tail view for
+    /// it yet (the Realtime screen was removed pending a rework). Only
+    /// constructed by the AMQP impl / tests, so it is dead code in a build
+    /// without the `amqp` feature.
     #[cfg_attr(not(feature = "amqp"), allow(dead_code))]
     pub fn amqp() -> Self {
         Self {
@@ -174,9 +175,10 @@ impl Capabilities {
         }
     }
 
-    /// RabbitMQ (AMQP 0.9.1): realtime tail + record only, exactly like the
-    /// AMQP 1.0 broker — it reuses the same Realtime page. The one tail is a
-    /// non-destructive exchange tap (see [`crate::broker::rabbitmq`]). Only
+    /// RabbitMQ (AMQP 0.9.1): same capability shape as the AMQP 1.0 broker. The
+    /// one tail is a non-destructive exchange tap (see
+    /// [`crate::broker::rabbitmq`]); like AMQP, the UI exposes no tail view for
+    /// it yet (the Realtime screen was removed pending a rework). Only
     /// constructed by the RabbitMQ impl / tests, so it is dead code in a build
     /// without the `rabbitmq` feature.
     #[cfg_attr(not(feature = "rabbitmq"), allow(dead_code))]
@@ -927,8 +929,8 @@ mod tests {
         assert_eq!(BrokerKind::Amqp.label(), "amqp");
         assert_eq!(BrokerKind::Redis.label(), "redis");
 
-        // RabbitMQ mirrors AMQP's capability shape (realtime tail + record only),
-        // which is what lets it reuse the Realtime page.
+        // RabbitMQ mirrors AMQP's capability shape (no browser, dashboard, or
+        // console).
         let rmq = Capabilities::rabbitmq();
         assert_eq!(rmq.kind, BrokerKind::Rabbitmq);
         assert_eq!(rmq.databases, 1);

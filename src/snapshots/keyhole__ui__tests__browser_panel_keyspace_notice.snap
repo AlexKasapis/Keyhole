@@ -1,28 +1,30 @@
 ---
 source: src/ui.rs
-expression: "render_lines(&mut app, 90, 24)"
+expression: "render_lines(&mut app, 90, 26)"
 ---
  Keyhole   prod (db0)  · browser                               ● connected   12:34:56 UTC
- db 0 · match * · sort name ↑                                                      2 keys
+ db 0 · match * · sort name ↑                                                      1 keys
 ┌ Server ────────────────────────────────────────────────────────────────────────────────┐
 │ Loading server stats…                                                                  │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ───────────────────────────────────┐┌ Value ──────────────────────────────────────┐
 │  Key            Type   TTL      Size    ││loading…                                     │
-│▶ ▾ session (1)                          ││                                             │
-│    session:abc  hash   2m 0s    128 B   ││                                             │
+│▶ ▾ user (1)                             ││                                             │
+│    user:1       string 2m 0s    128 B   ││                                             │
+│                                         ││                                             │
+│                                         ││                                             │
 └─────────────────────────────────────────┘└─────────────────────────────────────────────┘
-┌ Console — prod (read-only) ────────────────────────────────────────────────────────────┐
-│ Console                                                                                │
-│❯ INFO server                                                                           │
-│redis_version:7.4.0                                                                     │
-│uptime_in_seconds:42                                                                    │
+┌ keyspace:db0 ──────────────────────────────────────────────────────────────────────────┐
+│ Console │ keyspace:db0                                                                 │
+│ live · 0 events                                                                        │
+│⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
 │                                                                                        │
-│❯ SET k v                                                                               │
-│`SET` is not on the read-only allowlist                                                 │
+│waiting for events…                                                                     │
 │                                                                                        │
 │                                                                                        │
-│❯                                                                                       │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
   nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort · O dir

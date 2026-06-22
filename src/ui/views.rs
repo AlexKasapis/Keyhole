@@ -12,7 +12,9 @@ use ratatui::Frame;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ConnForm, Connection, InputMode, RecordState, SubState, ViewRow};
+use crate::app::{
+    App, ConnForm, Connection, InputMode, RecordState, SubState, Subscription, ViewRow,
+};
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
 
@@ -166,15 +168,16 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 
     // The Browser stacks, top to bottom: a one-line info bar; an optional
     // server-stats band (Redis — the former standalone Dashboard); the keys +
-    // value panes; and an optional, always-visible read-only command console
-    // pinned to the bottom (Redis — the former standalone Console screen).
+    // value panes; and an optional, always-visible tabbed bottom panel pinned to
+    // the bottom (Redis — the former standalone Console and Realtime screens),
+    // carrying the read-only console and one tab per live tail.
     let mut rows = vec![Constraint::Length(1)];
     if conn.caps.can_dashboard {
         rows.push(Constraint::Length(SERVER_BAND_HEIGHT));
     }
     rows.push(Constraint::Min(0));
     if conn.caps.can_console {
-        rows.push(Constraint::Length(CONSOLE_BAND_HEIGHT));
+        rows.push(Constraint::Length(PANEL_BAND_HEIGHT));
     }
     let chunks = Layout::vertical(rows).split(area);
     let info_area = chunks[0];
@@ -182,7 +185,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // Body sits after the info bar and the optional stats band.
     let body_idx = if conn.caps.can_dashboard { 2 } else { 1 };
     let body_area = chunks[body_idx];
-    let console_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
+    let panel_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
 
     // Top info bar, laid out as a balanced toolbar: the browsing context (db,
     // match pattern, sort) sits flush left, while the key count — the one figure
@@ -339,8 +342,8 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .scroll((conn.value_scroll, 0));
     frame.render_widget(value, value_area);
 
-    if let Some(console_area) = console_area {
-        console_band(frame, conn, mode, theme, console_area);
+    if let Some(panel_area) = panel_area {
+        panel_band(frame, conn, mode, theme, panel_area);
     }
 }
 
@@ -348,10 +351,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 /// (2) wrapping a gauges row (1) and a one-line metrics summary (1).
 const SERVER_BAND_HEIGHT: u16 = 4;
 
-/// Total height (rows) reserved for the Browser's read-only console band: a
-/// border (2) wrapping up to four output rows (the scrollback tail) and the
-/// one-line prompt — compact, but enough to read a short reply at a glance.
-const CONSOLE_BAND_HEIGHT: u16 = 7;
+/// Total height (rows) reserved for the Browser's tabbed bottom panel: a border
+/// (2) wrapping a tab strip (1) and the active tab's content (up to ~9 rows).
+/// Taller than the former console-only band so a tail tab can show a useful
+/// window of events, not just a couple of lines.
+const PANEL_BAND_HEIGHT: u16 = 12;
 
 /// The server-stats band shown atop the Browser for brokers that expose server
 /// statistics (Redis) — the former standalone Dashboard, merged into the main
@@ -503,78 +507,73 @@ fn meter(frame: &mut Frame, area: Rect, theme: &Theme, label: &str, ratio: f64, 
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Realtime screen: live tail tabs + the focused tail's scrollback ring buffer.
-pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(conn) = app.active_conn() else {
-        frame.render_widget(
-            Paragraph::new("No active connection. Connect first, then press 's' to subscribe.")
-                .style(theme.dim)
-                .block(Block::bordered().border_style(theme.border)),
-            area,
-        );
-        return;
+/// The Browser's tabbed bottom panel: a tab strip (Console first, then one tab
+/// per live tail) over the active tab's content. The console tab shows command
+/// output with an input prompt; a tail tab shows the tail's live status row and
+/// event scrollback. Tabs are cycled with Tab / Shift-Tab. Only drawn for
+/// brokers with a console (Redis) — the former standalone Console and Realtime
+/// screens, now folded into one panel. The no-connection case is handled by the
+/// Browser, so this only runs with a live connection.
+fn panel_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &Theme, area: Rect) {
+    // Title follows the active tab: the console's read-only affordance, or the
+    // focused tail's label.
+    let on_console = conn.panel_is_console();
+    let title = match conn.panel_subscription() {
+        _ if on_console => format!(" Console — {} (read-only) ", conn.name),
+        Some(sub) => format!(" {} ", sub.label),
+        None => " Panel ".to_string(),
     };
-    if conn.subs.is_empty() {
-        // The accepted specs differ per broker (Redis pub/sub vs AMQP topic/queue
-        // vs RabbitMQ exchange), so the hint follows the active connection's kind.
-        let mut info = vec![
-            Line::from(""),
-            Line::styled("No live tails.", theme.dim),
-            Line::from(""),
-            Line::from("Press 's' to subscribe:"),
-            Line::styled(format!("  {}", conn.caps.kind.sub_spec_hint()), theme.dim),
-        ];
-        // The stream-tail shortcut only exists for Redis (it has a Browser).
-        if conn.caps.kind == BrokerKind::Redis {
-            info.push(Line::from(""));
-            info.push(Line::from("or 't' on a stream key in the Browser."));
-        }
-        let body = Paragraph::new(info).alignment(Alignment::Center).block(
-            Block::bordered()
-                .title(" Realtime ")
-                .title_style(theme.heading)
-                .border_style(theme.border),
-        );
-        frame.render_widget(body, area);
-        return;
-    }
+    let block = Block::bordered()
+        .title(title)
+        .title_style(theme.heading)
+        .border_style(theme.border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    let [tabs_area, status_area, body_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    let [tabs_area, content_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
 
-    let titles: Vec<Line> = conn
-        .subs
-        .iter()
-        .map(|s| {
-            let mut spans = vec![Span::raw(s.label.clone())];
-            if s.recording.is_on() {
-                spans.push(Span::styled(" ●", theme.error));
-            }
-            match &s.state {
-                SubState::Connecting => spans.push(Span::styled(" …", theme.dim)),
-                SubState::Ended(_) => spans.push(Span::styled(" ✗", theme.dim)),
-                SubState::Active => {}
-            }
-            Line::from(spans)
-        })
-        .collect();
-    // `Tabs` already pads each tab with a leading space, so the strip lines up
-    // with the status row's one-column gutter without any extra inset. A dim
-    // divider keeps the separators quiet next to the highlighted active tab.
+    // Tab strip: Console first, then one tab per live tail (carrying the same
+    // recording/lifecycle indicators the Realtime tabs used to). A dim divider
+    // keeps the separators quiet next to the highlighted active tab.
+    let mut titles: Vec<Line> = vec![Line::from("Console")];
+    titles.extend(conn.subs.iter().map(|s| sub_tab_title(s, theme)));
     let tabs = Tabs::new(titles)
-        .select(conn.active_sub.unwrap_or(0))
+        .select(conn.panel_tab)
         .style(theme.dim)
         .highlight_style(theme.selected)
         .divider(Span::styled("│", theme.dim));
     frame.render_widget(tabs, tabs_area);
 
-    let Some(sub) = conn.active_subscription() else {
-        return;
-    };
+    if on_console {
+        console_content(frame, conn, mode, theme, content_area);
+    } else if let Some(sub) = conn.panel_subscription() {
+        tail_content(frame, sub, theme, content_area);
+    }
+}
+
+/// One bottom-panel tail tab's title: the tail label plus its recording (●) and
+/// lifecycle (… connecting, ✗ ended) indicators.
+fn sub_tab_title(sub: &Subscription, theme: &Theme) -> Line<'static> {
+    let mut spans = vec![Span::raw(sub.label.clone())];
+    if sub.recording.is_on() {
+        spans.push(Span::styled(" ●", theme.error));
+    }
+    match &sub.state {
+        SubState::Connecting => spans.push(Span::styled(" …", theme.dim)),
+        SubState::Ended(_) => spans.push(Span::styled(" ✗", theme.dim)),
+        SubState::Active => {}
+    }
+    Line::from(spans)
+}
+
+/// A tail tab's content: a one-line status row (live state, event tally, and the
+/// recording / paused indicators) over the tail's event scrollback (preceded by
+/// a wrapped advisory banner when the tail carries a notice). Ported from the
+/// former standalone Realtime screen, now rendered inside the bottom panel.
+fn tail_content(frame: &mut Frame, sub: &Subscription, theme: &Theme, area: Rect) {
+    let [status_area, body_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
 
     let state_span = match &sub.state {
         SubState::Connecting => Span::styled("connecting…", theme.dim),
@@ -634,19 +633,11 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     );
     frame.render_widget(Paragraph::new(right).style(theme.status_bar), st_right);
 
-    let block = Block::bordered()
-        .title(format!(" {} ", sub.label))
-        .title_style(theme.heading)
-        .border_style(theme.border)
-        .padding(Padding::horizontal(1));
-    let inner = block.inner(body_area);
-    frame.render_widget(block, body_area);
-
     // A keyspace/advisory notice takes a wrapped banner above the events.
     let events_area = match &sub.notice {
         Some(notice) => {
             let [banner, rest] =
-                Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(inner);
+                Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).areas(body_area);
             frame.render_widget(
                 Paragraph::new(Line::styled(format!("⚠ {notice}"), theme.error))
                     .wrap(Wrap { trim: true }),
@@ -654,7 +645,7 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             );
             rest
         }
-        None => inner,
+        None => body_area,
     };
 
     let height = events_area.height as usize;
@@ -717,23 +708,20 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
 }
 
-/// The Browser's read-only console band: command output for the active
-/// connection with an input prompt pinned to the bottom. Always visible in the
-/// Browser for brokers that support a console (Redis) — the former standalone
-/// Console screen, now a compact band. The no-connection case is handled by the
-/// Browser, so this only runs with a live connection.
-fn console_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &Theme, area: Rect) {
+/// The console tab's content: the read-only command output for the active
+/// connection (windowed scrollback) with the input prompt pinned to the bottom.
+/// The panel draws the surrounding border/title; this fills the content area.
+fn console_content(
+    frame: &mut Frame,
+    conn: &Connection,
+    mode: InputMode,
+    theme: &Theme,
+    area: Rect,
+) {
     let console = &conn.console;
 
-    let block = Block::bordered()
-        .title(format!(" Console — {} (read-only) ", conn.name))
-        .title_style(theme.heading)
-        .border_style(theme.border);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
     let [output_area, prompt_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
 
     // Flatten the executed commands + replies into display lines.
     let mut lines: Vec<Line> = Vec::new();
@@ -890,25 +878,26 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Enter connect (Connections)   Esc step back / quit"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
-        Line::from("  c connections  b browser  w realtime  R recordings"),
+        Line::from("  c connections  b browser  R recordings"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
-        Line::from("  the read-only console (Redis) is a band along the bottom"),
         Line::from("  / filter   [ ] change DB   r refresh (keys auto-refresh)"),
         Line::from("  o sort column   O direction"),
         Line::from("  keys are always grouped by prefix into collapsible sections"),
         Line::from("  Enter/Space collapse/expand group (from header or key)"),
         Line::from("  z fold/unfold all groups"),
         Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),
-        Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
         Line::from(""),
-        Line::styled("Realtime tails", theme.heading),
-        Line::from("  s subscribe   m MONITOR   K keyspace   Tab/[ ] switch tab   x stop"),
-        Line::from("  ↑↓ scroll   G follow newest   r toggle recording"),
+        Line::styled("Bottom panel (Redis)", theme.heading),
+        Line::from("  a tabbed panel along the bottom: Console first, then one tab per tail"),
+        Line::from("  Tab / Shift-Tab cycle the tabs"),
+        Line::from("  s subscribe (pub/sub or stream)   m MONITOR   K keyspace"),
+        Line::from("  t tail the selected stream key    x stop the focused tail"),
+        Line::from("  r records on a tail tab (refreshes keys on the Console tab)"),
         Line::from("  spec: pubsub:ch · psub:ch.* · stream:key · keyspace[:N] · monitor"),
         Line::from(""),
-        Line::styled("Console (read-only, Browser band)", theme.heading),
+        Line::styled("Console tab (read-only)", theme.heading),
         Line::from("  i type a command   Enter run   ↑↓ history   PgUp/PgDn scroll"),
         Line::from("  Ctrl-L clear   writes and admin commands are refused"),
         Line::from(""),

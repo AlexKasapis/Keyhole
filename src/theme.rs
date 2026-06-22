@@ -24,6 +24,9 @@ pub struct Theme {
     pub accent: Style,
     pub error: Style,
     pub success: Style,
+    /// A cautionary amber, used for transitional/at-risk states such as the
+    /// header's "connecting" connection indicator.
+    pub warning: Style,
     pub gauge: Style,
 }
 
@@ -58,6 +61,7 @@ impl Theme {
             accent: Style::new().fg(Color::Cyan),
             error: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
             success: Style::new().fg(Color::Green),
+            warning: Style::new().fg(Color::Yellow),
             gauge: Style::new().fg(Color::Cyan).bg(Color::Indexed(236)),
         }
     }
@@ -85,6 +89,7 @@ impl Theme {
             accent: Style::new().fg(Color::Blue),
             error: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
             success: Style::new().fg(Color::Green),
+            warning: Style::new().fg(Color::Yellow),
             gauge: Style::new().fg(Color::Blue).bg(Color::Indexed(254)),
         }
     }
@@ -106,6 +111,7 @@ impl Theme {
             accent: none.add_modifier(Modifier::BOLD),
             error: none.add_modifier(Modifier::BOLD.union(Modifier::REVERSED)),
             success: none.add_modifier(Modifier::BOLD),
+            warning: none.add_modifier(Modifier::BOLD),
             gauge: none.add_modifier(Modifier::REVERSED),
         }
     }
@@ -178,6 +184,20 @@ mod tests {
             false,
         );
         assert_eq!(light2.accent.fg, Some(Color::Blue));
+    }
+
+    #[test]
+    fn warning_is_amber_with_colour_and_modifier_only_when_plain() {
+        // The connection indicator's "connecting" state leans on this style, so
+        // it must carry an actual colour in the coloured palettes …
+        for t in [Theme::dark(), Theme::light()] {
+            assert_eq!(t.warning.fg, Some(Color::Yellow));
+        }
+        // … and survive NO_COLOR as a modifier (no foreground colour) so the
+        // accompanying label still does the disambiguating.
+        let plain = Theme::plain();
+        assert_eq!(plain.warning.fg, None);
+        assert!(plain.warning.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

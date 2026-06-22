@@ -6,8 +6,8 @@ mod action;
 mod state;
 
 pub use state::{
-    ConnForm, Connection, Console, ConsoleEntry, InputMode, RecordState, RecordingFile, ScanStep,
-    Screen, Status, SubState, Subscription, ViewRow,
+    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, RecordState, RecordingFile,
+    ScanStep, Screen, Status, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -90,6 +90,11 @@ pub struct App {
     pub(crate) subscribe_buf: String,
     pub(crate) form: Option<ConnForm>,
     pub(crate) status: Option<Status>,
+    /// Connection health for the header indicator, while no connection is
+    /// active. `Connected` is derived live from [`Self::active_conn`], so this
+    /// field only carries the no-connection sub-state (offline / connecting /
+    /// error). See [`Self::conn_health`].
+    pub(crate) health: ConnHealth,
     pub(crate) show_help: bool,
     pub(crate) recordings: Vec<RecordingFile>,
     pub(crate) recordings_state: ListState,
@@ -147,6 +152,7 @@ impl App {
             subscribe_buf: String::new(),
             form: None,
             status: None,
+            health: ConnHealth::Offline,
             show_help: false,
             recordings: Vec::new(),
             recordings_state: ListState::default(),
@@ -181,6 +187,17 @@ impl App {
     /// True if a profile of this name currently has an open connection.
     pub fn is_connected(&self, name: &str) -> bool {
         self.connections.iter().any(|c| c.name == name)
+    }
+
+    /// Connection health for the header indicator. An active connection always
+    /// reads as [`ConnHealth::Connected`]; otherwise the most recent
+    /// connection-lifecycle outcome (offline / connecting / error) is reported.
+    pub fn conn_health(&self) -> ConnHealth {
+        if self.active_conn().is_some() {
+            ConnHealth::Connected
+        } else {
+            self.health
+        }
     }
 
     // -- event handling ------------------------------------------------------
@@ -272,12 +289,14 @@ impl App {
     fn on_connected(&mut self, handle: ConnHandle) {
         let conn = Connection::new(handle);
         let id = conn.id;
-        let name = conn.name.clone();
         let caps = conn.caps.clone();
         self.connections.push(conn);
         self.active = Some(self.connections.len() - 1);
         self.screen = initial_screen(&caps);
-        self.set_status(format!("Connected to {name}"), false);
+        // The header's green connection dot now signals "connected" — and the
+        // active-connection label is shown there too — so no transient footer
+        // message is needed for the success case (errors still surface there).
+        self.health = ConnHealth::Connected;
         // Kick off the broker-appropriate first load.
         if caps.can_browse {
             self.start_scan(id, true);
@@ -299,6 +318,9 @@ impl App {
             };
             if self.connections.is_empty() {
                 self.screen = Screen::Connections;
+                // No connection left: the header dot turns red. The footer keeps
+                // the detailed reason, which the glanceable dot can't carry.
+                self.health = ConnHealth::Error;
             }
             self.set_status(format!("{name} disconnected: {reason}"), true);
         }
@@ -361,6 +383,12 @@ impl App {
     }
 
     fn on_conn_error(&mut self, id: ConnId, context: String, error: String) {
+        // An error with nothing connected means a connect attempt failed (auth,
+        // dial, unsupported broker) — flag the header dot red. Errors raised on
+        // a live connection leave the dot green; the connection is still up.
+        if self.active_conn().is_none() {
+            self.health = ConnHealth::Error;
+        }
         self.set_status(format!("[{}] {context}: {error}", id.0), true);
     }
 
@@ -556,11 +584,6 @@ impl App {
                 Some(false) => self.set_status("this broker has no key browser".to_string(), true),
                 None => {}
             },
-            Action::GotoRealtime => {
-                if self.active.is_some() {
-                    self.screen = Screen::Realtime;
-                }
-            }
             Action::GotoRecordings => {
                 self.screen = Screen::Recordings;
                 self.scan_recordings();
@@ -577,44 +600,34 @@ impl App {
                 let db = self.active_conn().map(|c| c.db).unwrap_or(0);
                 self.start_special_tail(SubSpec::Keyspace { db });
             }
-            // `i` focuses the Browser's console band to type a command (only on
-            // the Browser, and only for brokers that have a console).
+            // `i` focuses the Browser's console tab to type a command (only on
+            // the Browser, and only for brokers that have a console). Switch the
+            // bottom panel to the Console tab first so the typing is visible.
             Action::ConsoleEdit => {
                 let has_console = self
                     .active_conn()
                     .map(|c| c.caps.can_console)
                     .unwrap_or(false);
                 if self.screen == Screen::Browser && has_console {
+                    if let Some(conn) = self.active_conn_mut() {
+                        conn.panel_tab = 0;
+                    }
                     self.enter_command_mode();
                 }
             }
             Action::TailKey => self.tail_selected_key(),
-            Action::PrevTab => {
-                if self.screen == Screen::Realtime {
-                    self.focus_tab(-1);
-                }
-            }
-            Action::NextTab => {
-                if self.screen == Screen::Realtime {
-                    self.focus_tab(1);
-                }
-            }
+            // Tab / Shift-Tab cycle the Browser's bottom-panel tabs (Console and
+            // one tab per live tail).
+            Action::PrevTab => self.cycle_panel(-1),
+            Action::NextTab => self.cycle_panel(1),
             Action::StopTail => {
-                if self.screen == Screen::Realtime {
+                if self.screen == Screen::Browser {
                     self.stop_active_tail();
                 }
             }
-            // `[`/`]`: change DB in the Browser, switch tail tabs in Realtime.
-            Action::DbPrev => match self.screen {
-                Screen::Browser => self.change_db(-1),
-                Screen::Realtime => self.focus_tab(-1),
-                _ => {}
-            },
-            Action::DbNext => match self.screen {
-                Screen::Browser => self.change_db(1),
-                Screen::Realtime => self.focus_tab(1),
-                _ => {}
-            },
+            // `[`/`]` change DB in the Browser.
+            Action::DbPrev => self.change_db(-1),
+            Action::DbNext => self.change_db(1),
             // Browser key-list ordering and grouping. Each mutates the active
             // connection's view and reports the new state in the status bar.
             Action::CycleSort => self.browser_view(|c| {
@@ -630,16 +643,23 @@ impl App {
                 "toggled all groups".to_string()
             }),
             Action::ToggleCollapse => self.toggle_selected_group(),
-            // `r`: refresh data (Browser — keys and the server-stats band),
-            // toggle recording (Realtime), rescan files (Recordings).
+            // `r`: rescan files (Recordings); on the Browser it either toggles
+            // recording for the focused tail (when a tail tab is the active
+            // bottom-panel tab) or refreshes the keys + server-stats band (on the
+            // Console tab, where there is no tail to record).
             Action::Refresh => match self.screen {
                 Screen::Browser => {
-                    if let Some(id) = self.active_id() {
+                    let on_tail = self
+                        .active_conn()
+                        .map(|c| c.panel_subscription().is_some())
+                        .unwrap_or(false);
+                    if on_tail {
+                        self.toggle_recording();
+                    } else if let Some(id) = self.active_id() {
                         self.start_scan(id, true);
                         self.request_stats(id);
                     }
                 }
-                Screen::Realtime => self.toggle_recording(),
                 Screen::Recordings => {
                     self.scan_recordings();
                     self.set_status("recordings refreshed".to_string(), false);
@@ -748,7 +768,6 @@ impl App {
                     self.request_selected_value(id);
                 }
             }
-            Screen::Realtime => self.scroll_tail(delta),
             Screen::Recordings => {
                 let len = self.recordings.len();
                 let next = move_selection(self.recordings_state.selected(), len, delta);
@@ -776,18 +795,6 @@ impl App {
                 }
                 if let Some(id) = self.active_id() {
                     self.request_selected_value(id);
-                }
-            }
-            Screen::Realtime => {
-                if let Some(sub) = self.active_sub_mut() {
-                    if top {
-                        sub.follow = false;
-                        sub.offset = 0;
-                    } else {
-                        // G: jump to newest and resume following.
-                        sub.follow = true;
-                        sub.offset = 0;
-                    }
                 }
             }
             Screen::Recordings => {
@@ -885,6 +892,7 @@ impl App {
         let preview = self.preview_bytes;
         let recordings_dir = self.recordings_dir.clone();
         let name = profile.name().to_string();
+        self.health = ConnHealth::Connecting;
         self.set_status(format!("Connecting to {name}…"), false);
 
         tokio::spawn(async move {
@@ -1123,16 +1131,38 @@ impl App {
         }
     }
 
-    // -- realtime / recordings -----------------------------------------------
+    // -- realtime tails / recordings -----------------------------------------
 
-    fn active_sub_mut(&mut self) -> Option<&mut Subscription> {
-        self.active_conn_mut()
-            .and_then(|c| c.active_subscription_mut())
+    /// Cycle the Browser's bottom-panel tab (Console + one tab per live tail) by
+    /// `delta`. No-op off the Browser or without an active connection.
+    fn cycle_panel(&mut self, delta: i32) {
+        if self.screen != Screen::Browser {
+            return;
+        }
+        if let Some(conn) = self.active_conn_mut() {
+            conn.cycle_panel(delta);
+        }
+    }
+
+    /// Whether the active connection can open realtime tails. Tails live in the
+    /// Browser's bottom panel, which only exists for brokers that have it
+    /// (Redis); AMQP/RabbitMQ have no panel to host them yet.
+    fn active_can_tail(&self) -> bool {
+        self.active_conn()
+            .map(|c| c.caps.can_console)
+            .unwrap_or(false)
     }
 
     fn open_subscribe_prompt(&mut self) {
         if self.active.is_none() {
             self.set_status("connect first, then subscribe".to_string(), true);
+            return;
+        }
+        if !self.active_can_tail() {
+            self.set_status(
+                "realtime tails are not available for this broker".to_string(),
+                true,
+            );
             return;
         }
         self.subscribe_buf.clear();
@@ -1173,6 +1203,16 @@ impl App {
             self.set_status("no active connection".to_string(), true);
             return;
         };
+        // Tails are shown in the Browser's bottom panel, which only exists for
+        // brokers that have it (Redis). Refuse a tail on a broker with no panel
+        // to host it rather than opening one the user can never see.
+        if !self.active_can_tail() {
+            self.set_status(
+                "realtime tails are not available for this broker".to_string(),
+                true,
+            );
+            return;
+        }
         let capacity = self.tail_scrollback;
         let label = spec.label();
 
@@ -1183,8 +1223,8 @@ impl App {
                 .iter()
                 .position(|s| s.spec == spec && !matches!(s.state, SubState::Ended(_)))
             {
-                conn.active_sub = Some(pos);
-                self.screen = Screen::Realtime;
+                conn.focus_tail(pos);
+                self.screen = Screen::Browser;
                 self.set_status(format!("already tailing {label}"), false);
                 return;
             }
@@ -1199,9 +1239,10 @@ impl App {
                 record: false,
             });
             conn.subs.push(Subscription::new(sub_id, spec, capacity));
-            conn.active_sub = Some(conn.subs.len() - 1);
+            // Focus the new tail's tab in the bottom panel so the user sees it.
+            conn.focus_tail(conn.subs.len() - 1);
         }
-        self.screen = Screen::Realtime;
+        self.screen = Screen::Browser;
         self.set_status(format!("subscribing to {label}…"), false);
     }
 
@@ -1258,47 +1299,30 @@ impl App {
         self.set_status(msg.to_string(), false);
     }
 
+    /// Stop the tail shown in the active bottom-panel tab. A no-op when the
+    /// Console tab (which is not a tail) is the active one.
     fn stop_active_tail(&mut self) {
         let label = {
             let Some(conn) = self.active_conn_mut() else {
                 return;
             };
-            let Some(pos) = conn.active_sub else {
+            // Tab 0 is the Console; `n >= 1` selects the tail at `subs[n - 1]`.
+            let Some(pos) = conn.panel_tab.checked_sub(1) else {
                 return;
             };
+            if pos >= conn.subs.len() {
+                return;
+            }
             let sub = conn.subs.remove(pos);
             conn.handle
                 .send(ConnCommand::StopSubscription { sub_id: sub.sub_id });
-            conn.active_sub = if conn.subs.is_empty() {
-                None
-            } else {
-                Some(pos.min(conn.subs.len() - 1))
-            };
+            // Dropping a tail shifts later tabs down by one, so clamp the active
+            // tab back into range (landing on the next tail, or the Console).
+            let max_tab = conn.panel_tab_count().saturating_sub(1);
+            conn.panel_tab = conn.panel_tab.min(max_tab);
             sub.label
         };
         self.set_status(format!("stopped {label}"), false);
-    }
-
-    fn focus_tab(&mut self, delta: i32) {
-        if let Some(conn) = self.active_conn_mut() {
-            let len = conn.subs.len();
-            if len == 0 {
-                return;
-            }
-            let cur = conn.active_sub.unwrap_or(0) as i32;
-            let next = (cur + delta).rem_euclid(len as i32) as usize;
-            conn.active_sub = Some(next);
-        }
-    }
-
-    fn scroll_tail(&mut self, delta: i32) {
-        if let Some(sub) = self.active_sub_mut() {
-            let max = sub.events.len().saturating_sub(1) as i32;
-            // Up (delta < 0) scrolls back into history (larger offset from newest).
-            let next = (sub.offset as i32 - delta).clamp(0, max) as usize;
-            sub.offset = next;
-            sub.follow = next == 0;
-        }
     }
 
     /// Start a keyspace or MONITOR tail on the active connection. These are just
@@ -1473,12 +1497,14 @@ async fn resolve_secret(
 }
 
 /// The screen to show a freshly-focused connection: the key browser when the
-/// broker has one (Redis), else the realtime tails (AMQP).
+/// broker has one (Redis). Brokers without a browser (AMQP/RabbitMQ) have no
+/// data screen yet — their realtime tails were removed pending a rework — so
+/// they stay on the Connections list, where the row shows them live.
 fn initial_screen(caps: &Capabilities) -> Screen {
     if caps.can_browse {
         Screen::Browser
     } else {
-        Screen::Realtime
+        Screen::Connections
     }
 }
 
@@ -1693,10 +1719,75 @@ mod tests {
         assert_eq!(app.screen, Screen::Browser);
         assert!(app.is_connected("prod"));
         assert!(!app.is_connected("other"));
-        let status = app.status.as_ref().unwrap();
-        assert!(!status.is_error);
-        assert!(status.message.contains("Connected to prod"));
+        // The header dot — not a transient footer message — now signals success.
+        assert_eq!(app.conn_health(), ConnHealth::Connected);
         assert_eq!(app.active_conn().unwrap().label(), "prod (db0)");
+    }
+
+    #[tokio::test]
+    async fn conn_health_tracks_the_connection_lifecycle() {
+        // Idle on a fresh app, before anything is attempted.
+        let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
+        assert_eq!(app.conn_health(), ConnHealth::Offline);
+
+        // A connect in flight reads as connecting (Enter connects the selected
+        // profile on the Connections screen) …
+        app.profile_state.select(Some(0));
+        app.apply(Action::Enter);
+        assert_eq!(app.conn_health(), ConnHealth::Connecting);
+
+        // … flips to connected once the handle lands …
+        let id = connect(&mut app, 1, "prod", 16).await;
+        assert_eq!(app.conn_health(), ConnHealth::Connected);
+
+        // … and turns to an error when the last connection drops.
+        app.handle_event(AppEvent::Disconnected {
+            id,
+            reason: "bye".into(),
+        });
+        assert_eq!(app.conn_health(), ConnHealth::Error);
+    }
+
+    #[tokio::test]
+    async fn conn_health_stays_connected_on_a_non_fatal_error() {
+        // An error raised while a connection is live (e.g. a rejected command)
+        // must not flip the header dot away from green.
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.handle_event(AppEvent::ConnError {
+            id: ConnId(1),
+            context: "command".into(),
+            error: "nope".into(),
+        });
+        assert_eq!(app.conn_health(), ConnHealth::Connected);
+    }
+
+    #[tokio::test]
+    async fn conn_health_errors_when_a_connect_attempt_fails() {
+        // A connect error with nothing connected (failed dial/auth) is fatal to
+        // the attempt, so the dot goes red.
+        let (mut app, _rx) = test_app();
+        app.health = ConnHealth::Connecting;
+        app.handle_event(AppEvent::ConnError {
+            id: ConnId(1),
+            context: "connect".into(),
+            error: "refused".into(),
+        });
+        assert_eq!(app.conn_health(), ConnHealth::Error);
+    }
+
+    #[tokio::test]
+    async fn conn_health_keeps_green_when_one_of_several_drops() {
+        // Dropping a non-active connection while others remain leaves the
+        // indicator green — there is still a live, active connection.
+        let (mut app, _rx) = test_app();
+        let first = connect(&mut app, 1, "a", 16).await;
+        connect(&mut app, 2, "b", 16).await;
+        app.handle_event(AppEvent::Disconnected {
+            id: first,
+            reason: "x".into(),
+        });
+        assert_eq!(app.conn_health(), ConnHealth::Connected);
     }
 
     #[tokio::test]
@@ -1977,9 +2068,10 @@ mod tests {
         finish_initial_scan(&mut app, id, vec![]);
         let epoch_before = app.active_conn().unwrap().scan_epoch;
 
-        // Tailing on the Realtime screen: re-scanning the keyspace would be
-        // pointless work, so the auto-refresh holds off until the browser is up.
-        app.screen = Screen::Realtime;
+        // Off the Browser (e.g. on the Recordings screen): re-scanning the
+        // keyspace would be pointless work, so the auto-refresh holds off until
+        // the browser is up.
+        app.screen = Screen::Recordings;
         app.browse_refresh_ticks = 1;
         for _ in 0..10 {
             app.on_tick();
@@ -2172,15 +2264,6 @@ mod tests {
         );
         assert!(app.running);
 
-        app.screen = Screen::Realtime;
-        app.handle_key(key(KeyCode::Esc));
-        assert_eq!(
-            app.screen,
-            Screen::Connections,
-            "Realtime backs out to Connections"
-        );
-        assert!(app.running);
-
         app.screen = Screen::Recordings;
         app.handle_key(key(KeyCode::Esc));
         assert_eq!(
@@ -2248,16 +2331,14 @@ mod tests {
     }
 
     #[test]
-    fn goto_data_screens_requires_active_connection() {
+    fn goto_browser_requires_active_connection() {
         let (mut app, _rx) = test_app();
-        for action in [Action::GotoBrowser, Action::GotoRealtime] {
-            app.apply(action);
-            assert_eq!(
-                app.screen,
-                Screen::Connections,
-                "{action:?} needs a connection"
-            );
-        }
+        app.apply(Action::GotoBrowser);
+        assert_eq!(
+            app.screen,
+            Screen::Connections,
+            "GotoBrowser needs a connection"
+        );
         app.apply(Action::GotoRecordings);
         assert_eq!(
             app.screen,
@@ -2270,8 +2351,8 @@ mod tests {
     async fn goto_screens_switch_with_active_connection() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.apply(Action::GotoRealtime);
-        assert_eq!(app.screen, Screen::Realtime);
+        app.apply(Action::GotoRecordings);
+        assert_eq!(app.screen, Screen::Recordings);
         app.apply(Action::GotoConnections);
         assert_eq!(app.screen, Screen::Connections);
         app.apply(Action::GotoBrowser);
@@ -2517,7 +2598,7 @@ mod tests {
     async fn change_db_only_acts_in_browser() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 4).await;
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Connections;
         app.change_db(1);
         assert_eq!(app.connections[0].db, 0, "no DB change outside the Browser");
     }
@@ -2611,15 +2692,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_subscribe_opens_realtime_tail() {
+    async fn start_subscribe_opens_tail_in_browser_panel() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         let next_sub = app.next_sub_id;
         app.start_subscribe(SubSpec::Channel("news".into()));
-        assert_eq!(app.screen, Screen::Realtime);
+        // Tails now live in the Browser's bottom panel; the new tail's tab is
+        // focused (panel tab 1 == subs[0]; tab 0 is the Console).
+        assert_eq!(app.screen, Screen::Browser);
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.subs.len(), 1);
-        assert_eq!(conn.active_sub, Some(0));
+        assert_eq!(conn.panel_tab, 1);
+        assert!(!conn.panel_is_console());
+        assert_eq!(
+            conn.panel_subscription().map(|s| s.sub_id),
+            Some(conn.subs[0].sub_id)
+        );
         assert_eq!(conn.subs[0].state, SubState::Connecting);
         assert_eq!(conn.subs[0].label, "pubsub:news");
         assert_eq!(app.next_sub_id, next_sub + 1);
@@ -2750,7 +2838,7 @@ mod tests {
     async fn toggle_recording_without_tail_errors() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.screen = Screen::Realtime;
+        // No tail open and the Console tab is active, so there is nothing to record.
         app.toggle_recording();
         let status = app.status.as_ref().unwrap();
         assert!(status.is_error);
@@ -2792,12 +2880,19 @@ mod tests {
         connect(&mut app, 1, "prod", 16).await;
         app.start_subscribe(SubSpec::Channel("c".into()));
         app.start_subscribe(SubSpec::Channel("d".into()));
-        assert_eq!(app.connections[0].active_sub, Some(1));
+        // Panel tab 0 is the Console; "c" is tab 1 and the just-added "d" is the
+        // focused tab 2.
+        assert_eq!(app.connections[0].panel_tab, 2);
         app.stop_active_tail();
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.subs.len(), 1);
         assert_eq!(conn.subs[0].label, "pubsub:c");
-        assert_eq!(conn.active_sub, Some(0));
+        // The active tab clamps back onto the remaining "c" tail (tab 1).
+        assert_eq!(conn.panel_tab, 1);
+        assert_eq!(
+            conn.panel_subscription().map(|s| s.label.as_str()),
+            Some("pubsub:c")
+        );
         assert!(app
             .status
             .as_ref()
@@ -2807,43 +2902,49 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn focus_tab_wraps_around() {
+    async fn stop_active_tail_on_console_tab_is_a_noop() {
+        let (mut app, _rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.start_subscribe(SubSpec::Channel("c".into()));
+        // Switch to the Console tab; `x` there has no tail to stop.
+        app.connections[0].panel_tab = 0;
+        app.stop_active_tail();
+        assert_eq!(app.connections[0].subs.len(), 1, "tail is left untouched");
+    }
+
+    #[tokio::test]
+    async fn tab_cycles_through_console_and_tails() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         for c in ['a', 'b', 'c'] {
             app.start_subscribe(SubSpec::Channel(c.to_string()));
         }
-        assert_eq!(app.connections[0].active_sub, Some(2));
-        app.focus_tab(1);
-        assert_eq!(app.connections[0].active_sub, Some(0), "wraps past the end");
-        app.focus_tab(-1);
-        assert_eq!(
-            app.connections[0].active_sub,
-            Some(2),
-            "wraps past the start"
-        );
+        // Tabs: 0 Console, 1 a, 2 b, 3 c — the last subscribe focused tab 3.
+        assert_eq!(app.screen, Screen::Browser);
+        assert_eq!(app.connections[0].panel_tab, 3);
+        // Tab wraps past the last tail back to the Console …
+        app.apply(Action::NextTab);
+        assert_eq!(app.connections[0].panel_tab, 0, "wraps to the Console tab");
+        app.apply(Action::NextTab);
+        assert_eq!(app.connections[0].panel_tab, 1);
+        // … and Shift-Tab walks back, wrapping past the Console to the last tail.
+        app.apply(Action::PrevTab);
+        assert_eq!(app.connections[0].panel_tab, 0);
+        app.apply(Action::PrevTab);
+        assert_eq!(app.connections[0].panel_tab, 3, "wraps past the Console");
     }
 
     #[tokio::test]
-    async fn scroll_tail_clamps_and_toggles_follow() {
+    async fn tab_does_not_cycle_off_the_browser() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.start_subscribe(SubSpec::Channel("c".into()));
-        for i in 0..5 {
-            app.connections[0].subs[0].push(broker_event(&format!("m{i}")));
-        }
-        app.scroll_tail(-1); // up == back into history
-        let sub = &app.connections[0].subs[0];
-        assert_eq!(sub.offset, 1);
-        assert!(!sub.follow);
-
-        app.scroll_tail(-100); // clamp at the oldest event
-        assert_eq!(app.connections[0].subs[0].offset, 4);
-
-        app.scroll_tail(100); // back to newest -> following again
-        let sub = &app.connections[0].subs[0];
-        assert_eq!(sub.offset, 0);
-        assert!(sub.follow);
+        app.start_subscribe(SubSpec::Channel("a".into()));
+        app.screen = Screen::Connections;
+        app.apply(Action::NextTab);
+        assert_eq!(
+            app.connections[0].panel_tab, 1,
+            "Tab is inert off the Browser"
+        );
     }
 
     // -- tail_selected_key ---------------------------------------------------
@@ -2857,9 +2958,11 @@ mod tests {
         // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
         app.connections[0].table.select(Some(1));
         app.tail_selected_key();
-        assert_eq!(app.screen, Screen::Realtime);
+        assert_eq!(app.screen, Screen::Browser);
         assert_eq!(app.active_conn().unwrap().subs.len(), 1);
         assert_eq!(app.active_conn().unwrap().subs[0].label, "stream:orders");
+        // The new stream tail's tab is focused in the bottom panel.
+        assert_eq!(app.active_conn().unwrap().panel_tab, 1);
     }
 
     #[tokio::test]
@@ -3133,11 +3236,13 @@ mod tests {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.apply(Action::StartMonitor);
-        assert_eq!(app.screen, Screen::Realtime);
+        assert_eq!(app.screen, Screen::Browser);
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.subs.len(), 1);
         assert_eq!(conn.subs[0].spec, SubSpec::Monitor);
         assert_eq!(conn.subs[0].label, "monitor");
+        // The MONITOR tail's tab is focused in the bottom panel (tab 1).
+        assert_eq!(conn.panel_tab, 1);
     }
 
     #[tokio::test]
@@ -3187,13 +3292,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn amqp_connection_opens_realtime_not_browser() {
+    async fn amqp_connection_stays_on_connections() {
         let (mut app, _rx) = test_app();
         connect_amqp(&mut app, 1, "mq").await;
+        // AMQP has no browser, and the Realtime screen was removed, so an AMQP
+        // connection has no data screen yet — it stays on the Connections list.
         assert_eq!(
             app.screen,
-            Screen::Realtime,
-            "AMQP has no browser, so it lands on realtime"
+            Screen::Connections,
+            "AMQP has no data screen, so it lands on Connections"
         );
         assert_eq!(app.active_conn().unwrap().label(), "mq [amqp]");
     }
@@ -3202,10 +3309,14 @@ mod tests {
     async fn amqp_capabilities_gate_redis_only_screens() {
         let (mut app, _rx) = test_app();
         connect_amqp(&mut app, 1, "mq").await;
-        // The Browser (and the console band it now carries) is Redis-only.
-        app.screen = Screen::Realtime;
+        // The Browser (and the bottom panel it carries) is Redis-only.
+        app.screen = Screen::Connections;
         app.apply(Action::GotoBrowser);
-        assert_eq!(app.screen, Screen::Realtime, "GotoBrowser must be blocked");
+        assert_eq!(
+            app.screen,
+            Screen::Connections,
+            "GotoBrowser must be blocked"
+        );
         assert!(app
             .status
             .as_ref()
@@ -3215,14 +3326,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn amqp_tails_a_topic() {
+    async fn amqp_cannot_open_a_tail() {
+        // Realtime tails were removed for AMQP/RabbitMQ: with no panel to host
+        // them, a subscribe attempt is refused rather than opening a hidden tail.
         let (mut app, _rx) = test_app();
         connect_amqp(&mut app, 1, "mq").await;
         app.start_subscribe(SubSpec::Topic("events".into()));
-        let conn = app.active_conn().unwrap();
-        assert_eq!(conn.subs.len(), 1);
-        assert_eq!(conn.subs[0].spec, SubSpec::Topic("events".into()));
-        assert_eq!(conn.subs[0].label, "topic:events");
+        assert!(app.active_conn().unwrap().subs.is_empty());
+        let status = app.status.as_ref().unwrap();
+        assert!(status.is_error);
+        assert!(status.message.contains("not available for this broker"));
     }
 
     #[tokio::test]
@@ -3263,12 +3376,12 @@ mod tests {
 
         connect(&mut app, 1, "prod", 16).await;
         // Console-capable, but not on the Browser screen: still inert.
-        app.screen = Screen::Realtime;
+        app.screen = Screen::Connections;
         app.apply(Action::ConsoleEdit);
         assert_eq!(
             app.mode,
             InputMode::Normal,
-            "the console band only lives in the Browser"
+            "the console tab only lives in the Browser"
         );
         // On the Browser with a console-capable broker: enters command mode.
         app.screen = Screen::Browser;

@@ -23,7 +23,6 @@ pub enum Action {
     AddConnection,
     GotoConnections,
     GotoBrowser,
-    GotoRealtime,
     GotoRecordings,
     StartFilter,
     /// Open the subscribe prompt.
@@ -32,14 +31,15 @@ pub enum Action {
     StartMonitor,
     /// Start a keyspace-notification tail on the active connection's db.
     StartKeyspace,
-    /// Begin typing a command in the Browser's console band.
+    /// Begin typing a command in the Browser's console tab.
     ConsoleEdit,
     /// Tail the selected key (Browser) as a stream.
     TailKey,
-    /// Focus the previous / next tail tab (Realtime).
+    /// Cycle the Browser's bottom panel to the previous / next tab (Console and
+    /// one tab per live tail). Bound to Shift-Tab / Tab.
     PrevTab,
     NextTab,
-    /// Stop the focused tail (Realtime).
+    /// Stop the focused tail (the active Browser bottom-panel tab).
     StopTail,
     DbPrev,
     DbNext,
@@ -74,7 +74,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('c')) => Some(Action::GotoConnections),
         (false, Char('b')) => Some(Action::GotoBrowser),
-        (false, Char('w')) => Some(Action::GotoRealtime),
         (false, Char('R')) => Some(Action::GotoRecordings),
         (false, Char('s')) => Some(Action::Subscribe),
         (false, Char('m')) => Some(Action::StartMonitor),
@@ -127,7 +126,6 @@ mod tests {
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('c')), Some(Action::GotoConnections));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
-        assert_eq!(plain(Char('w')), Some(Action::GotoRealtime));
         assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
         assert_eq!(plain(Char('s')), Some(Action::Subscribe));
         assert_eq!(plain(Char('m')), Some(Action::StartMonitor));
@@ -175,5 +173,8 @@ mod tests {
         // `:` opened the command palette, which has been removed: every action
         // is now reached directly by its own key.
         assert_eq!(plain(Char(':')), None, "':' is unbound: no command palette");
+        // `w` opened the standalone Realtime screen, which is gone: tails now
+        // live in the Browser's bottom panel, cycled with Tab / Shift-Tab.
+        assert_eq!(plain(Char('w')), None, "'w' is unbound: no Realtime screen");
     }
 }
