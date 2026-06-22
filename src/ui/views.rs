@@ -161,12 +161,15 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         return;
     };
 
-    // The view (sorted/grouped rows) is a cache derived from `keys`; if keys
-    // were populated without a rebuild (it is always built on a SCAN page in
-    // normal use), bring it up to date before rendering.
-    if conn.browser.view.is_empty() && !conn.browser.keys.is_empty() {
-        conn.rebuild_view();
-    }
+    // The view (sorted/grouped rows) is a cache derived from `keys`, kept current
+    // by the update phase: every SCAN page rebuilds it (see `App::on_keys_page`)
+    // and a fresh scan rebuilds it empty. Render therefore never rebuilds — it
+    // only reads — so drawing carries no hidden re-sort cost. Invariant: a
+    // non-empty key set always has a built view.
+    debug_assert!(
+        conn.browser.keys.is_empty() || !conn.browser.view.is_empty(),
+        "view must be rebuilt in the update phase before render"
+    );
 
     // The Browser stacks, top to bottom: a one-line info bar; an optional
     // server-stats band (Redis — the former standalone Dashboard); the keys +
@@ -246,6 +249,10 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // Track the scroll offset on `conn.browser.table` so it persists across frames
     // (the window only shifts when the selection would leave it, matching
     // ratatui's own follow behaviour) and so a shrunken view can't strand rows.
+    // This — and the value-pane scroll clamp below — are the *only* state writes
+    // the render path performs: both derive from the rendered area's height,
+    // which the update phase (which has no layout) cannot compute. Everything
+    // else render touches is read-only.
     let offset = visible_offset(conn.browser.table.offset(), selected, viewport, total);
     *conn.browser.table.offset_mut() = offset;
     let end = offset.saturating_add(viewport).min(total);
@@ -327,12 +334,13 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         None => " Value ".to_string(),
     };
     let value_lines = render_value(theme, conn.inspector.value.as_ref());
-    // Clamp the scroll offset so paging can't run off the end of the value. The
-    // bound uses logical line count (wrapping may split lines further, as the
+    // Clamp the scroll offset so paging can't run off the end of the value (the
+    // second of the two deliberate viewport-derived render writes noted above).
+    // The bound uses logical line count (wrapping may split lines further, as the
     // console's scroll does too); inner height excludes the two border rows.
     let inner_h = value_area.height.saturating_sub(2) as usize;
     let max_scroll = value_lines.len().saturating_sub(inner_h) as u16;
-    conn.inspector.value_scroll = conn.inspector.value_scroll.min(max_scroll);
+    conn.inspector.clamp_scroll(max_scroll);
     let value = Paragraph::new(value_lines)
         .block(
             Block::bordered()

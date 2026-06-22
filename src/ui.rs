@@ -775,6 +775,7 @@ mod tests {
             let (mut app, _rx) = app_with_connection().await;
             app.screen = Screen::Browser;
             app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
+            app.connections[0].rebuild_view();
             app.connections[0].browser.table.select(Some(0));
             app.connections[0].inspector.value_key = Some("mykey".into());
             app.connections[0].inspector.value = Some(view);
@@ -826,6 +827,7 @@ mod tests {
         app.screen = Screen::Browser;
         app.connections[0].caps.can_dashboard = false;
         app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
+        app.connections[0].rebuild_view();
         let text = screen_text(&mut app);
         assert!(text.contains("mykey"), "the key table still renders");
         assert!(!text.contains("Server"), "no stats band title");
@@ -928,6 +930,7 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
         app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
+        app.connections[0].rebuild_view();
         app.connections[0]
             .console
             .entries
@@ -1128,6 +1131,7 @@ mod tests {
             entry("user:1", ValueType::String),
             entry("session:abc", ValueType::Hash),
         ];
+        app.connections[0].rebuild_view();
         app.connections[0].browser.complete = true;
         app.connections[0].browser.table.select(Some(0));
         app.connections[0]
@@ -1160,6 +1164,7 @@ mod tests {
             entry("user:1", ValueType::String),
             entry("session:abc", ValueType::Hash),
         ];
+        app.connections[0].rebuild_view();
         app.connections[0].browser.complete = true;
         app.connections[0].browser.table.select(Some(0));
         app.connections[0].inspector.value_key = Some("user:1".into());
@@ -1193,6 +1198,7 @@ mod tests {
         pin_clock(&mut app);
         app.screen = Screen::Browser;
         app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].rebuild_view();
         app.connections[0].browser.complete = true;
         app.connections[0].browser.table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
@@ -1216,6 +1222,7 @@ mod tests {
         pin_clock(&mut app);
         app.screen = Screen::Browser;
         app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].rebuild_view();
         app.connections[0].browser.complete = true;
         app.connections[0].browser.table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Channel("orders".into()), 100);

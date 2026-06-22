@@ -491,6 +491,16 @@ pub struct ValueInspector {
     pub value_scroll: u16,
 }
 
+impl ValueInspector {
+    /// Clamp the scroll offset so paging can't run past the end of the value.
+    /// Called from the render path because the bound (`max`) depends on the
+    /// rendered pane height, which the update phase has no way to know — see the
+    /// note on viewport-derived writes in `ui::views::browser`.
+    pub fn clamp_scroll(&mut self, max: u16) {
+        self.value_scroll = self.value_scroll.min(max);
+    }
+}
+
 /// The server-statistics dashboard band for one connection: the latest stats
 /// and the tick counter that paces their refresh.
 #[derive(Default)]

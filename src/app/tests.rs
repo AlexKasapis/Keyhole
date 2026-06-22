@@ -434,6 +434,29 @@ fn finish_initial_scan(app: &mut App, id: ConnId, entries: Vec<EntryMeta>) {
     assert!(!app.active_conn().unwrap().browser.scanning);
 }
 
+#[tokio::test]
+async fn keys_page_builds_the_view_so_render_need_not_rebuild() {
+    // The render path no longer rebuilds the view defensively; it relies on the
+    // update phase keeping it current. Pin that: applying a SCAN page must leave
+    // a non-empty view whenever keys were loaded.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "local", 16).await;
+    finish_initial_scan(
+        &mut app,
+        id,
+        vec![
+            stream_entry("alpha", ValueType::String),
+            stream_entry("beta", ValueType::String),
+        ],
+    );
+    let conn = app.active_conn().unwrap();
+    assert!(!conn.browser.keys.is_empty(), "keys loaded");
+    assert!(
+        !conn.browser.view.is_empty(),
+        "on_keys_page rebuilds the view, so render never has to"
+    );
+}
+
 #[test]
 fn refresh_ticks_rounds_up_and_disables_on_zero() {
     assert_eq!(refresh_ticks(0), 0, "zero disables auto-refresh");
