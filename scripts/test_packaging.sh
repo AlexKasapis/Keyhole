@@ -63,19 +63,19 @@ for pkg in keyhole keyhole-bin; do
     for v in pkgname pkgver pkgrel pkgdesc arch url license; do
         [ -n "$(pkgbuild_var "$pb" "$v")" ] || missing="$missing $v"
     done
-    [ -z "$missing" ] && pass "$pkg: has required fields" || bad "$pkg: missing fields:$missing"
+    if [ -z "$missing" ]; then pass "$pkg: has required fields"; else bad "$pkg: missing fields:$missing"; fi
     if grep -qE '^[[:space:]]*package\(\)' "$pb"; then pass "$pkg: defines package()"; else bad "$pkg: no package() function"; fi
     # pkgname must equal the directory name.
-    [ "$(pkgbuild_var "$pb" pkgname)" = "$pkg" ] && pass "$pkg: pkgname matches dir" || bad "$pkg: pkgname != $pkg"
+    if [ "$(pkgbuild_var "$pb" pkgname)" = "$pkg" ]; then pass "$pkg: pkgname matches dir"; else bad "$pkg: pkgname != $pkg"; fi
 done
 
 echo "== version consistency =="
 for pkg in keyhole keyhole-bin; do
     pv=$(pkgbuild_var "$PKG/aur/$pkg/PKGBUILD" pkgver)
-    [ "$pv" = "$CARGO_VERSION" ] && pass "$pkg pkgver=$pv matches Cargo.toml" || bad "$pkg pkgver=$pv != $CARGO_VERSION"
+    if [ "$pv" = "$CARGO_VERSION" ]; then pass "$pkg pkgver=$pv matches Cargo.toml"; else bad "$pkg pkgver=$pv != $CARGO_VERSION"; fi
 done
 hb_version=$(grep -m1 -E '^  version "' "$PKG/homebrew/keyhole.rb" | sed -E 's/.*"([^"]+)".*/\1/')
-[ "$hb_version" = "$CARGO_VERSION" ] && pass "homebrew version=$hb_version matches Cargo.toml" || bad "homebrew version=$hb_version != $CARGO_VERSION"
+if [ "$hb_version" = "$CARGO_VERSION" ]; then pass "homebrew version=$hb_version matches Cargo.toml"; else bad "homebrew version=$hb_version != $CARGO_VERSION"; fi
 
 echo "== .SRCINFO is in sync with PKGBUILD =="
 for pkg in keyhole keyhole-bin; do
@@ -96,10 +96,10 @@ echo "== Homebrew formula =="
 formula="$PKG/homebrew/keyhole.rb"
 if ruby -c "$formula" >/dev/null 2>&1; then pass "formula is valid Ruby"; else bad "formula has a Ruby syntax error"; fi
 for anchor in '@sha256:linux-x86_64' '@sha256:linux-aarch64' '@sha256:src'; do
-    grep -q "$anchor" "$formula" && pass "formula has $anchor checksum anchor" || bad "formula missing $anchor anchor"
+    if grep -q "$anchor" "$formula"; then pass "formula has $anchor checksum anchor"; else bad "formula missing $anchor anchor"; fi
 done
-grep -qE '^  def install' "$formula" && pass "formula defines install" || bad "formula has no install method"
-grep -qE '^  test do' "$formula" && pass "formula defines a test block" || bad "formula has no test block"
+if grep -qE '^  def install' "$formula"; then pass "formula defines install"; else bad "formula has no install method"; fi
+if grep -qE '^  test do' "$formula"; then pass "formula defines a test block"; else bad "formula has no test block"; fi
 
 echo "== Nix flake =="
 if [ -f flake.nix ] && [ -f flake.lock ]; then
@@ -108,7 +108,7 @@ else
     bad "flake.nix and/or flake.lock missing"
 fi
 for needle in 'buildRustPackage' 'cargoLock' 'mainProgram'; do
-    grep -q "$needle" flake.nix && pass "flake.nix references $needle" || bad "flake.nix missing $needle"
+    if grep -q "$needle" flake.nix; then pass "flake.nix references $needle"; else bad "flake.nix missing $needle"; fi
 done
 if ruby -rjson -e 'JSON.parse(File.read("flake.lock"))' >/dev/null 2>&1; then
     pass "flake.lock is valid JSON"
@@ -137,30 +137,32 @@ deb_meta=$(toml_section Cargo.toml package.metadata.deb)
 rpm_meta=$(toml_section Cargo.toml package.metadata.generate-rpm)
 rpm_rec=$(toml_section Cargo.toml package.metadata.generate-rpm.recommends)
 
-[ -n "$deb_meta" ] && pass "[package.metadata.deb] present" || bad "[package.metadata.deb] missing from Cargo.toml"
-[ -n "$rpm_meta" ] && pass "[package.metadata.generate-rpm] present" || bad "[package.metadata.generate-rpm] missing from Cargo.toml"
+if [ -n "$deb_meta" ]; then pass "[package.metadata.deb] present"; else bad "[package.metadata.deb] missing from Cargo.toml"; fi
+if [ -n "$rpm_meta" ]; then pass "[package.metadata.generate-rpm] present"; else bad "[package.metadata.generate-rpm] missing from Cargo.toml"; fi
 
 # Payload both packages must install (substrings of the asset destination paths).
 for needle in 'usr/bin/' 'man/man1/' 'bash-completion/completions/keyhole' 'fish/vendor_completions.d/keyhole.fish' 'LICENSE-MIT' 'LICENSE-APACHE'; do
-    printf '%s' "$deb_meta" | grep -qF "$needle" && pass "deb installs $needle" || bad "deb missing asset: $needle"
-    printf '%s' "$rpm_meta" | grep -qF "$needle" && pass "rpm installs $needle" || bad "rpm missing asset: $needle"
+    if printf '%s' "$deb_meta" | grep -qF "$needle"; then pass "deb installs $needle"; else bad "deb missing asset: $needle"; fi
+    if printf '%s' "$rpm_meta" | grep -qF "$needle"; then pass "rpm installs $needle"; else bad "rpm missing asset: $needle"; fi
 done
 
 # zsh completions follow each distro's fpath convention.
-printf '%s' "$deb_meta" | grep -qF 'zsh/vendor-completions/_keyhole' && pass "deb uses zsh vendor-completions" || bad "deb zsh completion path wrong"
-printf '%s' "$rpm_meta" | grep -qF 'zsh/site-functions/_keyhole' && pass "rpm uses zsh site-functions" || bad "rpm zsh completion path wrong"
+if printf '%s' "$deb_meta" | grep -qF 'zsh/vendor-completions/_keyhole'; then pass "deb uses zsh vendor-completions"; else bad "deb zsh completion path wrong"; fi
+if printf '%s' "$rpm_meta" | grep -qF 'zsh/site-functions/_keyhole'; then pass "rpm uses zsh site-functions"; else bad "rpm zsh completion path wrong"; fi
 
 # Dependency policy: hard deps auto-detected from the ELF (so the glibc floor is
 # exact); the keyring Secret Service daemon is a weak (Recommends) dep, not hard.
-printf '%s' "$deb_meta" | grep -qE 'depends *= *"\$auto"' && pass "deb auto-detects shared-lib depends" || bad "deb depends policy changed"
-printf '%s' "$deb_meta" | grep -qE 'recommends *= *"gnome-keyring"' && pass "deb recommends gnome-keyring" || bad "deb keyring recommends missing"
-printf '%s' "$rpm_meta" | grep -qE 'auto-req *= *"builtin"' && pass "rpm auto-detects requires (builtin)" || bad "rpm auto-req policy changed"
-printf '%s' "$rpm_rec" | grep -qE '^gnome-keyring' && pass "rpm recommends gnome-keyring" || bad "rpm keyring recommends missing"
+# `$auto` is cargo-deb's literal sentinel, matched verbatim — not a shell var.
+# shellcheck disable=SC2016  # literal "$auto", deliberately not expanded
+if printf '%s' "$deb_meta" | grep -qE 'depends *= *"\$auto"'; then pass "deb auto-detects shared-lib depends"; else bad "deb depends policy changed"; fi
+if printf '%s' "$deb_meta" | grep -qE 'recommends *= *"gnome-keyring"'; then pass "deb recommends gnome-keyring"; else bad "deb keyring recommends missing"; fi
+if printf '%s' "$rpm_meta" | grep -qE 'auto-req *= *"builtin"'; then pass "rpm auto-detects requires (builtin)"; else bad "rpm auto-req policy changed"; fi
+if printf '%s' "$rpm_rec" | grep -qE '^gnome-keyring'; then pass "rpm recommends gnome-keyring"; else bad "rpm keyring recommends missing"; fi
 
 # The committed asset sources must be real files (the binary + man/completions are
 # generated at build time, so they are exercised by the CI `packages` job instead).
 for src in LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md; do
-    [ -f "$src" ] && pass "asset source $src exists" || bad "asset source $src missing from repo"
+    if [ -f "$src" ]; then pass "asset source $src exists"; else bad "asset source $src missing from repo"; fi
 done
 
 echo "== release generator round-trip =="
@@ -183,30 +185,33 @@ gsrc="$work/packaging/aur/keyhole/PKGBUILD"
 gformula="$work/packaging/homebrew/keyhole.rb"
 
 # Version bumped everywhere.
-[ "$(pkgbuild_var "$gbin" pkgver)" = "9.9.9" ] && pass "keyhole-bin version bumped" || bad "keyhole-bin version not bumped"
-[ "$(pkgbuild_var "$gsrc" pkgver)" = "9.9.9" ] && pass "keyhole version bumped" || bad "keyhole version not bumped"
-grep -q '^  version "9.9.9"' "$gformula" && pass "homebrew version bumped" || bad "homebrew version not bumped"
+if [ "$(pkgbuild_var "$gbin" pkgver)" = "9.9.9" ]; then pass "keyhole-bin version bumped"; else bad "keyhole-bin version not bumped"; fi
+if [ "$(pkgbuild_var "$gsrc" pkgver)" = "9.9.9" ]; then pass "keyhole version bumped"; else bad "keyhole version not bumped"; fi
+if grep -q '^  version "9.9.9"' "$gformula"; then pass "homebrew version bumped"; else bad "homebrew version not bumped"; fi
 
 # Real checksums injected into the right slots.
-grep -q "sha256sums_x86_64=('$H1')" "$gbin" && pass "keyhole-bin x86_64 sum injected" || bad "keyhole-bin x86_64 sum wrong"
-grep -q "sha256sums_aarch64=('$H2')" "$gbin" && pass "keyhole-bin aarch64 sum injected" || bad "keyhole-bin aarch64 sum wrong"
-grep -q "sha256sums=('$H3')" "$gsrc" && pass "keyhole source sum injected" || bad "keyhole source sum wrong"
-grep -q "sha256 \"$H1\" # @sha256:linux-x86_64" "$gformula" && pass "homebrew x86_64 sum injected" || bad "homebrew x86_64 sum wrong"
-grep -q "sha256 \"$H2\" # @sha256:linux-aarch64" "$gformula" && pass "homebrew aarch64 sum injected" || bad "homebrew aarch64 sum wrong"
-grep -q "sha256 \"$H3\" # @sha256:src" "$gformula" && pass "homebrew src sum injected" || bad "homebrew src sum wrong"
+if grep -q "sha256sums_x86_64=('$H1')" "$gbin"; then pass "keyhole-bin x86_64 sum injected"; else bad "keyhole-bin x86_64 sum wrong"; fi
+if grep -q "sha256sums_aarch64=('$H2')" "$gbin"; then pass "keyhole-bin aarch64 sum injected"; else bad "keyhole-bin aarch64 sum wrong"; fi
+if grep -q "sha256sums=('$H3')" "$gsrc"; then pass "keyhole source sum injected"; else bad "keyhole source sum wrong"; fi
+if grep -q "sha256 \"$H1\" # @sha256:linux-x86_64" "$gformula"; then pass "homebrew x86_64 sum injected"; else bad "homebrew x86_64 sum wrong"; fi
+if grep -q "sha256 \"$H2\" # @sha256:linux-aarch64" "$gformula"; then pass "homebrew aarch64 sum injected"; else bad "homebrew aarch64 sum wrong"; fi
+if grep -q "sha256 \"$H3\" # @sha256:src" "$gformula"; then pass "homebrew src sum injected"; else bad "homebrew src sum wrong"; fi
 
 # No placeholders survive, and the outputs are still well-formed. Match the
 # checksum-array assignment form so the explanatory `'SKIP'` in the header
 # comment is not counted.
 if grep -qE "^sha256sums(_[a-z0-9]+)?=\('SKIP'\)" "$gbin" "$gsrc"; then bad "a 'SKIP' placeholder survived in a PKGBUILD"; else pass "no SKIP placeholders remain"; fi
 if grep -q "0000000000000000" "$gformula"; then bad "a zero-hash placeholder survived in the formula"; else pass "no zero-hash placeholders remain"; fi
-bash -n "$gbin" && bash -n "$gsrc" && pass "generated PKGBUILDs are valid bash" || bad "a generated PKGBUILD broke"
-ruby -c "$gformula" >/dev/null 2>&1 && pass "generated formula is valid Ruby" || bad "generated formula broke"
+if bash -n "$gbin" && bash -n "$gsrc"; then pass "generated PKGBUILDs are valid bash"; else bad "a generated PKGBUILD broke"; fi
+if ruby -c "$gformula" >/dev/null 2>&1; then pass "generated formula is valid Ruby"; else bad "generated formula broke"; fi
 # Regenerated .SRCINFO reflects the new version + sums.
-diff -u "$work/packaging/aur/keyhole-bin/.SRCINFO" <(srcinfo_emit "$gbin") >/dev/null 2>&1 &&
+if diff -u "$work/packaging/aur/keyhole-bin/.SRCINFO" <(srcinfo_emit "$gbin") >/dev/null 2>&1 &&
     grep -q "pkgver = 9.9.9" "$work/packaging/aur/keyhole-bin/.SRCINFO" &&
-    grep -q "sha256sums_x86_64 = $H1" "$work/packaging/aur/keyhole-bin/.SRCINFO" &&
-    pass "generated .SRCINFO is consistent" || bad "generated .SRCINFO inconsistent"
+    grep -q "sha256sums_x86_64 = $H1" "$work/packaging/aur/keyhole-bin/.SRCINFO"; then
+    pass "generated .SRCINFO is consistent"
+else
+    bad "generated .SRCINFO inconsistent"
+fi
 
 echo "== optional native validators =="
 if command -v makepkg >/dev/null 2>&1; then
@@ -221,12 +226,12 @@ else
     skip "makepkg not installed (cannot cross-check .SRCINFO / build the package)"
 fi
 if command -v brew >/dev/null 2>&1; then
-    brew audit --formula --strict "$formula" >/dev/null 2>&1 && pass "brew audit clean" || bad "brew audit reported issues"
+    if brew audit --formula --strict "$formula" >/dev/null 2>&1; then pass "brew audit clean"; else bad "brew audit reported issues"; fi
 else
     skip "brew not installed (cannot run brew audit)"
 fi
 if command -v nix >/dev/null 2>&1; then
-    nix flake check --no-build >/dev/null 2>&1 && pass "nix flake check (eval) clean" || bad "nix flake check failed"
+    if nix flake check --no-build >/dev/null 2>&1; then pass "nix flake check (eval) clean"; else bad "nix flake check failed"; fi
 else
     skip "nix not installed (cannot evaluate/build the flake)"
 fi
@@ -238,12 +243,12 @@ fi
 # `$auto` depends), which is Debian-only, so it skips on non-Debian hosts.
 if [ -x target/release/keyhole ] && [ -f dist-assets/keyhole.1 ]; then
     if command -v cargo-deb >/dev/null 2>&1 && command -v dpkg-shlibdeps >/dev/null 2>&1; then
-        cargo deb --no-build --no-strip >/dev/null 2>&1 && pass "cargo deb builds a .deb from the metadata" || bad "cargo deb failed on the metadata"
+        if cargo deb --no-build --no-strip >/dev/null 2>&1; then pass "cargo deb builds a .deb from the metadata"; else bad "cargo deb failed on the metadata"; fi
     else
         skip "cargo-deb / dpkg-shlibdeps absent (full build+install is CI's 'packages' job)"
     fi
     if command -v cargo-generate-rpm >/dev/null 2>&1; then
-        cargo generate-rpm >/dev/null 2>&1 && pass "cargo generate-rpm builds an .rpm from the metadata" || bad "cargo generate-rpm failed on the metadata"
+        if cargo generate-rpm >/dev/null 2>&1; then pass "cargo generate-rpm builds an .rpm from the metadata"; else bad "cargo generate-rpm failed on the metadata"; fi
     else
         skip "cargo-generate-rpm absent (full build+install is CI's 'packages' job)"
     fi
