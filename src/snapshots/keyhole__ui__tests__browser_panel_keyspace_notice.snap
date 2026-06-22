@@ -1,0 +1,30 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 90, 26)"
+---
+ prod (db0)  · browser                                              1 keys   12:34:56 UTC
+┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
+│ Loading server stats…                                                                  │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Keys ─────────────────────────────────────┐┌ Value ────────────────────────────────────┐
+│  Key             Type    TTL       Size   ││Select a key to inspect its value.         │
+│▶ ▾ user (1)                               ││                                           │
+│    1             string  2m 0s     128 B  ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ─────────────────────────────────────────┐
+│ live · 0 events                                                                        │
+│⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
+│                                                                                        │
+│waiting for events…                                                                     │
+│                                                                                        │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·

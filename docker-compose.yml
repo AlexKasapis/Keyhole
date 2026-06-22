@@ -1,0 +1,44 @@
+# Local brokers for development & integration tests.
+#   docker compose up -d redis activemq          # Redis + ActiveMQ (AMQP 1.0)
+#   docker compose --profile rabbitmq up -d       # also start RabbitMQ (AMQP 0.9.1)
+#
+# Host ports are configurable to avoid clashes with an existing local stack.
+# Override in a (gitignored) .env file, e.g. KEYHOLE_REDIS_PORT=6380.
+services:
+  redis:
+    image: redis:7-alpine
+    # Keyspace notifications enabled for the Phase 3 keyspace monitor.
+    command: ["redis-server", "--notify-keyspace-events", "KEA"]
+    ports:
+      - "${KEYHOLE_REDIS_PORT:-6379}:6379"
+
+  # Apache ActiveMQ Classic — the Phase 4 AMQP 1.0 target (matches AWS Amazon MQ
+  # for ActiveMQ). Default credentials are admin/admin; AMQP is on 5672.
+  activemq:
+    image: apache/activemq-classic:latest
+    ports:
+      - "${KEYHOLE_ACTIVEMQ_PORT:-5674}:5672"  # AMQP 1.0
+      - "${KEYHOLE_ACTIVEMQ_WEB_PORT:-8162}:8161" # web console
+
+  # RabbitMQ — the Phase 5 AMQP 0.9.1 target (the `rabbitmq` broker, via lapin).
+  # Credentials are keyhole/keyhole: RabbitMQ restricts the built-in `guest`
+  # user to loopback, but the host reaches the container over the bridge network,
+  # so a non-`guest` user is required for the dockerized broker.
+  rabbitmq:
+    image: rabbitmq:3-management
+    profiles: ["rabbitmq"]
+    environment:
+      RABBITMQ_DEFAULT_USER: keyhole
+      RABBITMQ_DEFAULT_PASS: keyhole
+    ports:
+      - "${KEYHOLE_RABBITMQ_PORT:-5673}:5672"      # AMQP 0.9.1
+      - "${KEYHOLE_RABBITMQ_MGMT_PORT:-15673}:15672" # management UI / HTTP API
+    # Gate readiness on the keyhole user actually authenticating — `ping`
+    # succeeds as soon as the node is up, which is *before* the default user is
+    # provisioned, so an early test connect could hit ACCESS_REFUSED.
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "-q", "authenticate_user", "keyhole", "keyhole"]
+      interval: 5s
+      timeout: 10s
+      retries: 15
+      start_period: 20s

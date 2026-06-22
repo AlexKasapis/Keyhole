@@ -1,0 +1,7 @@
+/target
+*.rs.bk
+# Generated packaging assets (man page + shell completions from `keyhole gen`),
+# produced by `just package` and the release/CI workflows.
+/dist-assets
+# Local environment overrides (e.g. docker compose host ports).
+.env

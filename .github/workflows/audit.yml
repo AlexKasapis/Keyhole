@@ -1,0 +1,29 @@
+# Scheduled RUSTSEC advisory scan.
+#
+# ci.yml runs the full `cargo deny check` on every push/PR, but that only catches
+# advisories at commit time. A vulnerability disclosed against a dependency we
+# already ship would otherwise go unnoticed until the next commit. This job
+# re-runs the advisory check daily (and on demand) against the committed
+# Cargo.lock, so a fresh CVE surfaces as a failed run even on a quiet repo.
+name: Audit
+
+on:
+  schedule:
+    # 06:00 UTC daily.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+  # Re-scan immediately when the dependency graph or the policy changes.
+  push:
+    paths:
+      - "Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/audit.yml"
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check advisories

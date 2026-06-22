@@ -1,0 +1,190 @@
+[package]
+name = "keyhole"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+authors = ["Alex Kasapis <apkasapis@gmail.com>"]
+description = "A terminal UI to connect to message/data brokers (Redis, AMQP), browse data, watch realtime activity, and record live streams to disk."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/AlexKasapis/Keyhole"
+homepage = "https://github.com/AlexKasapis/Keyhole"
+documentation = "https://github.com/AlexKasapis/Keyhole"
+keywords = ["tui", "redis", "amqp", "broker", "terminal"]
+categories = ["command-line-utilities", "database"]
+# Keep the published crate slim: ship sources, README, licenses, and CHANGELOG,
+# but drop dev-only tooling that the build/install path never needs.
+exclude = [
+    ".github/",
+    "docs/",
+    "scripts/",
+    "docker-compose.yml",
+    "justfile",
+    "release.toml",
+    "deny.toml",
+    ".editorconfig",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+]
+
+# `cargo binstall keyhole` fetches the prebuilt GitHub Release tarball instead of
+# compiling. The template matches what .github/workflows/release.yml uploads via
+# upload-rust-binary-action (`<name>-<target>.tar.gz`, leading directory).
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive-format }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+# Tier 3 — distro-native packages (.deb / .rpm), built from the full-feature
+# glibc binary (keyring + AMQP + RabbitMQ) and uploaded to each GitHub Release so
+# openSUSE/Fedora users can `zypper install ./keyhole*.rpm` / `dnf install` and
+# Debian/Ubuntu users `apt install ./keyhole*.deb` without waiting on official-
+# repo inclusion. Both carry the same payload as the release tarball: the binary,
+# the generated man page + bash/zsh/fish completions, and the dual licenses. The
+# dependency-free alternative is the static musl tarball (see the README).
+#
+# The keyring backend is pure-Rust zbus and the TLS stack is statically linked
+# (rustls + aws-lc), so `ldd` shows only libc/libm/libgcc_s — there is NO libdbus
+# or OpenSSL shared-library dependency. The Secret Service daemon the keyring
+# talks to over the session bus is therefore a runtime convenience, declared as a
+# weak (Recommends) dependency rather than a hard one; env-var and prompt secret
+# specs work without it. Asset source paths point at `target/release/keyhole` +
+# `dist-assets/` (the man page + completions emitted by `keyhole gen`), which the
+# release workflow stages before invoking cargo-deb / cargo-generate-rpm.
+
+[package.metadata.deb]
+# `description` (the package synopsis) is taken from [package] above; this is the
+# Debian long description shown by `apt show keyhole`.
+extended-description = """\
+A terminal UI to connect to message/data brokers (Redis, AMQP 1.0, RabbitMQ), \
+browse their data, watch realtime activity, and record live streams to disk for \
+later inspection. All operations are read-only / non-destructive by design."""
+section = "utils"
+priority = "optional"
+# libc6 + libgcc-s1 are auto-detected from the binary by dpkg-shlibdeps, which
+# also pins the correct glibc version floor for the build toolchain.
+depends = "$auto"
+# A Secret Service daemon for the OS-keyring secret backend. Optional (env-var
+# and prompt secret specs work without it), so a recommendation, not a depend.
+recommends = "gnome-keyring"
+# [source, dest, mode]; a dest ending in `/` keeps the source filename. cargo-deb
+# gzips the man page and rewrites its path automatically.
+assets = [
+    ["target/release/keyhole", "usr/bin/", "755"],
+    ["dist-assets/keyhole.1", "usr/share/man/man1/", "644"],
+    ["dist-assets/keyhole.bash", "usr/share/bash-completion/completions/keyhole", "644"],
+    ["dist-assets/_keyhole", "usr/share/zsh/vendor-completions/_keyhole", "644"],
+    ["dist-assets/keyhole.fish", "usr/share/fish/vendor_completions.d/keyhole.fish", "644"],
+    ["LICENSE-MIT", "usr/share/doc/keyhole/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/keyhole/LICENSE-APACHE", "644"],
+    ["README.md", "usr/share/doc/keyhole/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/keyhole/CHANGELOG.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+# Discover the soname Requires (libc.so.6 / libm.so.6 / libgcc_s.so.1) from the
+# ELF directly so the result is identical regardless of the (Debian) build host
+# and is satisfied by glibc on every rpm distro. zsh completions go under
+# site-functions (the Fedora/openSUSE fpath), vs. Debian's vendor-completions.
+auto-req = "builtin"
+# The man page and licenses are deliberately NOT flagged `doc`: a `%doc` file is
+# skipped under rpm's `--nodocs` / `tsflags=nodocs` (the default in minimal/CI
+# images), and we want `man keyhole` and the license texts to survive that. Only
+# the README/CHANGELOG (true reference docs) carry the doc flag.
+assets = [
+    { source = "target/release/keyhole", dest = "/usr/bin/keyhole", mode = "0755" },
+    { source = "dist-assets/keyhole.1", dest = "/usr/share/man/man1/keyhole.1", mode = "0644" },
+    { source = "dist-assets/keyhole.bash", dest = "/usr/share/bash-completion/completions/keyhole", mode = "0644" },
+    { source = "dist-assets/_keyhole", dest = "/usr/share/zsh/site-functions/_keyhole", mode = "0644" },
+    { source = "dist-assets/keyhole.fish", dest = "/usr/share/fish/vendor_completions.d/keyhole.fish", mode = "0644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/keyhole/LICENSE-MIT", mode = "0644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/keyhole/LICENSE-APACHE", mode = "0644" },
+    { source = "README.md", dest = "/usr/share/doc/keyhole/README.md", mode = "0644", doc = true },
+    { source = "CHANGELOG.md", dest = "/usr/share/doc/keyhole/CHANGELOG.md", mode = "0644", doc = true },
+]
+
+# Weak dep mirroring the .deb Recommends: the OS-keyring Secret Service daemon.
+[package.metadata.generate-rpm.recommends]
+gnome-keyring = "*"
+
+[dependencies]
+# --- async runtime ---
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
+tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken + TaskTracker
+futures-util = "0.3"
+async-trait = "0.1"
+
+# --- terminal UI ---
+ratatui = "0.30"
+# crossterm is re-exported by ratatui; we depend on the SAME minor (0.29) only to
+# enable `event-stream` (async input). Cargo unifies the feature onto ratatui's copy.
+crossterm = { version = "0.29", features = ["event-stream"] }
+tui-tree-widget = "0.24"   # sidebar connection/keyspace tree
+tui-input = "0.15"         # single-line fields for the connection form modal
+unicode-width = "0.2"      # display-width-aware column truncation/padding
+
+# --- Redis client (v1 broker) ---
+redis = { version = "1.2", features = ["tokio-comp", "connection-manager", "streams"] }
+
+# --- config & secrets ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+toml_edit = "0.25"          # comment-preserving writes for in-app profile edits
+directories = "6"           # XDG config/data dirs
+keyring = { version = "4", optional = true }   # default backend = pure-Rust zbus secret-service
+
+# --- errors / logging / cli / time / bytes ---
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"    # file-only logging (TUI owns the terminal)
+clap = { version = "4", features = ["derive"] }
+# Generate the man page and shell completions from the clap `Command` via the
+# hidden `keyhole gen` subcommand (consumed by the .deb/.rpm/AUR/Homebrew/Nix
+# packaging in later tiers). Both are small and introspect the live CLI, so the
+# artifacts can never drift from the actual flags.
+clap_complete = "4"
+clap_mangen = "0.2"
+# `serde-well-known` provides the RFC 3339 (de)serializers for recording timestamps.
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "macros"] }
+base64 = "0.22"
+bytes = "1"
+percent-encoding = "2.3.2"
+# AMQP 1.0 client (`amqp` feature): ActiveMQ / Amazon MQ / RabbitMQ-4.x. `rustls`
+# enables `amqps://` for Amazon MQ's TLS endpoint (:5671). Optional so the
+# minimal headless/musl build can drop it (and its TLS-crypto C dependencies).
+fe2o3-amqp = { version = "0.15.1", features = ["rustls"], optional = true }
+# AMQP 0.9.1 client (`rabbitmq` feature): RabbitMQ (all versions). lapin's default features
+# are `rustls` + `default-runtime` (= tokio), so it binds to the app's existing
+# tokio runtime out of the box (`ConnectionProperties::default()`) and speaks
+# `amqps://` over rustls — no extra executor/reactor shims, no OpenSSL. Optional,
+# so the minimal headless/musl build drops it like the AMQP 1.0 stack.
+lapin = { version = "4", optional = true }
+
+[dev-dependencies]
+# Snapshot testing of rendered TUI frames (see src/ui — snapshot module).
+insta = "1"
+
+[features]
+default = ["keyring", "amqp", "rabbitmq"]
+# OS keyring support. Disable for headless/musl builds (env-var secrets only):
+#   cargo build --no-default-features
+keyring = ["dep:keyring"]
+# AMQP 1.0 broker support (Redis is always built in). Off in the minimal
+# headless/musl build, whose rustls/aws-lc TLS stack is awkward to link static.
+amqp = ["dep:fe2o3-amqp"]
+# RabbitMQ (AMQP 0.9.1) broker support, via lapin bound to the tokio runtime.
+# Off in the minimal headless/musl build for the same TLS-linking reason as AMQP.
+rabbitmq = ["dep:lapin"]
+# Gate integration tests that require a live broker (e.g. dockerized Redis).
+integration = []
+
+[profile.release]
+strip = true
+# Distribution-grade binaries: thin LTO + a single codegen unit trade longer
+# release-build time (release CI only, not dev `cargo build`) for a smaller,
+# faster binary. `panic = "unwind"` is left at the default deliberately.
+lto = "thin"
+codegen-units = 1
