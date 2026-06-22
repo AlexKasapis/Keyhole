@@ -3471,7 +3471,7 @@ mod tests {
             app.handle_key(ch(c));
         }
         let count = app.palette_labels().len();
-        assert!(count >= 4); // 4 "Go to:" entries (Command console was removed)
+        assert!(count >= 2); // Realtime/Recordings "Go to:" entries (Connections/Browser use Enter/Esc)
         app.handle_key(key(KeyCode::Up)); // wrap to the last
         assert_eq!(app.palette.as_ref().unwrap().selected, count - 1);
         app.handle_key(key(KeyCode::Down)); // back to the first

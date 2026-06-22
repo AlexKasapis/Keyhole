@@ -1,27 +1,28 @@
 ---
 source: src/ui.rs
+assertion_line: 969
 expression: "render_lines(&mut app, 90, 24)"
 ---
  Keyhole   no connection  · connections                                      12:34:56 UTC
 ┌ Connections ───────────────────────────────────────────────────────────────────────────┐
 │                                                                                        │
+│                                  No saved connections.                                 │
+│                                                                                        │
+│                                  Press 'a' to add one.                                 │
 │                ┌ Command palette ─────────────────────────────────────┐                │
 │                │› ▏                                                   │                │
-│                │▶ Go to: Connections                                  │                │
-│                │  Go to: Browser                                      │                │
-│                │  Go to: Realtime tails                               │                │
+│                │▶ Go to: Realtime tails                               │                │
 │                │  Go to: Recordings                                   │                │
 │                │  Add connection                                      │                │
 │                │  Subscribe (pub/sub or stream)…                      │                │
 │                │  Monitor commands (MONITOR)                          │                │
 │                │  Keyspace events (current db)                        │                │
-│                │  Browser: cycle sort column                          │                │
-│                │  Browser: toggle sort direction                      │                │
-│                │  Browser: collapse/expand all groups                 │                │
 │                │  Refresh / toggle recording                          │                │
 │                │  Toggle help                                         │                │
 │                │  Quit                                                │                │
 │                └──────────────────────────────────────────────────────┘                │
+│                                                                                        │
+│                                                                                        │
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘

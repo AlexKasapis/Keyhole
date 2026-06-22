@@ -109,20 +109,12 @@ pub struct PaletteItem {
 
 /// The actions offered by the command palette (`:`), in display order.
 pub const PALETTE_ITEMS: &[PaletteItem] = &[
-    pal("Go to: Connections", Action::GotoConnections),
-    pal("Go to: Browser", Action::GotoBrowser),
     pal("Go to: Realtime tails", Action::GotoRealtime),
     pal("Go to: Recordings", Action::GotoRecordings),
     pal("Add connection", Action::AddConnection),
     pal("Subscribe (pub/sub or stream)…", Action::Subscribe),
     pal("Monitor commands (MONITOR)", Action::StartMonitor),
     pal("Keyspace events (current db)", Action::StartKeyspace),
-    pal("Browser: cycle sort column", Action::CycleSort),
-    pal("Browser: toggle sort direction", Action::ToggleSortDir),
-    pal(
-        "Browser: collapse/expand all groups",
-        Action::ToggleAllGroups,
-    ),
     pal("Refresh / toggle recording", Action::Refresh),
     pal("Toggle help", Action::ToggleHelp),
     pal("Quit", Action::Quit),
@@ -228,8 +220,8 @@ mod tests {
         assert_eq!(monitor.len(), 1);
         assert_eq!(monitor[0].action, Action::StartMonitor);
         assert!(
-            palette_matches("GO TO").len() >= 4,
-            "all the Go to: entries (Command console was removed)"
+            palette_matches("GO TO").len() >= 2,
+            "the remaining Go to: entries (Connections/Browser are reached via Enter/Esc)"
         );
         assert!(palette_matches("zzzz").is_empty(), "no matches");
     }
