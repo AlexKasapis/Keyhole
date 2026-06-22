@@ -166,7 +166,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 
     let scanning = if conn.complete { "" } else { " · scanning…" };
     let sort_dir = if conn.sort_desc { "↓" } else { "↑" };
-    let grouping = if conn.group_by_prefix { "prefix" } else { "off" };
+    let grouping = if conn.group_by_prefix {
+        "prefix"
+    } else {
+        "off"
+    };
     let info = Line::from(vec![
         Span::styled(format!(" db{} ", conn.db), theme.accent),
         Span::styled(format!(" match={} ", conn.pattern), theme.dim),
@@ -832,7 +836,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
         Line::from("  the read-only console (Redis) is a band along the bottom"),
-        Line::from("  / filter   [ ] change DB   n load more   r refresh"),
+        Line::from("  / filter   [ ] change DB   r refresh (keys auto-refresh)"),
         Line::from("  o sort column   O direction   p group by prefix"),
         Line::from("  Enter/Space fold group   z fold/unfold all"),
         Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),

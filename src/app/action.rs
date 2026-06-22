@@ -41,7 +41,6 @@ pub enum Action {
     StopTail,
     DbPrev,
     DbNext,
-    LoadMore,
     /// Cycle the key-list sort column (Browser).
     CycleSort,
     /// Flip the key-list sort direction (Browser).
@@ -91,7 +90,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('/')) => Some(Action::StartFilter),
         (false, Char('[')) => Some(Action::DbPrev),
         (false, Char(']')) => Some(Action::DbNext),
-        (false, Char('n')) => Some(Action::LoadMore),
         (false, Char('o')) => Some(Action::CycleSort),
         (false, Char('O')) => Some(Action::ToggleSortDir),
         (false, Char('p')) => Some(Action::ToggleGroup),
@@ -123,7 +121,10 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     pal("Browser: cycle sort column", Action::CycleSort),
     pal("Browser: toggle sort direction", Action::ToggleSortDir),
     pal("Browser: group by prefix (toggle)", Action::ToggleGroup),
-    pal("Browser: collapse/expand all groups", Action::ToggleAllGroups),
+    pal(
+        "Browser: collapse/expand all groups",
+        Action::ToggleAllGroups,
+    ),
     pal("Refresh / toggle recording", Action::Refresh),
     pal("Toggle help", Action::ToggleHelp),
     pal("Quit", Action::Quit),
@@ -186,7 +187,6 @@ mod tests {
         assert_eq!(plain(Char('/')), Some(Action::StartFilter));
         assert_eq!(plain(Char('[')), Some(Action::DbPrev));
         assert_eq!(plain(Char(']')), Some(Action::DbNext));
-        assert_eq!(plain(Char('n')), Some(Action::LoadMore));
         assert_eq!(plain(Char('o')), Some(Action::CycleSort));
         assert_eq!(plain(Char('O')), Some(Action::ToggleSortDir));
         assert_eq!(plain(Char('p')), Some(Action::ToggleGroup));

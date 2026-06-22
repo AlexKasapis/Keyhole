@@ -14,7 +14,7 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │
 │           │  the read-only console (Redis) is a band along the bottom      │           │
-│           │  / filter   [ ] change DB   n load more   r refresh            │           │
+│           │  / filter   [ ] change DB   r refresh (keys auto-refresh)      │           │
 │           │  o sort column   O direction   p group by prefix               │           │
 │           │  Enter/Space fold group   z fold/unfold all                    │           │
 │           │  PgUp/PgDn (or Ctrl-u/d) scroll the value pane                 │           │

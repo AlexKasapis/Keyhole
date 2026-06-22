@@ -267,6 +267,10 @@ pub struct BrowseReq {
     pub cursor: u64,
     /// SCAN `COUNT` hint.
     pub page_size: usize,
+    /// Generation of the scan this request belongs to. Echoed back on the
+    /// resulting [`BrowsePage`] so the UI can discard pages from a scan that has
+    /// since been superseded (a DB switch, a new filter, a fresh refresh).
+    pub epoch: u64,
 }
 
 /// One listed entry with its type, TTL, and (when available) memory footprint.
@@ -287,6 +291,10 @@ pub struct BrowsePage {
     pub entries: Vec<EntryMeta>,
     /// Cursor for the next page; `0` means the scan is complete.
     pub next_cursor: u64,
+    /// Generation copied from the originating [`BrowseReq`] (stamped by the
+    /// connection actor). The UI compares it against the scan it is currently
+    /// driving and ignores pages that no longer match.
+    pub epoch: u64,
 }
 
 /// A request to inspect a single key's value (with paging for collections).
