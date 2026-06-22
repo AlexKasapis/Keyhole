@@ -231,6 +231,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             }),
         })
         .collect();
+    let row_count = rows.len();
     let widths = [
         Constraint::Min(10),
         Constraint::Length(6),
@@ -247,6 +248,16 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         )
         .row_highlight_style(theme.selected)
         .highlight_symbol("▶ ");
+    // Clamp the table's scroll offset so a shrunken view (e.g. collapsing a
+    // group while scrolled far down) can't leave rows stranded above the panel
+    // with blank space below. ratatui only ever grows the offset to keep the
+    // selection visible — it never pulls content back up — so we cap it here.
+    // The viewport excludes the two border rows and the one header row.
+    let viewport = table_area.height.saturating_sub(3) as usize;
+    let max_offset = row_count.saturating_sub(viewport);
+    if conn.table.offset() > max_offset {
+        *conn.table.offset_mut() = max_offset;
+    }
     frame.render_stateful_widget(table, table_area, &mut conn.table);
 
     let title = match &conn.value_key {
