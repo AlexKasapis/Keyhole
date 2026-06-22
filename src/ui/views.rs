@@ -824,7 +824,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
         Line::from("  the read-only console (Redis) is a band along the bottom"),
-        Line::from("  / filter   [ ] change DB   n load more   r refresh"),
+        Line::from("  / filter   [ ] change DB   r refresh (keys auto-refresh)"),
         Line::from("  o sort column   O direction"),
         Line::from("  keys are always grouped by prefix into collapsible sections"),
         Line::from("  Enter/Space collapse/expand group (from header or key)"),

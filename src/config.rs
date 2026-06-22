@@ -257,6 +257,11 @@ pub struct Settings {
     /// Max events retained per live tail (scrollback ring buffer size).
     #[serde(default = "default_tail_scrollback")]
     pub tail_scrollback: usize,
+    /// How often the key browser re-scans the keyspace, in milliseconds, so
+    /// keys added or removed in the server show up without a manual refresh.
+    /// The refresh is independent of navigation. `0` disables auto-refresh.
+    #[serde(default = "default_browse_refresh_ms")]
+    pub browse_refresh_ms: u64,
 }
 
 impl Default for Settings {
@@ -265,6 +270,7 @@ impl Default for Settings {
             scan_count: default_scan_count(),
             value_preview_bytes: default_value_preview_bytes(),
             tail_scrollback: default_tail_scrollback(),
+            browse_refresh_ms: default_browse_refresh_ms(),
         }
     }
 }
@@ -279,6 +285,10 @@ fn default_value_preview_bytes() -> usize {
 
 fn default_tail_scrollback() -> usize {
     2000
+}
+
+fn default_browse_refresh_ms() -> u64 {
+    5000
 }
 
 // ---------------------------------------------------------------------------
@@ -371,6 +381,19 @@ mod tests {
         assert_eq!(profile.password_spec(), SecretSpec::Env("REDIS_PW".into()));
         assert!(!profile.tls);
         // Defaults applied.
+        assert_eq!(cfg.settings.scan_count, 500);
+        assert_eq!(cfg.settings.browse_refresh_ms, 5000);
+    }
+
+    #[test]
+    fn parses_browse_refresh_interval_override() {
+        let text = r#"
+            [settings]
+            browse_refresh_ms = 1500
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.settings.browse_refresh_ms, 1500);
+        // Other settings still fall back to their defaults.
         assert_eq!(cfg.settings.scan_count, 500);
     }
 

@@ -14,7 +14,7 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │
 │           │  the read-only console (Redis) is a band along the bottom      │           │
-│           │  / filter   [ ] change DB   n load more   r refresh            │           │
+│           │  / filter   [ ] change DB   r refresh (keys auto-refresh)      │           │
 │           │  o sort column   O direction                                   │           │
 │           │  keys are always grouped by prefix into collapsible sections   │           │
 │           │  Enter/Space collapse/expand group (from header or key)        │           │

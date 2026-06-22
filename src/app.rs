@@ -7,7 +7,7 @@ mod state;
 
 pub use state::{
     ConnForm, Connection, Console, ConsoleEntry, InputMode, PaletteState, RecordState,
-    RecordingFile, Screen, Status, SubState, Subscription, ViewRow,
+    RecordingFile, ScanStep, Screen, Status, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -27,19 +27,21 @@ use crate::broker::amqp::AmqpConnection;
 use crate::broker::rabbitmq::RabbitmqConnection;
 use crate::broker::redis::RedisConnection;
 use crate::broker::{
-    BrokerConnection, BrokerEvent, BrokerKind, BrowsePage, BrowseReq, Capabilities, ConnId,
-    InspectReq, ServerStats, SubSpec, ValueType, ValueView,
+    BrokerConnection, BrokerEvent, BrokerKind, BrowsePage, Capabilities, ConnId, InspectReq,
+    ServerStats, SubSpec, ValueType, ValueView,
 };
 use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;
 use crate::recording::RecordingStatus;
 use crate::theme::Theme;
 
+/// Nominal period of one UI tick, mirroring `crate::TICK_PERIOD`. Used to turn
+/// a configured refresh interval (milliseconds) into a tick count.
+const TICK_PERIOD_MS: u64 = 250;
 /// How many ticks (~250ms each) between automatic dashboard stat refreshes.
 const STATS_REFRESH_TICKS: u32 = 8;
-/// Inspect window / SCAN look-ahead margin for auto load-more.
+/// How many elements of a value to fetch into the inspector at a time.
 const VALUE_LIMIT: usize = 200;
-const LOAD_MORE_MARGIN: usize = 5;
 /// Lines the Browser value pane scrolls per PageUp/PageDown.
 const VALUE_SCROLL_STEP: i32 = 10;
 /// Lines the Browser console band scrolls per PageUp/PageDown while focused —
@@ -61,6 +63,9 @@ pub struct App {
     preview_bytes: usize,
     scan_count: usize,
     tail_scrollback: usize,
+    /// Ticks between automatic key-browser refreshes (`0` disables them),
+    /// derived from `settings.browse_refresh_ms`.
+    browse_refresh_ticks: u32,
     recordings_dir: PathBuf,
     next_id: u32,
     next_sub_id: u32,
@@ -103,6 +108,7 @@ impl App {
         let preview_bytes = config.settings.value_preview_bytes;
         let scan_count = config.settings.scan_count;
         let tail_scrollback = config.settings.tail_scrollback;
+        let browse_refresh_ticks = refresh_ticks(config.settings.browse_refresh_ms);
         let theme = Theme::resolve(&config.theme);
         let mut profile_state = TableState::default();
         if !profiles.is_empty() {
@@ -119,6 +125,7 @@ impl App {
             preview_bytes,
             scan_count,
             tail_scrollback,
+            browse_refresh_ticks,
             recordings_dir,
             next_id: 1,
             next_sub_id: 1,
@@ -232,6 +239,9 @@ impl App {
 
     fn on_tick(&mut self) {
         self.now = OffsetDateTime::now_utc();
+        let refresh_ticks = self.browse_refresh_ticks;
+        let on_browser = self.screen == Screen::Browser;
+        let mut refresh_id = None;
         if let Some(conn) = self.active_conn_mut() {
             conn.stat_ticks += 1;
             if conn.stat_ticks >= STATS_REFRESH_TICKS {
@@ -244,6 +254,25 @@ impl App {
                 // Liveness check; a failure surfaces as Disconnected.
                 conn.handle.send(ConnCommand::Ping);
             }
+            // Auto-refresh the key browser on its own clock, independent of
+            // navigation, so keys added or removed server-side appear without
+            // the user touching anything. Gated to the Browser screen (no point
+            // re-scanning while a tail is on screen) and never stacked on top of
+            // a scan that is still running.
+            if refresh_ticks > 0 && on_browser && conn.caps.can_browse {
+                conn.browse_ticks += 1;
+                if conn.browse_ticks >= refresh_ticks {
+                    conn.browse_ticks = 0;
+                    if !conn.scanning {
+                        refresh_id = Some(conn.id);
+                    }
+                }
+            }
+        }
+        if let Some(id) = refresh_id {
+            // A background refresh: keep the current list visible and swap in the
+            // fresh scan once it completes.
+            self.start_scan(id, false);
         }
     }
 
@@ -258,7 +287,7 @@ impl App {
         self.set_status(format!("Connected to {name}"), false);
         // Kick off the broker-appropriate first load.
         if caps.can_browse {
-            self.start_browse(id, true);
+            self.start_scan(id, true);
         }
         if caps.can_dashboard {
             self.request_stats(id);
@@ -283,19 +312,27 @@ impl App {
     }
 
     fn on_keys_page(&mut self, id: ConnId, page: BrowsePage) {
+        let page_size = self.scan_count;
+        // Fold the page into the scan in progress. A multi-page scan drives
+        // itself to completion by issuing the next request here (not on
+        // navigation), so the full keyspace loads on its own.
+        let next = match self.conn_by_id_mut(id) {
+            Some(conn) => match conn.apply_page(page, page_size) {
+                ScanStep::Stale => return, // page from a superseded scan; drop it
+                ScanStep::Continue(req) => Some(req),
+                ScanStep::Done => None,
+            },
+            None => return,
+        };
+        // Land the highlight on the first row as soon as there is one to show.
         if let Some(conn) = self.conn_by_id_mut(id) {
-            if page.db != conn.db {
-                return; // stale page from a previous DB
-            }
-            conn.keys.extend(page.entries);
-            conn.next_cursor = page.next_cursor;
-            conn.complete = page.next_cursor == 0;
-            // Fold the new keys into the sorted/grouped view, keeping the
-            // highlight on whatever key/group was selected (or selecting the
-            // first row when nothing was).
-            conn.rebuild_view();
             if conn.table.selected().is_none() && !conn.view.is_empty() {
                 conn.table.select(Some(0));
+            }
+        }
+        if let Some(req) = next {
+            if let Some(conn) = self.conn_by_id(id) {
+                conn.handle.send(ConnCommand::Browse(req));
             }
         }
         self.request_selected_value(id);
@@ -572,13 +609,6 @@ impl App {
                 Screen::Realtime => self.focus_tab(1),
                 _ => {}
             },
-            Action::LoadMore => {
-                if self.screen == Screen::Browser {
-                    if let Some(id) = self.active_id() {
-                        self.start_browse(id, false);
-                    }
-                }
-            }
             // Browser key-list ordering and grouping. Each mutates the active
             // connection's view and reports the new state in the status bar.
             Action::CycleSort => self.browser_view(|c| {
@@ -599,7 +629,7 @@ impl App {
             Action::Refresh => match self.screen {
                 Screen::Browser => {
                     if let Some(id) = self.active_id() {
-                        self.start_browse(id, true);
+                        self.start_scan(id, true);
                         self.request_stats(id);
                     }
                 }
@@ -706,9 +736,10 @@ impl App {
                     let next = move_selection(conn.table.selected(), conn.view.len(), delta);
                     conn.table.select(next);
                 }
+                // Navigation only moves the highlight; the key list refreshes on
+                // its own timer (see `on_tick`), not as a side effect of moving.
                 if let Some(id) = self.active_id() {
                     self.request_selected_value(id);
-                    self.maybe_load_more(id);
                 }
             }
             Screen::Realtime => self.scroll_tail(delta),
@@ -739,7 +770,6 @@ impl App {
                 }
                 if let Some(id) = self.active_id() {
                     self.request_selected_value(id);
-                    self.maybe_load_more(id);
                 }
             }
             Screen::Realtime => {
@@ -788,7 +818,7 @@ impl App {
         conn.db = new_db;
         let id = conn.id;
         self.set_status(format!("Switched to db{new_db}"), false);
-        self.start_browse(id, true);
+        self.start_scan(id, true);
     }
 
     /// Apply a view-setting mutation to the active connection while on the
@@ -1031,26 +1061,17 @@ impl App {
 
     // -- broker requests -----------------------------------------------------
 
-    fn start_browse(&mut self, id: ConnId, reset: bool) {
+    /// Start a fresh keyspace scan for connection `id`, decoupled from
+    /// navigation. `live` is forwarded to [`Connection::begin_scan`]: a
+    /// foreground scan (initial load, DB/filter change, explicit refresh)
+    /// reveals keys as they load and clears the previous result first; a
+    /// background scan (the auto-refresh) keeps the current list visible and
+    /// swaps the fresh set in atomically once complete. The scan then drives
+    /// itself page by page to completion in [`Self::on_keys_page`].
+    fn start_scan(&mut self, id: ConnId, live: bool) {
         let page_size = self.scan_count;
         if let Some(conn) = self.conn_by_id_mut(id) {
-            if reset {
-                conn.keys.clear();
-                conn.next_cursor = 0;
-                conn.complete = false;
-                // Rebuild the (now empty) view; sort/group/collapse preferences
-                // persist across a rescan, the selection resets to none.
-                conn.rebuild_view();
-                conn.value = None;
-                conn.value_key = None;
-                conn.value_scroll = 0;
-            }
-            let req = BrowseReq {
-                db: conn.db,
-                pattern: conn.pattern.clone(),
-                cursor: conn.next_cursor,
-                page_size,
-            };
+            let req = conn.begin_scan(live, page_size);
             conn.handle.send(ConnCommand::Browse(req));
         }
     }
@@ -1079,18 +1100,6 @@ impl App {
         }
     }
 
-    fn maybe_load_more(&mut self, id: ConnId) {
-        let should = self.conn_by_id(id).is_some_and(|c| {
-            // The selection ranges over view rows, so the "near the end" check
-            // compares against the view length (which equals the key count when
-            // ungrouped, and is shorter when groups are collapsed).
-            !c.complete && c.table.selected().unwrap_or(0) + LOAD_MORE_MARGIN >= c.view.len()
-        });
-        if should {
-            self.start_browse(id, false);
-        }
-    }
-
     fn apply_filter(&mut self) {
         let raw = self.filter.trim().to_string();
         let pattern = if raw.is_empty() {
@@ -1104,7 +1113,7 @@ impl App {
             conn.pattern = pattern;
         }
         if let Some(id) = self.active_id() {
-            self.start_browse(id, true);
+            self.start_scan(id, true);
         }
     }
 
@@ -1524,6 +1533,20 @@ fn initial_screen(caps: &Capabilities) -> Screen {
     }
 }
 
+/// Convert a configured key-browser refresh interval (milliseconds) into a
+/// count of UI ticks. `0` stays `0` (auto-refresh disabled); any other value
+/// rounds up to at least one tick so a tiny interval still fires.
+fn refresh_ticks(interval_ms: u64) -> u32 {
+    if interval_ms == 0 {
+        return 0;
+    }
+    interval_ms
+        .div_ceil(TICK_PERIOD_MS)
+        .max(1)
+        .try_into()
+        .unwrap_or(u32::MAX)
+}
+
 /// Decide whether the form's password field is a *spec* (persisted) or a
 /// *literal* (used for this session only, never written to the config file).
 fn classify_password(pw: &str) -> (Option<String>, Option<String>) {
@@ -1821,18 +1844,23 @@ mod tests {
     async fn keys_page_extends_and_tracks_cursor() {
         let (mut app, _rx) = test_app();
         let id = connect(&mut app, 1, "prod", 16).await;
+        // The initial (foreground) scan was kicked off on connect; its pages
+        // carry the current scan epoch.
+        let epoch = app.active_conn().unwrap().scan_epoch;
         app.handle_event(AppEvent::KeysPage {
             id,
             page: BrowsePage {
                 db: 0,
                 entries: vec![stream_entry("k1", ValueType::String)],
                 next_cursor: 5,
+                epoch,
             },
         });
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.keys.len(), 1);
         assert_eq!(conn.next_cursor, 5);
         assert!(!conn.complete);
+        assert!(conn.scanning, "scan still in progress mid-page");
 
         app.handle_event(AppEvent::KeysPage {
             id,
@@ -1840,17 +1868,20 @@ mod tests {
                 db: 0,
                 entries: vec![stream_entry("k2", ValueType::List)],
                 next_cursor: 0,
+                epoch,
             },
         });
         let conn = app.active_conn().unwrap();
         assert_eq!(conn.keys.len(), 2, "second page appended");
         assert!(conn.complete, "cursor 0 marks the scan complete");
+        assert!(!conn.scanning, "scan finished");
     }
 
     #[tokio::test]
     async fn keys_page_from_stale_db_is_ignored() {
         let (mut app, _rx) = test_app();
         let id = connect(&mut app, 1, "prod", 16).await;
+        let epoch = app.active_conn().unwrap().scan_epoch;
         app.connections[0].db = 1;
         app.handle_event(AppEvent::KeysPage {
             id,
@@ -1858,9 +1889,250 @@ mod tests {
                 db: 0, // stale: connection has since switched to db1
                 entries: vec![stream_entry("k", ValueType::String)],
                 next_cursor: 0,
+                epoch,
             },
         });
         assert!(app.active_conn().unwrap().keys.is_empty());
+    }
+
+    #[tokio::test]
+    async fn keys_page_from_superseded_scan_is_ignored() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        // A page stamped with an older epoch (e.g. from a scan abandoned when
+        // the user changed the filter) must not contaminate the current scan.
+        let stale_epoch = app.active_conn().unwrap().scan_epoch.wrapping_sub(1);
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0,
+                entries: vec![stream_entry("ghost", ValueType::String)],
+                next_cursor: 0,
+                epoch: stale_epoch,
+            },
+        });
+        assert!(
+            app.active_conn().unwrap().keys.is_empty(),
+            "page from a superseded scan is dropped"
+        );
+    }
+
+    /// Completes the connection's initial (foreground) scan with `entries`,
+    /// leaving the browser idle and showing those keys.
+    fn finish_initial_scan(app: &mut App, id: ConnId, entries: Vec<EntryMeta>) {
+        let epoch = app.active_conn().unwrap().scan_epoch;
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0,
+                entries,
+                next_cursor: 0,
+                epoch,
+            },
+        });
+        assert!(app.active_conn().unwrap().complete);
+        assert!(!app.active_conn().unwrap().scanning);
+    }
+
+    #[test]
+    fn refresh_ticks_rounds_up_and_disables_on_zero() {
+        assert_eq!(refresh_ticks(0), 0, "zero disables auto-refresh");
+        assert_eq!(refresh_ticks(250), 1, "one tick");
+        assert_eq!(refresh_ticks(5000), 20, "default 5s at 250ms ticks");
+        assert_eq!(
+            refresh_ticks(100),
+            1,
+            "a sub-tick interval still fires once"
+        );
+        assert_eq!(refresh_ticks(600), 3, "rounds up to whole ticks");
+    }
+
+    #[tokio::test]
+    async fn navigation_does_not_trigger_a_scan() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        finish_initial_scan(
+            &mut app,
+            id,
+            vec![
+                stream_entry("a", ValueType::String),
+                stream_entry("b", ValueType::String),
+                stream_entry("c", ValueType::String),
+            ],
+        );
+        let epoch_after_load = app.active_conn().unwrap().scan_epoch;
+
+        // Spamming up/down must only move the highlight — the whole point of the
+        // change: the key set never re-fetches as a side effect of navigating.
+        app.screen = Screen::Browser;
+        for _ in 0..20 {
+            app.apply(Action::Down);
+            app.apply(Action::Up);
+        }
+        let conn = app.active_conn().unwrap();
+        assert_eq!(
+            conn.scan_epoch, epoch_after_load,
+            "navigation must not start a scan"
+        );
+        assert!(!conn.scanning, "navigation must not leave a scan running");
+    }
+
+    #[tokio::test]
+    async fn tick_auto_refreshes_keys_independently_of_navigation() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        finish_initial_scan(&mut app, id, vec![stream_entry("a", ValueType::String)]);
+        let epoch_before = app.active_conn().unwrap().scan_epoch;
+
+        // With auto-refresh due every tick and the browser on screen, one tick
+        // starts a fresh background scan on its own — no key was pressed.
+        app.screen = Screen::Browser;
+        app.browse_refresh_ticks = 1;
+        app.on_tick();
+        let conn = app.active_conn().unwrap();
+        assert_eq!(
+            conn.scan_epoch,
+            epoch_before + 1,
+            "the tick started a new scan"
+        );
+        assert!(conn.scanning, "background scan in progress");
+        assert!(
+            !conn.scan_live,
+            "auto-refresh stages into scan_buf rather than clearing the list"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_refresh_is_disabled_when_interval_is_zero() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        finish_initial_scan(&mut app, id, vec![]);
+        let epoch_before = app.active_conn().unwrap().scan_epoch;
+
+        app.screen = Screen::Browser;
+        app.browse_refresh_ticks = 0; // disabled
+        for _ in 0..50 {
+            app.on_tick();
+        }
+        assert_eq!(
+            app.active_conn().unwrap().scan_epoch,
+            epoch_before,
+            "no scans when auto-refresh is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_refresh_does_not_run_off_the_browser_screen() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        finish_initial_scan(&mut app, id, vec![]);
+        let epoch_before = app.active_conn().unwrap().scan_epoch;
+
+        // Tailing on the Realtime screen: re-scanning the keyspace would be
+        // pointless work, so the auto-refresh holds off until the browser is up.
+        app.screen = Screen::Realtime;
+        app.browse_refresh_ticks = 1;
+        for _ in 0..10 {
+            app.on_tick();
+        }
+        assert_eq!(
+            app.active_conn().unwrap().scan_epoch,
+            epoch_before,
+            "no background scan while off the Browser screen"
+        );
+    }
+
+    #[tokio::test]
+    async fn background_refresh_swaps_in_atomically_without_flicker() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        finish_initial_scan(
+            &mut app,
+            id,
+            vec![
+                stream_entry("old1", ValueType::String),
+                stream_entry("old2", ValueType::String),
+            ],
+        );
+
+        // A background refresh begins, exactly as the tick would start it.
+        app.screen = Screen::Browser;
+        app.browse_refresh_ticks = 1;
+        app.on_tick();
+        let refresh_epoch = app.active_conn().unwrap().scan_epoch;
+        assert!(app.active_conn().unwrap().scanning);
+
+        // The first page of the refresh arrives, but the scan is not finished:
+        // the visible list must stay exactly as it was — no empty frame, no
+        // half-populated list flashing on screen.
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0,
+                entries: vec![stream_entry("new1", ValueType::String)],
+                next_cursor: 42,
+                epoch: refresh_epoch,
+            },
+        });
+        {
+            let visible: Vec<&str> = app
+                .active_conn()
+                .unwrap()
+                .keys
+                .iter()
+                .map(|k| k.key.as_str())
+                .collect();
+            assert_eq!(
+                visible,
+                ["old1", "old2"],
+                "old keys stay visible mid-refresh"
+            );
+        }
+
+        // The final page completes the scan: only now does the fresh set swap in.
+        app.handle_event(AppEvent::KeysPage {
+            id,
+            page: BrowsePage {
+                db: 0,
+                entries: vec![stream_entry("new2", ValueType::String)],
+                next_cursor: 0,
+                epoch: refresh_epoch,
+            },
+        });
+        let conn = app.active_conn().unwrap();
+        let visible: Vec<&str> = conn.keys.iter().map(|k| k.key.as_str()).collect();
+        assert_eq!(
+            visible,
+            ["new1", "new2"],
+            "fresh set swapped in atomically on completion"
+        );
+        assert!(conn.complete);
+    }
+
+    #[tokio::test]
+    async fn changing_filter_clears_list_and_rescans() {
+        let (mut app, _rx) = test_app();
+        let id = connect(&mut app, 1, "prod", 16).await;
+        finish_initial_scan(
+            &mut app,
+            id,
+            vec![stream_entry("user:1", ValueType::String)],
+        );
+        let epoch_before = app.active_conn().unwrap().scan_epoch;
+
+        // A filter change is a foreground rescan: the stale result is cleared at
+        // once (the keys no longer match) and a new scan generation begins.
+        app.filter = "session".into();
+        app.apply_filter();
+        let conn = app.active_conn().unwrap();
+        assert!(
+            conn.keys.is_empty(),
+            "foreground rescan clears the previous result immediately"
+        );
+        assert!(conn.scanning, "a fresh scan is underway");
+        assert!(conn.scan_live, "filter change is a live (foreground) scan");
+        assert_eq!(conn.pattern, "*session*");
+        assert!(conn.scan_epoch > epoch_before, "new scan generation");
     }
 
     #[tokio::test]
@@ -1986,7 +2258,10 @@ mod tests {
         assert!(app.running);
         app.handle_key(ch('j')); // move selection — disarms
         app.handle_key(key(KeyCode::Esc)); // re-arms rather than quitting
-        assert!(app.running, "intervening input disarms the quit confirmation");
+        assert!(
+            app.running,
+            "intervening input disarms the quit confirmation"
+        );
         app.handle_key(key(KeyCode::Esc)); // second consecutive Esc now quits
         assert!(!app.running);
     }

@@ -45,7 +45,6 @@ pub enum Action {
     StopTail,
     DbPrev,
     DbNext,
-    LoadMore,
     /// Cycle the key-list sort column (Browser).
     CycleSort,
     /// Flip the key-list sort direction (Browser).
@@ -91,7 +90,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('/')) => Some(Action::StartFilter),
         (false, Char('[')) => Some(Action::DbPrev),
         (false, Char(']')) => Some(Action::DbNext),
-        (false, Char('n')) => Some(Action::LoadMore),
         (false, Char('o')) => Some(Action::CycleSort),
         (false, Char('O')) => Some(Action::ToggleSortDir),
         (false, Char('z')) => Some(Action::ToggleAllGroups),
@@ -187,7 +185,6 @@ mod tests {
         assert_eq!(plain(Char('/')), Some(Action::StartFilter));
         assert_eq!(plain(Char('[')), Some(Action::DbPrev));
         assert_eq!(plain(Char(']')), Some(Action::DbNext));
-        assert_eq!(plain(Char('n')), Some(Action::LoadMore));
         assert_eq!(plain(Char('o')), Some(Action::CycleSort));
         assert_eq!(plain(Char('O')), Some(Action::ToggleSortDir));
         assert_eq!(plain(Char('z')), Some(Action::ToggleAllGroups));

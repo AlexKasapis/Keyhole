@@ -175,6 +175,7 @@ impl BrokerConnection for RedisConnection {
             db: req.db,
             entries,
             next_cursor,
+            epoch: req.epoch,
         })
     }
 
@@ -512,6 +513,7 @@ mod integration_tests {
                     pattern: "it:browse:*".into(),
                     cursor,
                     page_size: 100,
+                    epoch: 0,
                 })
                 .await
                 .expect("browse");

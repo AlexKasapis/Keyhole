@@ -368,10 +368,19 @@ async fn process(
     events: &Sender<AppEvent>,
 ) {
     let result = match cmd {
-        ConnCommand::Browse(req) => match conn.browse(req).await {
-            Ok(page) => events.send(AppEvent::KeysPage { id, page }).await,
-            Err(e) => emit_error(events, id, "browse", e).await,
-        },
+        ConnCommand::Browse(req) => {
+            // Stamp the page with the request's scan generation so the UI can
+            // discard results from a scan it has since abandoned, regardless of
+            // what a particular broker implementation fills in.
+            let epoch = req.epoch;
+            match conn.browse(req).await {
+                Ok(mut page) => {
+                    page.epoch = epoch;
+                    events.send(AppEvent::KeysPage { id, page }).await
+                }
+                Err(e) => emit_error(events, id, "browse", e).await,
+            }
+        }
         ConnCommand::Inspect(req) => {
             let key = req.key.clone();
             match conn.inspect(req).await {
@@ -532,6 +541,7 @@ pub(crate) mod mock {
                 db: req.db,
                 entries: Vec::new(),
                 next_cursor: 0,
+                epoch: req.epoch,
             }))
         }
 
@@ -747,6 +757,9 @@ mod tests {
                 size: None,
             }],
             next_cursor: 7,
+            // Deliberately wrong: the actor must overwrite this with the
+            // request's epoch (3) so the page can't claim a stale generation.
+            epoch: 99,
         });
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("browse")).await;
         handle.send(ConnCommand::Browse(BrowseReq {
@@ -754,6 +767,7 @@ mod tests {
             pattern: "*".into(),
             cursor: 0,
             page_size: 10,
+            epoch: 3,
         }));
         match next(&mut rx).await {
             Some(AppEvent::KeysPage { id, page }) => {
@@ -761,6 +775,7 @@ mod tests {
                 assert_eq!(page.db, 2);
                 assert_eq!(page.entries.len(), 1);
                 assert_eq!(page.next_cursor, 7);
+                assert_eq!(page.epoch, 3, "actor stamps the request's epoch");
             }
             other => panic!("expected KeysPage, got {other:?}"),
         }
@@ -776,6 +791,7 @@ mod tests {
             pattern: "*".into(),
             cursor: 0,
             page_size: 10,
+            epoch: 0,
         }));
         match next(&mut rx).await {
             Some(AppEvent::ConnError { context, error, .. }) => {

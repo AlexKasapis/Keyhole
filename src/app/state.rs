@@ -9,8 +9,8 @@ use time::OffsetDateTime;
 
 use crate::broker::actor::ConnHandle;
 use crate::broker::{
-    BrokerEvent, BrokerKind, Capabilities, ConnId, EntryMeta, ServerStats, SubSpec, Ttl, ValueType,
-    ValueView,
+    BrokerEvent, BrokerKind, BrowsePage, BrowseReq, Capabilities, ConnId, EntryMeta, ServerStats,
+    SubSpec, Ttl, ValueType, ValueView,
 };
 
 /// Which top-level screen is showing.
@@ -362,6 +362,18 @@ enum SelAnchor {
     None,
 }
 
+/// What [`Connection::apply_page`] determined should happen after folding one
+/// [`BrowsePage`] into the scan in progress.
+#[derive(Debug)]
+pub enum ScanStep {
+    /// The page belonged to a superseded scan (or another DB) and was ignored.
+    Stale,
+    /// The scan continues; send this next [`BrowseReq`] to fetch the next page.
+    Continue(BrowseReq),
+    /// The scan finished; [`Connection::keys`] is now up to date.
+    Done,
+}
+
 /// An open connection plus its per-connection browse/inspect/dashboard state.
 pub struct Connection {
     pub id: ConnId,
@@ -369,9 +381,32 @@ pub struct Connection {
     pub caps: Capabilities,
     pub db: u32,
     pub pattern: String,
+    /// The keys currently shown in the browser — the result of the most
+    /// recently *completed* keyspace scan. A background refresh accumulates
+    /// into [`Self::scan_buf`] and only swaps in here once finished, so the
+    /// list never flickers or empties mid-refresh.
     pub keys: Vec<EntryMeta>,
+    /// SCAN cursor for the scan in progress (`0` once it finishes).
     pub next_cursor: u64,
+    /// Whether the most recent scan has finished (drives the "scanning…"
+    /// hint). A background refresh sets this `false` while it runs.
     pub complete: bool,
+    /// Generation of the current/most-recently-started scan. Stamped onto every
+    /// [`BrowseReq`] of that scan; pages whose epoch no longer matches are from
+    /// a superseded scan (DB switch, new filter, fresh refresh) and discarded.
+    pub scan_epoch: u64,
+    /// True while a scan's pages are still arriving (used to avoid launching an
+    /// overlapping background refresh).
+    pub scanning: bool,
+    /// Pages of an in-flight *background* refresh accumulate here and replace
+    /// [`Self::keys`] atomically when the scan completes. Unused for a live
+    /// (foreground) scan, which writes straight to `keys` so the user sees keys
+    /// appear as they load.
+    pub scan_buf: Vec<EntryMeta>,
+    /// Whether the in-flight scan writes progressively into [`Self::keys`]
+    /// (foreground: initial load, DB/filter change, explicit refresh) or stages
+    /// into [`Self::scan_buf`] for an atomic swap (background auto-refresh).
+    pub scan_live: bool,
     /// Column the key list is ordered by.
     pub sort: SortKey,
     /// Descending order when set (otherwise ascending).
@@ -390,6 +425,8 @@ pub struct Connection {
     pub value_scroll: u16,
     pub stats: Option<ServerStats>,
     pub stat_ticks: u32,
+    /// Ticks elapsed since the last automatic key-browser refresh.
+    pub browse_ticks: u32,
     /// Live tails for this connection (Realtime screen tabs).
     pub subs: Vec<Subscription>,
     /// Index into `subs` of the focused tail.
@@ -412,6 +449,10 @@ impl Connection {
             keys: Vec::new(),
             next_cursor: 0,
             complete: false,
+            scan_epoch: 0,
+            scanning: false,
+            scan_buf: Vec::new(),
+            scan_live: false,
             sort: SortKey::Name,
             sort_desc: false,
             collapsed: HashSet::new(),
@@ -422,6 +463,7 @@ impl Connection {
             value_scroll: 0,
             stats: None,
             stat_ticks: 0,
+            browse_ticks: 0,
             subs: Vec::new(),
             active_sub: None,
             console: Console::default(),
@@ -458,6 +500,82 @@ impl Connection {
         let anchor = self.selected_anchor();
         self.view = build_view(&self.keys, self.sort, self.sort_desc, &self.collapsed);
         self.restore_selection(anchor);
+    }
+
+    /// Begin a fresh keyspace scan, returning the first [`BrowseReq`] to send.
+    ///
+    /// `live` chooses how results surface. A *foreground* scan (`true`: the
+    /// initial load, a DB or filter change, an explicit refresh) clears the
+    /// list and writes pages straight into [`Self::keys`] so keys appear as
+    /// they load. A *background* scan (`false`: the periodic auto-refresh)
+    /// keeps the current list on screen and stages pages into
+    /// [`Self::scan_buf`], swapping the fresh set in only once the scan
+    /// completes — so a routine refresh never flickers or empties the list.
+    ///
+    /// Either way the scan epoch is bumped, so pages still in flight from a
+    /// previous scan are recognised as stale when they arrive.
+    pub fn begin_scan(&mut self, live: bool, page_size: usize) -> BrowseReq {
+        self.scan_epoch = self.scan_epoch.wrapping_add(1);
+        self.scanning = true;
+        self.complete = false;
+        self.next_cursor = 0;
+        self.scan_buf.clear();
+        self.scan_live = live;
+        if live {
+            // The whole result set is being replaced; drop the old selection and
+            // value so nothing briefly points at a key from the previous result.
+            self.keys.clear();
+            self.value = None;
+            self.value_key = None;
+            self.value_scroll = 0;
+            self.rebuild_view();
+        }
+        BrowseReq {
+            db: self.db,
+            pattern: self.pattern.clone(),
+            cursor: 0,
+            page_size,
+            epoch: self.scan_epoch,
+        }
+    }
+
+    /// Fold one [`BrowsePage`] into the scan in progress, reporting whether it
+    /// was stale, whether another page should be fetched, or that the scan is
+    /// complete. `page_size` is the `COUNT` hint for any continuation request.
+    pub fn apply_page(&mut self, page: BrowsePage, page_size: usize) -> ScanStep {
+        // A page whose epoch no longer matches (or that targets a DB we have
+        // since left) belongs to a scan we have abandoned — ignore it so it
+        // can't contaminate the current scan's results.
+        if page.epoch != self.scan_epoch || page.db != self.db {
+            return ScanStep::Stale;
+        }
+        self.next_cursor = page.next_cursor;
+        if self.scan_live {
+            // Foreground: reveal keys as they load.
+            self.keys.extend(page.entries);
+            self.rebuild_view();
+        } else {
+            // Background: stage until complete, leaving the visible list intact.
+            self.scan_buf.extend(page.entries);
+        }
+        if page.next_cursor != 0 {
+            return ScanStep::Continue(BrowseReq {
+                db: self.db,
+                pattern: self.pattern.clone(),
+                cursor: page.next_cursor,
+                page_size,
+                epoch: self.scan_epoch,
+            });
+        }
+        self.scanning = false;
+        self.complete = true;
+        if !self.scan_live {
+            // Atomically swap in the freshly scanned set, keeping the highlight
+            // on the same key/group where it still exists.
+            self.keys = std::mem::take(&mut self.scan_buf);
+            self.rebuild_view();
+        }
+        ScanStep::Done
     }
 
     /// Capture the identity of the currently selected row so it can be re-found
