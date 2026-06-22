@@ -139,7 +139,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 let [hints_area, status_area] =
                     Layout::horizontal([Constraint::Min(0), Constraint::Length(44)]).areas(area);
                 frame.render_widget(
-                    Paragraph::new(Line::from(hints(app.screen))).style(theme.status_bar),
+                    Paragraph::new(hint_line(app.screen, theme)).style(theme.status_bar),
                     hints_area,
                 );
                 let style = if status.is_error {
@@ -158,7 +158,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             // by an empty reserved status column.
             None => {
                 frame.render_widget(
-                    Paragraph::new(Line::from(hints(app.screen))).style(theme.status_bar),
+                    Paragraph::new(hint_line(app.screen, theme)).style(theme.status_bar),
                     area,
                 );
             }
@@ -166,19 +166,50 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
 }
 
-fn hints(screen: Screen) -> &'static str {
+/// The footer keybinds for a screen, grouped into labelled sections. Each entry
+/// is a `(section label, keys)` pair; the keys within a section keep the `·`
+/// separator. [`hint_line`] turns these into a styled row.
+fn hint_sections(screen: Screen) -> &'static [(&'static str, &'static str)] {
     match screen {
-        Screen::Connections => "  ↑↓ move · Enter connect · a add · : palette · ? help · q quit",
-        Screen::Browser => {
-            "  ↑↓ keys · / filter · o sort · O dir · p group · ⏎ fold · [ ] db · i cmd · t tail · : palette · ? help"
-        }
-        Screen::Realtime => {
-            "  ↑↓ scroll · Tab tab · s sub · m monitor · r rec · x stop · G follow · : palette · ? help"
-        }
-        Screen::Recordings => {
-            "  ↑↓ move · r rescan · w watch · b browser · : palette · ? help · q quit"
-        }
+        Screen::Connections => &[
+            ("nav", "↑↓ move"),
+            ("conn", "Enter connect · a add"),
+            ("app", ": palette · ? help · q quit"),
+        ],
+        Screen::Browser => &[
+            ("nav", "↑↓ keys · ⏎ fold · [ ] db"),
+            ("view", "/ filter · o sort · O dir · p group"),
+            ("data", "i cmd · t tail"),
+            ("app", ": palette · ? help"),
+        ],
+        Screen::Realtime => &[
+            ("nav", "↑↓ scroll · Tab tab · G follow"),
+            ("tails", "s sub · m monitor · r rec · x stop"),
+            ("app", ": palette · ? help"),
+        ],
+        Screen::Recordings => &[
+            ("nav", "↑↓ move"),
+            ("rec", "r rescan · w watch · b browser"),
+            ("app", ": palette · ? help · q quit"),
+        ],
     }
+}
+
+/// Render the footer hints as a single line: each section's label in the
+/// heading style (matching the help overlay), its keys in the status-bar
+/// foreground, and a dim vertical rule between sections.
+fn hint_line(screen: Screen, theme: &Theme) -> Line<'static> {
+    let mut spans = Vec::new();
+    for (i, (label, keys)) in hint_sections(screen).iter().enumerate() {
+        spans.push(if i == 0 {
+            Span::raw("  ")
+        } else {
+            Span::styled(" │ ", theme.dim)
+        });
+        spans.push(Span::styled(format!("{label} "), theme.heading));
+        spans.push(Span::raw(keys.to_string()));
+    }
+    Line::from(spans)
 }
 
 fn clock(app: &App) -> String {
@@ -263,6 +294,33 @@ mod tests {
         let (mut app, _rx) = test_app();
         app.mode = InputMode::Subscribe;
         assert!(screen_text(&mut app).contains("subscribe"));
+    }
+
+    #[test]
+    fn footer_groups_hints_into_labelled_sections() {
+        // Each screen's hint row is split into labelled sections; rendered wide
+        // so nothing clips. The section labels and a key from each must appear.
+        let cases = [
+            (Screen::Connections, ["nav", "conn", "app"], "Enter connect"),
+            (Screen::Browser, ["nav", "view", "data"], "/ filter"),
+            (Screen::Realtime, ["nav", "tails", "app"], "m monitor"),
+            (Screen::Recordings, ["nav", "rec", "app"], "r rescan"),
+        ];
+        for (screen, labels, key) in cases {
+            let (mut app, _rx) = test_app();
+            app.screen = screen;
+            let text = render_lines(&mut app, 160, 8);
+            for label in labels {
+                assert!(
+                    text.contains(label),
+                    "{screen:?} footer should show section {label:?}: {text:?}"
+                );
+            }
+            assert!(
+                text.contains(key),
+                "{screen:?} footer should still list {key:?}: {text:?}"
+            );
+        }
     }
 
     // -- connections screen --------------------------------------------------

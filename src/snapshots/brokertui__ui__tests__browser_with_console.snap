@@ -1,6 +1,5 @@
 ---
 source: src/ui.rs
-assertion_line: 924
 expression: "render_lines(&mut app, 90, 24)"
 ---
  BrokerTUI   prod (db0)  · browser                                           12:34:56 UTC
@@ -26,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  ↑↓ keys · / filter · o sort · O dir · p group · ⏎ fold · [ ] db · i cmd · t tail · : pal
+  nav ↑↓ keys · ⏎ fold · [ ] db │ view / filter · o sort · O dir · p group │ data i cmd ·
