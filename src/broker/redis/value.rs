@@ -3,7 +3,7 @@
 
 use base64::Engine as _;
 
-use crate::broker::{PayloadEncoding, ValueView};
+use crate::broker::{PayloadEncoding, StreamEntry, ValueView};
 
 /// Render a (possibly truncated) string value.
 ///
@@ -54,6 +54,65 @@ pub fn render_string(bytes: Vec<u8>, total_bytes: usize) -> ValueView {
             encoding: PayloadEncoding::Base64,
         },
     }
+}
+
+/// Wrap a window of list elements (already fetched via `LRANGE`) as a value.
+/// `offset` is the index of `items[0]` within the full list of `len` elements.
+pub fn render_list(len: usize, offset: usize, items: Vec<String>) -> ValueView {
+    ValueView::List { len, offset, items }
+}
+
+/// Wrap a sample of set members (already fetched via `SSCAN`) as a value.
+pub fn render_set(len: usize, members: Vec<String>) -> ValueView {
+    ValueView::Set { len, members }
+}
+
+/// Pair a flat `[field, value, field, value, …]` reply (from `HSCAN`) into a
+/// hash value. A trailing unpaired element — which only occurs in a truncated
+/// reply — is dropped.
+pub fn render_hash(len: usize, flat: Vec<String>) -> ValueView {
+    ValueView::Hash {
+        len,
+        fields: pair_up(flat),
+    }
+}
+
+/// Pair a flat `[member, score, member, score, …]` reply (from
+/// `ZRANGE … WITHSCORES`) into a sorted-set value. A member whose score doesn't
+/// parse as a float is dropped rather than failing the whole inspection.
+pub fn render_zset(len: usize, flat: Vec<String>) -> ValueView {
+    let items = flat
+        .chunks_exact(2)
+        .filter_map(|c| c[1].parse::<f64>().ok().map(|score| (c[0].clone(), score)))
+        .collect();
+    ValueView::ZSet { len, items }
+}
+
+/// Build a stream value from raw `XRANGE` entries (`[(id, [field, value, …]), …]`),
+/// pairing each entry's flat field list and recording the last id seen (empty
+/// when there are no entries).
+pub fn render_stream(len: usize, raw: Vec<(String, Vec<String>)>) -> ValueView {
+    let entries: Vec<StreamEntry> = raw
+        .into_iter()
+        .map(|(id, flat)| StreamEntry {
+            id,
+            fields: pair_up(flat),
+        })
+        .collect();
+    let last_id = entries.last().map(|e| e.id.clone()).unwrap_or_default();
+    ValueView::Stream {
+        len,
+        last_id,
+        entries,
+    }
+}
+
+/// Pair a flat `[a, b, a, b, …]` list into `(a, b)` tuples, dropping a trailing
+/// unpaired element (only present in a truncated reply).
+fn pair_up(flat: Vec<String>) -> Vec<(String, String)> {
+    flat.chunks_exact(2)
+        .map(|c| (c[0].clone(), c[1].clone()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -122,6 +181,101 @@ mod tests {
                 assert_eq!(text, "AAH//g==");
             }
             _ => panic!("expected Str"),
+        }
+    }
+
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn list_carries_len_offset_and_items() {
+        match render_list(100, 10, strs(&["a", "b"])) {
+            ValueView::List { len, offset, items } => {
+                assert_eq!(len, 100);
+                assert_eq!(offset, 10);
+                assert_eq!(items, strs(&["a", "b"]));
+            }
+            _ => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    fn set_carries_len_and_members() {
+        match render_set(3, strs(&["x", "y"])) {
+            ValueView::Set { len, members } => {
+                assert_eq!(len, 3);
+                assert_eq!(members, strs(&["x", "y"]));
+            }
+            _ => panic!("expected Set"),
+        }
+    }
+
+    #[test]
+    fn hash_pairs_flat_reply_and_drops_trailing_unpaired() {
+        // A truncated HSCAN can leave a dangling field with no value; it must be
+        // dropped, not paired with a phantom value.
+        match render_hash(2, strs(&["f1", "v1", "f2", "v2", "dangling"])) {
+            ValueView::Hash { len, fields } => {
+                assert_eq!(len, 2);
+                assert_eq!(
+                    fields,
+                    vec![
+                        ("f1".to_string(), "v1".to_string()),
+                        ("f2".to_string(), "v2".to_string()),
+                    ]
+                );
+            }
+            _ => panic!("expected Hash"),
+        }
+    }
+
+    #[test]
+    fn zset_parses_scores_and_drops_unparseable() {
+        match render_zset(3, strs(&["a", "1.5", "b", "not-a-number", "c", "-2"])) {
+            ValueView::ZSet { len, items } => {
+                assert_eq!(len, 3);
+                // "b" is dropped: its score doesn't parse, but that must not fail
+                // the whole inspection.
+                assert_eq!(items, vec![("a".to_string(), 1.5), ("c".to_string(), -2.0)]);
+            }
+            _ => panic!("expected ZSet"),
+        }
+    }
+
+    #[test]
+    fn stream_builds_entries_and_tracks_last_id() {
+        let raw = vec![
+            ("1-0".to_string(), strs(&["k", "v"])),
+            ("2-0".to_string(), strs(&["a", "b", "c", "d"])),
+        ];
+        match render_stream(2, raw) {
+            ValueView::Stream {
+                len,
+                last_id,
+                entries,
+            } => {
+                assert_eq!(len, 2);
+                assert_eq!(last_id, "2-0");
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].id, "1-0");
+                assert_eq!(entries[0].fields, vec![("k".to_string(), "v".to_string())]);
+                assert_eq!(entries[1].fields.len(), 2);
+            }
+            _ => panic!("expected Stream"),
+        }
+    }
+
+    #[test]
+    fn empty_stream_has_blank_last_id() {
+        match render_stream(0, vec![]) {
+            ValueView::Stream {
+                last_id, entries, ..
+            } => {
+                assert!(last_id.is_empty());
+                assert!(entries.is_empty());
+            }
+            _ => panic!("expected Stream"),
         }
     }
 }

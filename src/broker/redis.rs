@@ -17,7 +17,7 @@ use redis::aio::ConnectionManager;
 
 use super::{
     BrokerConnection, BrokerEventStream, BrowsePage, BrowseReq, Capabilities, EntryMeta,
-    InspectReq, StreamEntry, SubSpec, Ttl, ValueType, ValueView,
+    InspectReq, SubSpec, Ttl, ValueType, ValueView,
 };
 use crate::config::RedisProfile;
 
@@ -228,11 +228,7 @@ impl BrokerConnection for RedisConnection {
                     .arg(stop)
                     .query_async(&mut conn)
                     .await?;
-                ValueView::List {
-                    len,
-                    offset: req.offset,
-                    items,
-                }
+                value::render_list(len, req.offset, items)
             }
             ValueType::Set => {
                 let len: usize = redis::cmd("SCARD")
@@ -240,22 +236,18 @@ impl BrokerConnection for RedisConnection {
                     .query_async(&mut conn)
                     .await?;
                 let members = scan_collect(&mut conn, "SSCAN", &req.key, req.limit).await?;
-                ValueView::Set { len, members }
+                value::render_set(len, members)
             }
             ValueType::Hash => {
                 let len: usize = redis::cmd("HLEN")
                     .arg(&req.key)
                     .query_async(&mut conn)
                     .await?;
-                // HSCAN returns a flat [field, value, …]; collect 2 elements per
-                // field, then pair them up.
+                // HSCAN returns a flat [field, value, …]; fetch 2 elements per
+                // field and let the renderer pair them up.
                 let want = req.limit.saturating_mul(2);
                 let flat = scan_collect(&mut conn, "HSCAN", &req.key, want).await?;
-                let fields = flat
-                    .chunks_exact(2)
-                    .map(|c| (c[0].clone(), c[1].clone()))
-                    .collect();
-                ValueView::Hash { len, fields }
+                value::render_hash(len, flat)
             }
             ValueType::ZSet => {
                 let len: usize = redis::cmd("ZCARD")
@@ -269,11 +261,7 @@ impl BrokerConnection for RedisConnection {
                     .arg("WITHSCORES")
                     .query_async(&mut conn)
                     .await?;
-                let items = flat
-                    .chunks_exact(2)
-                    .filter_map(|c| c[1].parse::<f64>().ok().map(|score| (c[0].clone(), score)))
-                    .collect();
-                ValueView::ZSet { len, items }
+                value::render_zset(len, flat)
             }
             ValueType::Stream => {
                 let len: usize = redis::cmd("XLEN")
@@ -288,22 +276,7 @@ impl BrokerConnection for RedisConnection {
                     .arg(req.limit)
                     .query_async(&mut conn)
                     .await?;
-                let entries: Vec<StreamEntry> = raw
-                    .into_iter()
-                    .map(|(id, flat)| StreamEntry {
-                        id,
-                        fields: flat
-                            .chunks_exact(2)
-                            .map(|c| (c[0].clone(), c[1].clone()))
-                            .collect(),
-                    })
-                    .collect();
-                let last_id = entries.last().map(|e| e.id.clone()).unwrap_or_default();
-                ValueView::Stream {
-                    len,
-                    last_id,
-                    entries,
-                }
+                value::render_stream(len, raw)
             }
         };
         Ok(view)
