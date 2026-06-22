@@ -7,34 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Community packaging definitions (see `packaging/`): a **Nix flake** —
-  `nix run github:AlexKasapis/Keyhole` works off any tagged commit immediately —
-  plus **AUR** PKGBUILDs (`keyhole` from source and `keyhole-bin` prebuilt) and a
-  **Homebrew** formula. Each release now also publishes the version-stamped,
-  checksum-filled PKGBUILDs/.SRCINFO and the Homebrew formula as release assets.
-- Distro-native packages: each release now attaches a Debian/Ubuntu **`.deb`**
-  and an openSUSE/Fedora **`.rpm`** (full glibc feature set, x86_64), so users can
-  `apt`/`zypper`/`dnf install ./keyhole…` from a file without adding a repository.
-  Both bundle the man page, completions, and licenses, auto-detect their glibc
-  dependency floor, and recommend `gnome-keyring` for the OS-keyring backend; they
-  are signed, checksummed, and provenance-attested alongside the tarballs. Defined
-  in `[package.metadata.deb]` / `[package.metadata.generate-rpm]` in `Cargo.toml`.
-
-### Security
-
-- Release artifacts are now signed (sigstore/cosign keyless), carry SLSA
-  build-provenance attestations, and ship a CycloneDX SBOM plus an aggregate
-  `SHA256SUMS`. The install script additionally verifies the cosign signature
-  when `cosign` is available. See the README "Verifying a download" section.
-
-### Removed
-
-- Command palette (`:`). Every action it launched is reachable directly by its
-  own key binding; the per-screen footer and the help overlay (`?`) list them.
-
-## [0.1.0]
+## [0.1.0] - 2026-06-23
 
 Initial release.
 
@@ -55,9 +28,27 @@ Initial release.
 - Connection profiles stored in TOML with comment-preserving in-app edits;
   secrets are resolved at connect time via env var, OS keyring, or interactive
   prompt (never stored in plaintext).
-- Command palette, help overlay, sidebar connection/keyspace tree, mouse
-  support, `dark`/`light` theming with per-style overrides (honours `NO_COLOR`),
-  and file-only logging.
+- Help overlay, sidebar connection/keyspace tree, mouse support, `dark`/`light`
+  theming with per-style overrides (honours `NO_COLOR`), and file-only logging.
+- Community packaging definitions (see `packaging/`): a **Nix flake** —
+  `nix run github:AlexKasapis/Keyhole` works off any tagged commit immediately —
+  plus **AUR** PKGBUILDs (`keyhole` from source and `keyhole-bin` prebuilt) and a
+  **Homebrew** formula. Each release also publishes the version-stamped,
+  checksum-filled PKGBUILDs/.SRCINFO and the Homebrew formula as release assets.
+- Distro-native packages: each release attaches a Debian/Ubuntu **`.deb`**
+  and an openSUSE/Fedora **`.rpm`** (full glibc feature set, x86_64), so users can
+  `apt`/`zypper`/`dnf install ./keyhole…` from a file without adding a repository.
+  Both bundle the man page, completions, and licenses, auto-detect their glibc
+  dependency floor, and recommend `gnome-keyring` for the OS-keyring backend; they
+  are signed, checksummed, and provenance-attested alongside the tarballs. Defined
+  in `[package.metadata.deb]` / `[package.metadata.generate-rpm]` in `Cargo.toml`.
+
+### Security
+
+- Release artifacts are signed (sigstore/cosign keyless), carry SLSA
+  build-provenance attestations, and ship a CycloneDX SBOM plus an aggregate
+  `SHA256SUMS`. The install script additionally verifies the cosign signature
+  when `cosign` is available. See the README "Verifying a download" section.
 
 [Unreleased]: https://github.com/AlexKasapis/Keyhole/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/AlexKasapis/Keyhole/releases/tag/v0.1.0
