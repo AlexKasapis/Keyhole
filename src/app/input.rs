@@ -52,15 +52,22 @@ impl App {
     }
 
     pub(super) fn apply(&mut self, action: Action) {
+        // A pending chord confirmation ("Press X again …") is shown as a
+        // `Confirm` notification. Any key that isn't the chord's own repeat
+        // breaks the chord, so the prompt must vanish at once — with nothing
+        // taking its place (`clear_confirm` leaves any other status alone).
+        //
         // Any input other than a repeated Back cancels a pending quit
         // confirmation (see `Action::Back`).
-        if action != Action::Back {
+        if action != Action::Back && self.quit_armed {
             self.quit_armed = false;
+            self.clear_confirm();
         }
         // Likewise, any input other than a repeated `d` cancels a pending
         // recording-delete confirmation (see `Action::DeleteRecording`).
-        if action != Action::DeleteRecording {
+        if action != Action::DeleteRecording && self.recordings_delete_armed {
             self.recordings_delete_armed = false;
+            self.clear_confirm();
         }
         match action {
             Action::Quit => self.running = false,
@@ -84,7 +91,7 @@ impl App {
                     self.running = false;
                 } else {
                     self.quit_armed = true;
-                    self.set_status("Press Esc again to quit".to_string(), false);
+                    self.set_confirm("Press Esc again to quit".to_string());
                 }
             }
             Action::Up => self.nav(-1),

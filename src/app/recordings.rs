@@ -161,7 +161,7 @@ impl App {
             }
         } else {
             self.recordings_delete_armed = true;
-            self.set_status(format!("Press d again to delete {name}"), false);
+            self.set_confirm(format!("Press d again to delete {name}"));
         }
     }
 

@@ -54,6 +54,8 @@ impl App {
 
     pub(super) fn on_tick(&mut self) {
         self.now = OffsetDateTime::now_utc();
+        // Self-dismiss a transient notification once its time is up.
+        self.expire_status();
         let refresh_ticks = self.browse_refresh_ticks;
         let on_browser = self.screen == Screen::Browser;
         let mut refresh_id = None;

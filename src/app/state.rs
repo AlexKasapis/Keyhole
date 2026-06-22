@@ -67,10 +67,29 @@ pub enum PanelTab {
     Sub(usize),
 }
 
-/// A transient status-bar message.
+/// How a status-bar notification behaves over time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusKind {
+    /// An ordinary notification: it self-dismisses after a few seconds (see
+    /// `STATUS_TTL`) or as soon as a newer notification replaces it.
+    Transient,
+    /// A confirmation prompt tied to an armed key chord (e.g. "Press d again to
+    /// delete"). It stays put while the chord is armed and is cleared the
+    /// instant the chord is broken — with no replacement message — rather than
+    /// timing out on its own.
+    Confirm,
+}
+
+/// A status-bar notification shown in the bottom-right of the footer.
 pub struct Status {
     pub message: String,
     pub is_error: bool,
+    /// What dismisses this notification (timeout vs. chord resolution).
+    pub kind: StatusKind,
+    /// The tick-clock time ([`crate::app::App`]'s `now`) at which this was
+    /// shown. A `Transient` notification expires once `STATUS_TTL` has elapsed
+    /// since this instant.
+    pub shown_at: OffsetDateTime,
 }
 
 /// Health of the active broker connection, surfaced as a coloured dot in the

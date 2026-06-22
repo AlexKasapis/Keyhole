@@ -17,7 +17,7 @@ mod recordings;
 
 pub use state::{
     ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PanelTab, RecordState,
-    RecordingFile, ScanStep, Screen, Status, SubState, Subscription, ViewRow,
+    RecordingFile, ScanStep, Screen, Status, StatusKind, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -47,6 +47,10 @@ use crate::theme::Theme;
 const TICK_PERIOD_MS: u64 = 250;
 /// How many ticks (~250ms each) between automatic dashboard stat refreshes.
 const STATS_REFRESH_TICKS: u32 = 8;
+/// How long a transient status-bar notification stays before it self-dismisses.
+/// Confirmation prompts (e.g. "Press d again …") are exempt — they live and die
+/// with their key chord, not this timer (see [`Status`] / [`StatusKind`]).
+const STATUS_TTL: time::Duration = time::Duration::seconds(3);
 /// How many elements of a value to fetch into the inspector at a time.
 const VALUE_LIMIT: usize = 200;
 /// Minimum wall-clock gap between progressive key-browser view rebuilds while a
@@ -266,13 +270,52 @@ impl App {
         }
     }
 
+    /// Show a transient notification: it self-dismisses after [`STATUS_TTL`] (or
+    /// the moment a newer notification replaces it). The everyday status path.
     fn set_status(&mut self, message: String, is_error: bool) {
+        self.set_notification(message, is_error, StatusKind::Transient);
+    }
+
+    /// Show a confirmation prompt tied to an armed key chord (e.g. "Press d
+    /// again to delete"). Unlike a transient notification it does not time out;
+    /// it persists until the chord completes or is broken, at which point
+    /// [`Self::clear_confirm`] removes it without a replacement.
+    fn set_confirm(&mut self, message: String) {
+        self.set_notification(message, false, StatusKind::Confirm);
+    }
+
+    fn set_notification(&mut self, message: String, is_error: bool, kind: StatusKind) {
         if is_error {
             tracing::warn!(%message, "status");
         } else {
             tracing::info!(%message, "status");
         }
-        self.status = Some(Status { message, is_error });
+        self.status = Some(Status {
+            message,
+            is_error,
+            kind,
+            shown_at: self.now,
+        });
+    }
+
+    /// Dismiss a confirmation prompt (only). Called when a chord is broken so
+    /// the prompt vanishes immediately with no message taking its place; any
+    /// other (transient) status that happens to be showing is left untouched.
+    fn clear_confirm(&mut self) {
+        if matches!(&self.status, Some(s) if s.kind == StatusKind::Confirm) {
+            self.status = None;
+        }
+    }
+
+    /// Drop a transient notification once it has been on screen for
+    /// [`STATUS_TTL`]. Confirmation prompts are exempt — they are cleared by
+    /// chord resolution, not the clock. Driven by the tick handler.
+    fn expire_status(&mut self) {
+        if let Some(status) = &self.status {
+            if status.kind == StatusKind::Transient && self.now - status.shown_at >= STATUS_TTL {
+                self.status = None;
+            }
+        }
     }
 }
 
