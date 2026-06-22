@@ -18,11 +18,11 @@ pub enum SecretSpec {
     Prompt,
 }
 
-/// Service name used for all BrokerTUI keyring entries. Only referenced by the
+/// Service name used for all Keyhole keyring entries. Only referenced by the
 /// keyring backend, so it is gated to avoid a dead-code warning in headless
 /// (`--no-default-features`) builds.
 #[cfg(feature = "keyring")]
-pub const KEYRING_SERVICE: &str = "brokertui";
+pub const KEYRING_SERVICE: &str = "keyhole";
 
 impl SecretSpec {
     /// Parse a spec string: `env:VAR`, `keyring`, `keyring:account`, `prompt`,
@@ -106,15 +106,15 @@ mod tests {
 
     #[test]
     fn resolves_env_var() {
-        std::env::set_var("BROKERTUI_TEST_SECRET_ENV", "s3cr3t");
-        let value = resolve(&SecretSpec::Env("BROKERTUI_TEST_SECRET_ENV".into()), "acct").unwrap();
+        std::env::set_var("KEYHOLE_TEST_SECRET_ENV", "s3cr3t");
+        let value = resolve(&SecretSpec::Env("KEYHOLE_TEST_SECRET_ENV".into()), "acct").unwrap();
         assert_eq!(value.as_deref(), Some("s3cr3t"));
     }
 
     #[test]
     fn missing_env_var_errors() {
         let result = resolve(
-            &SecretSpec::Env("BROKERTUI_TEST_DEFINITELY_UNSET".into()),
+            &SecretSpec::Env("KEYHOLE_TEST_DEFINITELY_UNSET".into()),
             "acct",
         );
         assert!(result.is_err());

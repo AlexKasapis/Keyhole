@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn record_sink_creates_file_and_path() {
-        let dir = std::env::temp_dir().join(format!("brokertui-rec-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("keyhole-rec-test-{}", std::process::id()));
         let spec = SubSpec::Channel("c".into());
         let sink = RecordSink::create(&dir, "conn", &spec, datetime!(2026-01-02 03:04:05 UTC))
             .expect("create sink");

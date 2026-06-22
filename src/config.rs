@@ -1,6 +1,6 @@
 //! Configuration & filesystem paths.
 //!
-//! Connection profiles live in a TOML file (`~/.config/brokertui/config.toml`).
+//! Connection profiles live in a TOML file (`~/.config/keyhole/config.toml`).
 //! Secrets are never stored in plaintext — a profile's `password` is a *spec*
 //! string (`env:VAR`, `keyring`, `prompt`) resolved by [`secret`].
 
@@ -328,28 +328,28 @@ pub struct Paths {
 
 /// Resolve platform directories for config, data, and logs.
 pub fn paths() -> anyhow::Result<Paths> {
-    let dirs = ProjectDirs::from("dev", "", "brokertui")
+    let dirs = ProjectDirs::from("dev", "", "keyhole")
         .ok_or_else(|| anyhow!("could not determine a home directory for config/data"))?;
     Ok(Paths { dirs })
 }
 
 impl Paths {
-    /// `~/.local/share/brokertui`
+    /// `~/.local/share/keyhole`
     pub fn data_dir(&self) -> &Path {
         self.dirs.data_dir()
     }
 
-    /// `~/.config/brokertui/config.toml`
+    /// `~/.config/keyhole/config.toml`
     pub fn config_file(&self) -> PathBuf {
         self.dirs.config_dir().join("config.toml")
     }
 
-    /// `~/.local/share/brokertui/logs`
+    /// `~/.local/share/keyhole/logs`
     pub fn log_dir(&self) -> PathBuf {
         self.data_dir().join("logs")
     }
 
-    /// `~/.local/share/brokertui/recordings`
+    /// `~/.local/share/keyhole/recordings`
     pub fn recordings_dir(&self) -> PathBuf {
         self.data_dir().join("recordings")
     }
@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_default() {
-        let cfg = load(Path::new("/nonexistent/brokertui/does-not-exist.toml")).unwrap();
+        let cfg = load(Path::new("/nonexistent/keyhole/does-not-exist.toml")).unwrap();
         assert!(cfg.connections.is_empty());
     }
 }

@@ -48,7 +48,7 @@ impl AmqpConnection {
     /// Build a connection from a profile and its resolved password. Call
     /// [`BrokerConnection::connect`] to actually establish it.
     pub fn new(profile: AmqpProfile, password: Option<String>) -> Self {
-        let container_id = unique_container_id(&format!("brokertui-{}", profile.name));
+        let container_id = unique_container_id(&format!("keyhole-{}", profile.name));
         Self {
             profile,
             password,
@@ -101,7 +101,7 @@ impl BrokerConnection for AmqpConnection {
             other => anyhow::bail!("{} is not an AMQP destination", other.label()),
         };
         // Each tail is a separate connection, so it needs its own container-id.
-        let tail_id = unique_container_id(&format!("brokertui-{}-tail", self.profile.name));
+        let tail_id = unique_container_id(&format!("keyhole-{}-tail", self.profile.name));
         open_tail(self.url(), tail_id, address, name, browse).await
     }
 }
@@ -141,7 +141,7 @@ async fn open_tail(
         Source::builder().address(address.clone()).build()
     };
     let receiver = Receiver::builder()
-        .name(format!("brokertui-{name}"))
+        .name(format!("keyhole-{name}"))
         .source(source)
         .attach(&mut session)
         .await
@@ -344,7 +344,7 @@ mod tests {
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     //! Run against a dockerized ActiveMQ (see `docker-compose.yml`): an AMQP 1.0
-    //! broker on `127.0.0.1:$BROKERTUI_TEST_AMQP_PORT` (default 5674), creds
+    //! broker on `127.0.0.1:$KEYHOLE_TEST_AMQP_PORT` (default 5674), creds
     //! `admin:admin`. Each test uses a uniquely-named destination so the suite is
     //! parallel-safe.
     use super::*;
@@ -356,7 +356,7 @@ mod integration_tests {
     use tokio::time::timeout;
 
     fn test_port() -> u16 {
-        std::env::var("BROKERTUI_TEST_AMQP_PORT")
+        std::env::var("KEYHOLE_TEST_AMQP_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(5674)
@@ -431,7 +431,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn topic_tail_receives_published_message() {
-        let topic = unique("brokertui.it.topic");
+        let topic = unique("keyhole.it.topic");
         let mut conn = connected().await;
         // Attach the subscriber first — topics don't retain, so a message must be
         // published while the receiver is live.
@@ -468,7 +468,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn queue_browse_is_non_destructive() {
-        let queue = unique("brokertui.it.queue");
+        let queue = unique("keyhole.it.queue");
         // Seed a message; queues retain until consumed.
         send_one(&format!("queue://{queue}"), "queued-msg").await;
 

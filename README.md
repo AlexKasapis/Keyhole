@@ -1,4 +1,4 @@
-# BrokerTUI
+# Keyhole
 
 A terminal UI to connect to message/data brokers — **Redis**, **AMQP 1.0**
 (ActiveMQ / Amazon MQ / RabbitMQ 4.x), and **RabbitMQ** (AMQP 0.9.1, all
@@ -54,7 +54,7 @@ brokers that support it.
 
 ### Connections & secrets
 
-- Connection profiles stored in TOML (`~/.config/brokertui/config.toml`), edited
+- Connection profiles stored in TOML (`~/.config/keyhole/config.toml`), edited
   in-app via a form modal with comment-preserving writes.
 - Secrets are **never** stored in plaintext — a profile's password is a *spec*
   resolved at connect time, in order: **env var** (`env:VAR`) → **OS keyring**
@@ -76,8 +76,8 @@ brokers that support it.
 Run without a terminal, reusing the same broker + recording stack:
 
 ```sh
-brokertui record --connect prod --source stream:events --out ./caps   # record until Ctrl-C
-brokertui export caps/events-….jsonl --csv --out events.csv           # convert to CSV
+keyhole record --connect prod --source stream:events --out ./caps   # record until Ctrl-C
+keyhole export caps/events-….jsonl --csv --out events.csv           # convert to CSV
 ```
 
 ## Quick start
@@ -90,7 +90,7 @@ just run            # cargo run
 
 Press `Esc` to go back (Browser → Connections → quit), or `Ctrl-C` to quit
 outright from anywhere. Open the command palette to reach any action.
-Logs are written to `~/.local/share/brokertui/logs/`.
+Logs are written to `~/.local/share/keyhole/logs/`.
 
 ## Development
 

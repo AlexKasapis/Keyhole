@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Lint BrokerTUI: rustfmt + clippy over all targets/features.
+# Lint Keyhole: rustfmt + clippy over all targets/features.
 #
 # Mirrors the `fmt-check`/`lint` (and `fmt`) justfile recipes and the CI
 # `Format check` + `Clippy` steps, so a green run here means a green CI.

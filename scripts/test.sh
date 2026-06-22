@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the BrokerTUI test suite (unit + snapshot tests).
+# Run the Keyhole test suite (unit + snapshot tests).
 #
 # Mirrors the `test` justfile recipe / CI `Tests` step. Extra arguments are
 # forwarded to `cargo test`, so the integration suite (which needs the docker

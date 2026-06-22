@@ -505,41 +505,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "brokertui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "bytes",
- "clap",
- "crossterm",
- "directories",
- "fe2o3-amqp",
- "futures-util",
- "insta",
- "keyring",
- "lapin",
- "percent-encoding",
- "ratatui",
- "redis",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "time",
- "tokio",
- "tokio-util",
- "toml",
- "toml_edit",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "tui-input",
- "tui-tree-widget",
- "unicode-width",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1913,6 +1878,41 @@ dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "keyhole"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "clap",
+ "crossterm",
+ "directories",
+ "fe2o3-amqp",
+ "futures-util",
+ "insta",
+ "keyring",
+ "lapin",
+ "percent-encoding",
+ "ratatui",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "toml_edit",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "tui-input",
+ "tui-tree-widget",
+ "unicode-width",
 ]
 
 [[package]]

@@ -77,7 +77,7 @@ impl RabbitmqConnection {
     /// management UI. lapin's default features bind it to the ambient tokio
     /// runtime, so no executor/reactor wiring is needed here.
     fn conn_props(&self) -> ConnectionProperties {
-        let name = format!("brokertui-{}-{}", self.profile.name, super::next_conn_seq());
+        let name = format!("keyhole-{}-{}", self.profile.name, super::next_conn_seq());
         ConnectionProperties::default().with_connection_name(name.into())
     }
 }
@@ -228,7 +228,7 @@ async fn open_exchange_tap(
     let consumer = channel
         .basic_consume(
             queue_name.as_str().into(),
-            format!("brokertui-{}", super::next_conn_seq())
+            format!("keyhole-{}", super::next_conn_seq())
                 .as_str()
                 .into(),
             BasicConsumeOptions {
@@ -379,8 +379,8 @@ mod tests {
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     //! Run against a dockerized RabbitMQ (see `docker-compose.yml`): an AMQP
-    //! 0.9.1 broker on `127.0.0.1:$BROKERTUI_TEST_RABBITMQ_PORT` (default 5673),
-    //! creds `brokertui:brokertui` on vhost `/`. A non-`guest` user is required
+    //! 0.9.1 broker on `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_PORT` (default 5673),
+    //! creds `keyhole:keyhole` on vhost `/`. A non-`guest` user is required
     //! because RabbitMQ restricts `guest` to loopback, and the dockerized broker
     //! sees the host connection arriving from the bridge network. Each test uses
     //! a uniquely-named exchange so the suite is parallel-safe.
@@ -395,7 +395,7 @@ mod integration_tests {
     use tokio::time::timeout;
 
     fn test_port() -> u16 {
-        std::env::var("BROKERTUI_TEST_RABBITMQ_PORT")
+        std::env::var("KEYHOLE_TEST_RABBITMQ_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(5673)
@@ -403,7 +403,7 @@ mod integration_tests {
 
     fn url() -> String {
         // vhost "/" → "%2F".
-        format!("amqp://brokertui:brokertui@127.0.0.1:{}/%2F", test_port())
+        format!("amqp://keyhole:keyhole@127.0.0.1:{}/%2F", test_port())
     }
 
     fn unique(prefix: &str) -> String {
@@ -418,14 +418,14 @@ mod integration_tests {
             host: "127.0.0.1".into(),
             port: test_port(),
             vhost: "/".into(),
-            username: Some("brokertui".into()),
+            username: Some("keyhole".into()),
             password: None,
             tls: false,
         }
     }
 
     async fn connected() -> RabbitmqConnection {
-        let mut conn = RabbitmqConnection::new(test_profile(), Some("brokertui".to_string()));
+        let mut conn = RabbitmqConnection::new(test_profile(), Some("keyhole".to_string()));
         let caps = conn.connect().await.expect("connect to test RabbitMQ");
         assert_eq!(caps.kind, crate::broker::BrokerKind::Rabbitmq);
         conn
@@ -475,7 +475,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn exchange_tap_receives_published_message_with_routing_key() {
-        let exchange = unique("brokertui.it.topic");
+        let exchange = unique("keyhole.it.topic");
         declare_topic_exchange(&exchange).await;
 
         let mut conn = connected().await;
@@ -504,12 +504,12 @@ mod integration_tests {
 
     #[tokio::test]
     async fn exchange_tap_is_live_only_and_leaves_the_real_queue_intact() {
-        let exchange = unique("brokertui.it.topic");
+        let exchange = unique("keyhole.it.topic");
         declare_topic_exchange(&exchange).await;
 
         // A real queue bound to the exchange — the "production" consumer we must
         // neither steal from nor replay into. Exclusive so it auto-cleans on close.
-        let real_queue = unique("brokertui.it.realq");
+        let real_queue = unique("keyhole.it.realq");
         let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
             .await
             .unwrap();
@@ -598,7 +598,7 @@ mod integration_tests {
     #[tokio::test]
     async fn tapping_a_missing_exchange_errors() {
         let mut conn = connected().await;
-        let missing = unique("brokertui.it.nope");
+        let missing = unique("keyhole.it.nope");
         // `BrokerEventStream` is not `Debug`, so match rather than `expect_err`.
         let err = match conn
             .subscribe(SubSpec::Exchange {

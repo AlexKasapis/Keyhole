@@ -260,7 +260,7 @@ pub async fn open_stream(
 
 /// Open a keyspace-notification tail for database `db`
 /// (`PSUBSCRIBE __keyevent@<db>__:*`) and return its event stream. The server's
-/// `notify-keyspace-events` must be enabled for events to arrive; brokertui does
+/// `notify-keyspace-events` must be enabled for events to arrive; keyhole does
 /// not change that setting (see the advisory in `RedisConnection::tail_notice`).
 pub async fn open_keyspace(client: redis::Client, db: u32) -> anyhow::Result<BrokerEventStream> {
     let mut pubsub = client.get_async_pubsub().await?;

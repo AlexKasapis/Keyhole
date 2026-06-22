@@ -10,7 +10,7 @@ Example:
     cargo build && docker compose up -d redis
     printf '[[connection]]\\ntype="redis"\\nname="local"\\nhost="127.0.0.1"\\nport=6380\\ndb=0\\n' > /tmp/bt.toml
     python3 scripts/tui_smoke.py \\
-        --cmd "./target/debug/brokertui --config /tmp/bt.toml --connect local" \\
+        --cmd "./target/debug/keyhole --config /tmp/bt.toml --connect local" \\
         --send 2.0:d --send 3.5:b --send 4.5:q \\
         --expect "Connected to local" --expect Keys --expect Dashboard --expect Version
 

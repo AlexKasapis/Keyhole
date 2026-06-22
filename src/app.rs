@@ -1612,7 +1612,7 @@ mod tests {
     fn test_app() -> (App, Receiver<AppEvent>) {
         build_app(
             Config::default(),
-            PathBuf::from("/nonexistent/brokertui/config.toml"),
+            PathBuf::from("/nonexistent/keyhole/config.toml"),
             None,
         )
     }
@@ -1642,7 +1642,7 @@ mod tests {
     fn unique_config_path() -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("brokertui-app-{}-{n}.toml", std::process::id()))
+        std::env::temp_dir().join(format!("keyhole-app-{}-{n}.toml", std::process::id()))
     }
 
     /// Attach a live mock-backed connection and return its id.
@@ -3142,7 +3142,7 @@ mod tests {
 
     #[test]
     fn scan_recordings_lists_only_jsonl_newest_first() {
-        let dir = std::env::temp_dir().join(format!("brokertui-scan-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("keyhole-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("a.jsonl"), "x").unwrap();

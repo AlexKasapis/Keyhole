@@ -654,7 +654,7 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("brokertui-actor-{tag}-{}-{n}", std::process::id()))
+        std::env::temp_dir().join(format!("keyhole-actor-{tag}-{}-{n}", std::process::id()))
     }
 
     fn ev(source: &str, body: &str) -> BrokerEvent {

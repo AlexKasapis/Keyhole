@@ -6,9 +6,9 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-/// BrokerTUI — connect to brokers, browse data, and record live streams.
+/// Keyhole — connect to brokers, browse data, and record live streams.
 #[derive(Debug, Parser)]
-#[command(name = "brokertui", version, about)]
+#[command(name = "keyhole", version, about)]
 pub struct Cli {
     /// Path to the config file (defaults to the platform config directory).
     #[arg(long, value_name = "FILE")]
@@ -18,7 +18,7 @@ pub struct Cli {
     #[arg(long, value_name = "PROFILE")]
     pub connect: Option<String>,
 
-    /// Log level / filter, e.g. `info` or `brokertui=debug`.
+    /// Log level / filter, e.g. `info` or `keyhole=debug`.
     #[arg(long, default_value = "info", value_name = "FILTER")]
     pub log_level: String,
 
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn bare_invocation_defaults_to_the_tui() {
-        let cli = Cli::try_parse_from(["brokertui"]).unwrap();
+        let cli = Cli::try_parse_from(["keyhole"]).unwrap();
         assert!(cli.command.is_none());
         assert!(cli.config.is_none());
         assert!(cli.connect.is_none());
@@ -79,25 +79,25 @@ mod tests {
     #[test]
     fn top_level_flags_parse() {
         let cli = Cli::try_parse_from([
-            "brokertui",
+            "keyhole",
             "--config",
             "/etc/bt.toml",
             "--connect",
             "prod",
             "--log-level",
-            "brokertui=debug",
+            "keyhole=debug",
         ])
         .unwrap();
         assert_eq!(cli.config.as_deref(), Some(Path::new("/etc/bt.toml")));
         assert_eq!(cli.connect.as_deref(), Some("prod"));
-        assert_eq!(cli.log_level, "brokertui=debug");
+        assert_eq!(cli.log_level, "keyhole=debug");
         assert!(cli.command.is_none());
     }
 
     #[test]
     fn record_subcommand_parses_with_optional_out() {
         let cli = Cli::try_parse_from([
-            "brokertui",
+            "keyhole",
             "record",
             "--connect",
             "p",
@@ -119,7 +119,7 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from([
-            "brokertui",
+            "keyhole",
             "record",
             "--connect",
             "p",
@@ -139,13 +139,13 @@ mod tests {
 
     #[test]
     fn record_requires_connect_and_source() {
-        assert!(Cli::try_parse_from(["brokertui", "record", "--source", "pubsub:c"]).is_err());
-        assert!(Cli::try_parse_from(["brokertui", "record", "--connect", "p"]).is_err());
+        assert!(Cli::try_parse_from(["keyhole", "record", "--source", "pubsub:c"]).is_err());
+        assert!(Cli::try_parse_from(["keyhole", "record", "--connect", "p"]).is_err());
     }
 
     #[test]
     fn export_subcommand_parses() {
-        let cli = Cli::try_parse_from(["brokertui", "export", "rec.jsonl", "--csv"]).unwrap();
+        let cli = Cli::try_parse_from(["keyhole", "export", "rec.jsonl", "--csv"]).unwrap();
         match cli.command {
             Some(Command::Export { file, csv, out }) => {
                 assert_eq!(file, PathBuf::from("rec.jsonl"));
@@ -159,7 +159,7 @@ mod tests {
     #[test]
     fn export_csv_defaults_off_and_accepts_out() {
         let cli =
-            Cli::try_parse_from(["brokertui", "export", "rec.jsonl", "--out", "rec.csv"]).unwrap();
+            Cli::try_parse_from(["keyhole", "export", "rec.jsonl", "--out", "rec.csv"]).unwrap();
         match cli.command {
             Some(Command::Export { csv, out, .. }) => {
                 assert!(!csv, "the --csv flag defaults to false");
@@ -171,6 +171,6 @@ mod tests {
 
     #[test]
     fn export_requires_a_file_argument() {
-        assert!(Cli::try_parse_from(["brokertui", "export"]).is_err());
+        assert!(Cli::try_parse_from(["keyhole", "export"]).is_err());
     }
 }

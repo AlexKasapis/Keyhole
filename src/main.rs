@@ -1,4 +1,4 @@
-//! BrokerTUI — a terminal UI for connecting to message/data brokers, browsing
+//! Keyhole — a terminal UI for connecting to message/data brokers, browsing
 //! their data, watching realtime activity, and recording live streams to disk.
 //!
 //! With no subcommand this launches the TUI render loop; the `record` and
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let _log_guard =
         logging::init(&cli.log_level, paths.log_dir()).context("initializing logging")?;
 
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting brokertui");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting keyhole");
 
     let config_path = cli.config.clone().unwrap_or_else(|| paths.config_file());
     let config = config::load(&config_path).context("loading config")?;

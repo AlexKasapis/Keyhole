@@ -807,12 +807,6 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 /// The help overlay.
 pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
-    let rect = centered(area, 66, 30);
-    frame.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .title(" Help ")
-        .title_style(theme.heading)
-        .border_style(theme.border_focused);
     let lines = vec![
         Line::styled("Navigation", theme.heading),
         Line::from("  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel scrolls"),
@@ -844,6 +838,15 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("General", theme.heading),
         Line::from("  a add connection   ? toggle help   Esc back   Ctrl-c quit"),
     ];
+    // Grow the overlay with its content (lines + 2 borders) so no row is
+    // clipped, capped to the available height.
+    let height = (lines.len() as u16 + 2).clamp(6, area.height.max(6));
+    let rect = centered(area, 66, height);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Help ")
+        .title_style(theme.heading)
+        .border_style(theme.border_focused);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }
 

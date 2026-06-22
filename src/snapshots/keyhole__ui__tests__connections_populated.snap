@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 120, 12)"
 ---
- BrokerTUI   no connection  · connections                                                                  12:34:56 UTC
+ Keyhole   no connection  · connections                                                                    12:34:56 UTC
 ┌ Connections ─────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │     NAME                KIND      ENDPOINT                    INFO                                                   │
 │▶ ●  cache               redis     admin@127.0.0.1:6379        v7.4.0 · 49 keys · 7 clients · 120 ops/s · 1.0 MiB     │

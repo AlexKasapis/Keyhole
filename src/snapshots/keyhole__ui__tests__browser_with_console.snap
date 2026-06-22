@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 24)"
 ---
- BrokerTUI   prod (db0)  · browser                                           12:34:56 UTC
+ Keyhole   prod (db0)  · browser                                             12:34:56 UTC
  db0  match=*  2 keys  sort:name↑
 ┌ Server ────────────────────────────────────────────────────────────────────────────────┐
 │Loading server stats…                                                                   │

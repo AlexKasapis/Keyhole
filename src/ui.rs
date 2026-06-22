@@ -60,7 +60,7 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Screen::Recordings => "recordings",
     };
     let line = Line::from(vec![
-        Span::styled(" BrokerTUI ", theme.title),
+        Span::styled(" Keyhole ", theme.title),
         Span::raw("  "),
         Span::styled(active, theme.accent),
         Span::styled(format!("  · {screen}"), theme.dim),
@@ -245,7 +245,7 @@ mod tests {
         let (tx, rx) = mpsc::channel(64);
         let app = App::new(
             Config::default(),
-            std::path::PathBuf::from("/tmp/brokertui-ui-test.toml"),
+            std::path::PathBuf::from("/tmp/keyhole-ui-test.toml"),
             std::env::temp_dir(),
             tx,
             TaskTracker::new(),
@@ -279,7 +279,7 @@ mod tests {
     fn header_shows_title_and_clock() {
         let (mut app, _rx) = test_app();
         let text = screen_text(&mut app);
-        assert!(text.contains("BrokerTUI"));
+        assert!(text.contains("Keyhole"));
         assert!(text.contains("UTC"), "the clock is in the header");
         assert!(text.contains("no connection"), "no active connection label");
     }

@@ -95,7 +95,7 @@ impl RedisConnection {
 impl BrokerConnection for RedisConnection {
     async fn connect(&mut self) -> anyhow::Result<Capabilities> {
         if self.profile.tls {
-            anyhow::bail!("TLS connections require building brokertui with --features tls");
+            anyhow::bail!("TLS connections require building keyhole with --features tls");
         }
         let client = redis::Client::open(self.connection_url())?;
         let manager = ConnectionManager::new(client)
@@ -317,7 +317,7 @@ impl BrokerConnection for RedisConnection {
 
     async fn subscribe(&mut self, spec: SubSpec) -> anyhow::Result<BrokerEventStream> {
         if self.profile.tls {
-            anyhow::bail!("TLS connections require building brokertui with --features tls");
+            anyhow::bail!("TLS connections require building keyhole with --features tls");
         }
         // A fresh client/socket per tail — blocking ops must not share the
         // actor's multiplexed manager.
@@ -338,7 +338,7 @@ impl BrokerConnection for RedisConnection {
 
     /// Flag when a keyspace tail is opened but the server isn't publishing
     /// notifications (`notify-keyspace-events` is empty), so the user knows why
-    /// the tail stays silent. brokertui never changes the setting itself — that
+    /// the tail stays silent. keyhole never changes the setting itself — that
     /// is a server-side write, deferred past v1.
     async fn tail_notice(&mut self, spec: &SubSpec) -> Option<String> {
         if !matches!(spec, SubSpec::Keyspace { .. }) {
@@ -435,7 +435,7 @@ async fn scan_collect(
 mod integration_tests {
     //! Run against a dockerized Redis: `just test-int`, or
     //! `cargo test --features integration` with Redis reachable on
-    //! `127.0.0.1:$BROKERTUI_TEST_REDIS_PORT` (default 6380). Each test seeds its
+    //! `127.0.0.1:$KEYHOLE_TEST_REDIS_PORT` (default 6380). Each test seeds its
     //! own uniquely-namespaced keys, so the suite is deterministic and
     //! parallel-safe (no reliance on external seeding or TTLs).
     use super::*;
@@ -457,7 +457,7 @@ mod integration_tests {
     }
 
     fn test_port() -> u16 {
-        std::env::var("BROKERTUI_TEST_REDIS_PORT")
+        std::env::var("KEYHOLE_TEST_REDIS_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(6380)
@@ -952,7 +952,7 @@ mod integration_tests {
     #[tokio::test]
     async fn records_tail_to_valid_jsonl() {
         let channel = unique("it:rec");
-        let dir = std::env::temp_dir().join(unique("brokertui-it-rec").replace(':', "-"));
+        let dir = std::env::temp_dir().join(unique("keyhole-it-rec").replace(':', "-"));
 
         let mut conn = connected().await;
         let spec = SubSpec::Channel(channel.clone());
