@@ -74,7 +74,7 @@ clap = { version = "4", features = ["derive"] }
 # packaging in later tiers). Both are small and introspect the live CLI, so the
 # artifacts can never drift from the actual flags.
 clap_complete = "4"
-clap_mangen = "0.2"
+clap_mangen = "0.3"
 # `serde-well-known` provides the RFC 3339 (de)serializers for recording timestamps.
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "macros"] }
 base64 = "0.22"
