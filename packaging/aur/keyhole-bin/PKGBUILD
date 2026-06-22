@@ -1,0 +1,47 @@
+# Maintainer: Alex Kasapis <akasapis@trigonongroup.com>
+#
+# Prebuilt (glibc) repackaging of the GitHub release tarball — the full default
+# feature set (keyring + AMQP + RabbitMQ). For a build-from-source package see
+# `keyhole`. The per-arch checksums are committed as 'SKIP' and filled in at
+# release time by scripts/gen_packaging.sh (which also refreshes .SRCINFO).
+pkgname=keyhole-bin
+_pkgname=keyhole
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Terminal UI to connect to brokers (Redis, AMQP), browse data, watch realtime activity, and record streams (prebuilt binary)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/AlexKasapis/Keyhole"
+license=('MIT' 'Apache-2.0')
+depends=('gcc-libs' 'glibc')
+optdepends=('gnome-keyring: OS keyring (Secret Service) backend for stored connection secrets'
+            'dbus: session bus the OS keyring backend talks to')
+provides=('keyhole')
+conflicts=('keyhole')
+# The binary is already stripped by the release profile, and there is no source
+# to build a debug package from, so skip both steps.
+options=('!debug' '!strip')
+source_x86_64=("$pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$pkgname-$pkgver-aarch64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+    # The release tarballs carry a leading directory named after the target
+    # triple (upload-rust-binary-action's `leading-dir`), independent of the
+    # local download filename set above.
+    case "$CARCH" in
+        x86_64) _triple='x86_64-unknown-linux-gnu' ;;
+        aarch64) _triple='aarch64-unknown-linux-gnu' ;;
+    esac
+    cd "$srcdir/$_pkgname-$_triple"
+
+    install -Dm755 "$_pkgname" "$pkgdir/usr/bin/$_pkgname"
+    install -Dm644 "$_pkgname.1" "$pkgdir/usr/share/man/man1/$_pkgname.1"
+
+    install -Dm644 "$_pkgname.bash" "$pkgdir/usr/share/bash-completion/completions/$_pkgname"
+    install -Dm644 "_$_pkgname" "$pkgdir/usr/share/zsh/site-functions/_$_pkgname"
+    install -Dm644 "$_pkgname.fish" "$pkgdir/usr/share/fish/vendor_completions.d/$_pkgname.fish"
+
+    install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}

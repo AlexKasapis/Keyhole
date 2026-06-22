@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Community packaging definitions (see `packaging/`): a **Nix flake** —
+  `nix run github:AlexKasapis/Keyhole` works off any tagged commit immediately —
+  plus **AUR** PKGBUILDs (`keyhole` from source and `keyhole-bin` prebuilt) and a
+  **Homebrew** formula. Each release now also publishes the version-stamped,
+  checksum-filled PKGBUILDs/.SRCINFO and the Homebrew formula as release assets.
+
 ### Security
 
 - Release artifacts are now signed (sigstore/cosign keyless), carry SLSA

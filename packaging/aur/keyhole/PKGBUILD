@@ -1,0 +1,69 @@
+# Maintainer: Alex Kasapis <akasapis@trigonongroup.com>
+#
+# Build-from-source package — the full default feature set (keyring + AMQP +
+# RabbitMQ). For a prebuilt binary see `keyhole-bin`. The source-tarball checksum
+# is committed as 'SKIP' and filled in at release time by scripts/gen_packaging.sh
+# (which also refreshes .SRCINFO).
+pkgname=keyhole
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Terminal UI to connect to brokers (Redis, AMQP), browse data, watch realtime activity, and record streams"
+arch=('x86_64' 'aarch64')
+url="https://github.com/AlexKasapis/Keyhole"
+license=('MIT' 'Apache-2.0')
+depends=('gcc-libs' 'glibc')
+# cmake builds the bundled C of aws-lc-sys (rustls' crypto backend used by the
+# amqp/rabbitmq TLS support); cargo provides the Rust toolchain.
+makedepends=('cargo' 'cmake')
+optdepends=('gnome-keyring: OS keyring (Secret Service) backend for stored connection secrets'
+            'dbus: session bus the OS keyring backend talks to')
+# `Keyhole-$pkgver` is the leading directory in GitHub's source tarball (the repo
+# is named `Keyhole`; GitHub strips the leading `v` from the tag for the folder).
+_reponame=Keyhole
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+    cd "$_reponame-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    # Fetch all dependencies up front against the committed lockfile so the build
+    # and check phases run fully offline (--frozen).
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$_reponame-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release
+}
+
+check() {
+    cd "$_reponame-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    # Fast unit + snapshot suite. The broker-backed integration tests are gated
+    # behind the `integration` feature and need live services, so are excluded.
+    cargo test --frozen --release
+}
+
+package() {
+    cd "$_reponame-$pkgver"
+
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+
+    # Generate the man page + shell completions from the freshly built binary so
+    # they can never drift from the actual CLI.
+    local _assets="$srcdir/assets"
+    "target/release/$pkgname" gen man --out "$_assets"
+    "target/release/$pkgname" gen completions bash --out "$_assets"
+    "target/release/$pkgname" gen completions zsh --out "$_assets"
+    "target/release/$pkgname" gen completions fish --out "$_assets"
+    install -Dm644 "$_assets/$pkgname.1" "$pkgdir/usr/share/man/man1/$pkgname.1"
+    install -Dm644 "$_assets/$pkgname.bash" "$pkgdir/usr/share/bash-completion/completions/$pkgname"
+    install -Dm644 "$_assets/_$pkgname" "$pkgdir/usr/share/zsh/site-functions/_$pkgname"
+    install -Dm644 "$_assets/$pkgname.fish" "$pkgdir/usr/share/fish/vendor_completions.d/$pkgname.fish"
+
+    install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
+    install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
+}

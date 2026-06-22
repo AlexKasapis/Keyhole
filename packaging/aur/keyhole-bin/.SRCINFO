@@ -1,0 +1,23 @@
+pkgbase = keyhole-bin
+	pkgdesc = Terminal UI to connect to brokers (Redis, AMQP), browse data, watch realtime activity, and record streams (prebuilt binary)
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/AlexKasapis/Keyhole
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	license = Apache-2.0
+	depends = gcc-libs
+	depends = glibc
+	optdepends = gnome-keyring: OS keyring (Secret Service) backend for stored connection secrets
+	optdepends = dbus: session bus the OS keyring backend talks to
+	provides = keyhole
+	conflicts = keyhole
+	options = !debug
+	options = !strip
+	source_x86_64 = keyhole-bin-0.1.0-x86_64.tar.gz::https://github.com/AlexKasapis/Keyhole/releases/download/v0.1.0/keyhole-x86_64-unknown-linux-gnu.tar.gz
+	sha256sums_x86_64 = SKIP
+	source_aarch64 = keyhole-bin-0.1.0-aarch64.tar.gz::https://github.com/AlexKasapis/Keyhole/releases/download/v0.1.0/keyhole-aarch64-unknown-linux-gnu.tar.gz
+	sha256sums_aarch64 = SKIP
+
+pkgname = keyhole-bin

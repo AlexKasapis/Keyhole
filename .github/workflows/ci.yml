@@ -131,9 +131,15 @@ jobs:
         # Target detection + full download/verify/install flow (no network).
         run: ./scripts/test_install.sh
 
-      - name: ShellCheck the install scripts
+      - name: Packaging artifact tests
+        # AUR PKGBUILDs/.SRCINFO + Homebrew formula + Nix flake: structure,
+        # version consistency, .SRCINFO sync, and the release generator round-trip
+        # (makepkg/brew/nix validators are skipped here, exercised in the nix job).
+        run: ./scripts/test_packaging.sh
+
+      - name: ShellCheck the install + packaging scripts
         # shellcheck is preinstalled on GitHub's ubuntu-latest runners.
-        run: shellcheck scripts/install.sh scripts/test_install.sh
+        run: shellcheck scripts/install.sh scripts/test_install.sh scripts/gen_packaging.sh scripts/test_packaging.sh scripts/lib/srcinfo.sh
 
       # Install actionlint from a pinned release rather than piping a script off
       # the action's `main` branch (a mutable, unpinned supply-chain input).
@@ -306,3 +312,29 @@ jobs:
           tool: cargo-hack
       - name: cargo hack (feature powerset)
         run: cargo hack --locked --feature-powerset --depth 2 --exclude-features integration check --all-targets
+
+  # Validate the Nix flake (Tier 2c): evaluate it, build the default package, and
+  # smoke-run the result. This is the only automated proof that
+  # `nix run github:AlexKasapis/Keyhole` works — the structural flake checks live
+  # in release-lint. It compiles the full glibc feature set under Nix, so it is
+  # heavier than the other jobs and stands on its own.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3 # v31.10.6
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Flake evaluates (schema + outputs)
+        run: nix flake check --no-build
+
+      - name: Build the default package
+        run: nix build .#default -L
+
+      - name: Smoke-run the built binary
+        run: |
+          ./result/bin/keyhole --version
+          ./result/bin/keyhole --help

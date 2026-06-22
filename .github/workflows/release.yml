@@ -253,3 +253,67 @@ jobs:
         run: |
           gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber \
             SHA256SUMS keyhole.cdx.json ./*.sig ./*.pem
+
+  # Tier 2 — community packaging metadata. Fill the real release version and
+  # tarball checksums into the AUR PKGBUILDs (+ .SRCINFO) and the Homebrew formula
+  # (committed with placeholders), then attach them to the release as the
+  # ready-to-publish inputs. Pushing them to the AUR git remotes / the
+  # homebrew-tap repo is a manual follow-up — see packaging/README.md.
+  package-metadata:
+    needs: [create-release, upload-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Fill version + checksums into the packaging artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          tmp="$(mktemp -d)"
+
+          # The two glibc release tarballs uploaded by upload-binaries; their
+          # checksums are what `keyhole-bin` and the Homebrew formula verify.
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --dir "$tmp" \
+            --pattern 'keyhole-x86_64-unknown-linux-gnu.tar.gz' \
+            --pattern 'keyhole-aarch64-unknown-linux-gnu.tar.gz'
+          sha_x86="$(sha256sum "$tmp/keyhole-x86_64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)"
+          sha_arm="$(sha256sum "$tmp/keyhole-aarch64-unknown-linux-gnu.tar.gz" | cut -d' ' -f1)"
+
+          # The GitHub-generated source-tag tarball, for the from-source AUR pkg.
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${tag}.tar.gz" \
+            -o "$tmp/source.tar.gz"
+          sha_src="$(sha256sum "$tmp/source.tar.gz" | cut -d' ' -f1)"
+
+          ./scripts/gen_packaging.sh release \
+            --version "$version" \
+            --sha-x86_64 "$sha_x86" \
+            --sha-aarch64 "$sha_arm" \
+            --sha-src "$sha_src"
+
+      - name: Sanity-check the filled artifacts
+        # The full scripts/test_packaging.sh asserts version consistency against
+        # Cargo.toml, which a prerelease (rc) tag deliberately diverges from; here
+        # just confirm the generated files are still well-formed.
+        run: |
+          bash -n packaging/aur/keyhole/PKGBUILD
+          bash -n packaging/aur/keyhole-bin/PKGBUILD
+          ruby -c packaging/homebrew/keyhole.rb
+
+      - name: Stage and upload packaging assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          out="$(mktemp -d)"
+          cp packaging/aur/keyhole-bin/PKGBUILD "$out/keyhole-bin.PKGBUILD"
+          cp packaging/aur/keyhole-bin/.SRCINFO "$out/keyhole-bin.SRCINFO"
+          cp packaging/aur/keyhole/PKGBUILD "$out/keyhole.PKGBUILD"
+          cp packaging/aur/keyhole/.SRCINFO "$out/keyhole.SRCINFO"
+          cp packaging/homebrew/keyhole.rb "$out/keyhole.rb"
+          gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            "$out/keyhole-bin.PKGBUILD" "$out/keyhole-bin.SRCINFO" \
+            "$out/keyhole.PKGBUILD" "$out/keyhole.SRCINFO" "$out/keyhole.rb"

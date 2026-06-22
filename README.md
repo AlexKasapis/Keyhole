@@ -152,13 +152,25 @@ gh attestation verify keyhole-x86_64-unknown-linux-gnu.tar.gz --repo AlexKasapis
 A [CycloneDX SBOM][cyclonedx] (`keyhole.cdx.json`) of the dependency graph is
 published alongside, also signed.
 
-### Distro & package managers _(coming soon)_
+### Nix
+
+The repository is a flake, so you can run or install straight from GitHub — no
+tap or extra repo needed (builds the full feature set; requires flakes enabled):
+
+```sh
+nix run github:AlexKasapis/Keyhole               # try it without installing
+nix profile install github:AlexKasapis/Keyhole   # install into your profile
+```
+
+### Other package managers _(coming soon)_
+
+These reuse the same binaries/assets and go live as each channel is published;
+the package definitions live in [`packaging/`](packaging/):
 
 - **Arch (AUR):** `keyhole` (from source) / `keyhole-bin` (prebuilt)
+- **Homebrew (incl. Linuxbrew):** `brew install AlexKasapis/tap/keyhole`
 - **openSUSE / Fedora:** `zypper install ./keyhole.rpm` / `dnf install ./keyhole.rpm`
 - **Debian / Ubuntu:** `apt install ./keyhole.deb`
-- **Homebrew (incl. Linuxbrew):** `brew install AlexKasapis/tap/keyhole`
-- **Nix:** `nix run github:AlexKasapis/Keyhole`
 
 [Releases page]: https://github.com/AlexKasapis/Keyhole/releases
 [cyclonedx]: https://cyclonedx.org/

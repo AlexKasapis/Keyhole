@@ -62,12 +62,23 @@ build-musl:
 release *ARGS:
     cargo release {{ARGS}}
 
-# Lint the release plumbing the way CI does: shellcheck the installer + its
-# tests, run the installer test suite, and (if installed) actionlint the workflows.
+# Lint the release plumbing the way CI does: run the installer + packaging test
+# suites, shellcheck the scripts, and (if installed) actionlint the workflows.
 release-lint:
     ./scripts/test_install.sh
-    shellcheck scripts/install.sh scripts/test_install.sh
+    ./scripts/test_packaging.sh
+    shellcheck scripts/install.sh scripts/test_install.sh scripts/gen_packaging.sh scripts/test_packaging.sh scripts/lib/srcinfo.sh
     command -v actionlint >/dev/null && actionlint || echo "actionlint not installed; skipping workflow lint"
+
+# Validate the Tier-2 community packaging artifacts (AUR / Homebrew / Nix):
+# structure, version consistency, .SRCINFO sync, and the release generator
+# round-trip. makepkg/brew/nix validators run too when those tools are present.
+test-packaging:
+    ./scripts/test_packaging.sh
+
+# Refresh packaging/aur/*/.SRCINFO after hand-editing a PKGBUILD.
+gen-srcinfo:
+    ./scripts/gen_packaging.sh srcinfo
 
 # Supply-chain audit (advisories/licenses/bans/sources); needs cargo-deny.
 deny:
