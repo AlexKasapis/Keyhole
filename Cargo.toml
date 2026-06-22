@@ -2,7 +2,7 @@
 name = "keyhole"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.96"
+rust-version = "1.95"
 authors = ["Alex Kasapis <apkasapis@gmail.com>"]
 description = "A terminal UI to connect to message/data brokers (Redis, AMQP), browse data, watch realtime activity, and record live streams to disk."
 license = "MIT OR Apache-2.0"

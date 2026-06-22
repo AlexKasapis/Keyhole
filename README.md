@@ -9,7 +9,7 @@ Redis · AMQP 1.0 · RabbitMQ — one self-contained binary, fully read-only by 
 [![CI](https://github.com/AlexKasapis/Keyhole/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexKasapis/Keyhole/actions/workflows/ci.yml)
 [![Audit](https://github.com/AlexKasapis/Keyhole/actions/workflows/audit.yml/badge.svg)](https://github.com/AlexKasapis/Keyhole/actions/workflows/audit.yml)
 [![Coverage ≥90%](https://img.shields.io/badge/coverage-%E2%89%A590%25-success.svg)](.github/workflows/ci.yml)
-[![Rust 1.96+](https://img.shields.io/badge/rust-1.96%2B-orange.svg)](rust-toolchain.toml)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 <!--
