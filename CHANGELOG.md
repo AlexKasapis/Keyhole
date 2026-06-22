@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plus **AUR** PKGBUILDs (`keyhole` from source and `keyhole-bin` prebuilt) and a
   **Homebrew** formula. Each release now also publishes the version-stamped,
   checksum-filled PKGBUILDs/.SRCINFO and the Homebrew formula as release assets.
+- Distro-native packages: each release now attaches a Debian/Ubuntu **`.deb`**
+  and an openSUSE/Fedora **`.rpm`** (full glibc feature set, x86_64), so users can
+  `apt`/`zypper`/`dnf install ./keyhole…` from a file without adding a repository.
+  Both bundle the man page, completions, and licenses, auto-detect their glibc
+  dependency floor, and recommend `gnome-keyring` for the OS-keyring backend; they
+  are signed, checksummed, and provenance-attested alongside the tarballs. Defined
+  in `[package.metadata.deb]` / `[package.metadata.generate-rpm]` in `Cargo.toml`.
 
 ### Security
 

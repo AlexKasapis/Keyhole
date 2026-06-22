@@ -338,3 +338,66 @@ jobs:
         run: |
           ./result/bin/keyhole --version
           ./result/bin/keyhole --help
+
+  # Tier 3 — build the distro-native packages from Cargo.toml's packaging metadata
+  # and prove they install and run. Mirrors the `nix` job: the only automated
+  # end-to-end check that `apt install ./keyhole.deb` and `dnf install ./keyhole.rpm`
+  # work (the structural metadata checks live in release-lint / test_packaging.sh).
+  # Builds the full glibc feature set, so it is heavy and stands on its own. This
+  # mirrors the release workflow's `packages` job; keeping it on every push catches
+  # a broken Cargo.toml asset path or dependency policy here, not at tag time.
+  packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Build binary + generate man page / completions
+        run: |
+          cargo build --locked --release
+          mkdir -p dist-assets
+          ./target/release/keyhole gen man --out dist-assets
+          for sh in bash zsh fish; do
+            ./target/release/keyhole gen completions "$sh" --out dist-assets
+          done
+
+      - name: Install cargo-deb + cargo-generate-rpm
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+
+      - name: Build the .deb and .rpm
+        run: |
+          # cargo-deb's $auto depends shells out to dpkg-shlibdeps (dpkg-dev);
+          # preinstalled on the runner, but make the dependency explicit.
+          command -v dpkg-shlibdeps >/dev/null || { sudo apt-get update && sudo apt-get install -y dpkg-dev; }
+          cargo deb --no-build --no-strip
+          cargo generate-rpm
+          ls -l target/debian/*.deb target/generate-rpm/*.rpm
+
+      - name: Install + smoke-test the .deb (Debian/Ubuntu, native)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./target/debian/*.deb
+          keyhole --version
+          # man-db is preinstalled on the runner; confirm the page resolves.
+          man -w keyhole
+          echo "== dpkg dependency declarations =="
+          dpkg -s keyhole | grep -E '^(Depends|Recommends):'
+
+      - name: Install + smoke-test the .rpm (Fedora container)
+        run: |
+          docker run --rm -v "$PWD/target/generate-rpm:/pkg:ro" fedora:latest bash -c '
+            set -euo pipefail
+            dnf install -y /pkg/*.rpm
+            keyhole --version
+            # Fedora images default to tsflags=nodocs; the man page + licenses are
+            # deliberately not %doc, so they must still be present.
+            test -f /usr/share/licenses/keyhole/LICENSE-MIT
+            test -f /usr/share/licenses/keyhole/LICENSE-APACHE
+            dnf install -y man-db
+            man -w keyhole
+            echo "== rpm dependency declarations =="
+            rpm -q --requires --recommends keyhole
+          '

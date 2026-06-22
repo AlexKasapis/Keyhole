@@ -35,6 +35,78 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.{ archive
 bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
+# Tier 3 — distro-native packages (.deb / .rpm), built from the full-feature
+# glibc binary (keyring + AMQP + RabbitMQ) and uploaded to each GitHub Release so
+# openSUSE/Fedora users can `zypper install ./keyhole*.rpm` / `dnf install` and
+# Debian/Ubuntu users `apt install ./keyhole*.deb` without waiting on official-
+# repo inclusion. Both carry the same payload as the release tarball: the binary,
+# the generated man page + bash/zsh/fish completions, and the dual licenses. The
+# dependency-free alternative is the static musl tarball (see the README).
+#
+# The keyring backend is pure-Rust zbus and the TLS stack is statically linked
+# (rustls + aws-lc), so `ldd` shows only libc/libm/libgcc_s — there is NO libdbus
+# or OpenSSL shared-library dependency. The Secret Service daemon the keyring
+# talks to over the session bus is therefore a runtime convenience, declared as a
+# weak (Recommends) dependency rather than a hard one; env-var and prompt secret
+# specs work without it. Asset source paths point at `target/release/keyhole` +
+# `dist-assets/` (the man page + completions emitted by `keyhole gen`), which the
+# release workflow stages before invoking cargo-deb / cargo-generate-rpm.
+
+[package.metadata.deb]
+# `description` (the package synopsis) is taken from [package] above; this is the
+# Debian long description shown by `apt show keyhole`.
+extended-description = """\
+A terminal UI to connect to message/data brokers (Redis, AMQP 1.0, RabbitMQ), \
+browse their data, watch realtime activity, and record live streams to disk for \
+later inspection. All operations are read-only / non-destructive by design."""
+section = "utils"
+priority = "optional"
+# libc6 + libgcc-s1 are auto-detected from the binary by dpkg-shlibdeps, which
+# also pins the correct glibc version floor for the build toolchain.
+depends = "$auto"
+# A Secret Service daemon for the OS-keyring secret backend. Optional (env-var
+# and prompt secret specs work without it), so a recommendation, not a depend.
+recommends = "gnome-keyring"
+# [source, dest, mode]; a dest ending in `/` keeps the source filename. cargo-deb
+# gzips the man page and rewrites its path automatically.
+assets = [
+    ["target/release/keyhole", "usr/bin/", "755"],
+    ["dist-assets/keyhole.1", "usr/share/man/man1/", "644"],
+    ["dist-assets/keyhole.bash", "usr/share/bash-completion/completions/keyhole", "644"],
+    ["dist-assets/_keyhole", "usr/share/zsh/vendor-completions/_keyhole", "644"],
+    ["dist-assets/keyhole.fish", "usr/share/fish/vendor_completions.d/keyhole.fish", "644"],
+    ["LICENSE-MIT", "usr/share/doc/keyhole/LICENSE-MIT", "644"],
+    ["LICENSE-APACHE", "usr/share/doc/keyhole/LICENSE-APACHE", "644"],
+    ["README.md", "usr/share/doc/keyhole/README.md", "644"],
+    ["CHANGELOG.md", "usr/share/doc/keyhole/CHANGELOG.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+# Discover the soname Requires (libc.so.6 / libm.so.6 / libgcc_s.so.1) from the
+# ELF directly so the result is identical regardless of the (Debian) build host
+# and is satisfied by glibc on every rpm distro. zsh completions go under
+# site-functions (the Fedora/openSUSE fpath), vs. Debian's vendor-completions.
+auto-req = "builtin"
+# The man page and licenses are deliberately NOT flagged `doc`: a `%doc` file is
+# skipped under rpm's `--nodocs` / `tsflags=nodocs` (the default in minimal/CI
+# images), and we want `man keyhole` and the license texts to survive that. Only
+# the README/CHANGELOG (true reference docs) carry the doc flag.
+assets = [
+    { source = "target/release/keyhole", dest = "/usr/bin/keyhole", mode = "0755" },
+    { source = "dist-assets/keyhole.1", dest = "/usr/share/man/man1/keyhole.1", mode = "0644" },
+    { source = "dist-assets/keyhole.bash", dest = "/usr/share/bash-completion/completions/keyhole", mode = "0644" },
+    { source = "dist-assets/_keyhole", dest = "/usr/share/zsh/site-functions/_keyhole", mode = "0644" },
+    { source = "dist-assets/keyhole.fish", dest = "/usr/share/fish/vendor_completions.d/keyhole.fish", mode = "0644" },
+    { source = "LICENSE-MIT", dest = "/usr/share/licenses/keyhole/LICENSE-MIT", mode = "0644" },
+    { source = "LICENSE-APACHE", dest = "/usr/share/licenses/keyhole/LICENSE-APACHE", mode = "0644" },
+    { source = "README.md", dest = "/usr/share/doc/keyhole/README.md", mode = "0644", doc = true },
+    { source = "CHANGELOG.md", dest = "/usr/share/doc/keyhole/CHANGELOG.md", mode = "0644", doc = true },
+]
+
+# Weak dep mirroring the .deb Recommends: the OS-keyring Secret Service daemon.
+[package.metadata.generate-rpm.recommends]
+gnome-keyring = "*"
+
 [dependencies]
 # --- async runtime ---
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }

@@ -53,6 +53,21 @@ build-musl:
     rustup target add x86_64-unknown-linux-musl
     cargo build --release --target x86_64-unknown-linux-musl --no-default-features
 
+# Build the distro-native packages (.deb + .rpm) locally, the way the release
+# workflow does: a full glibc release build, the generated man page + completions,
+# then cargo-deb / cargo-generate-rpm over Cargo.toml's [package.metadata.*].
+# Outputs land in target/debian/ and target/generate-rpm/. The .deb leg needs
+# dpkg-shlibdeps (Debian-only); requires `cargo install cargo-deb cargo-generate-rpm`.
+package:
+    cargo build --release
+    mkdir -p dist-assets
+    ./target/release/keyhole gen man --out dist-assets
+    ./target/release/keyhole gen completions bash --out dist-assets
+    ./target/release/keyhole gen completions zsh  --out dist-assets
+    ./target/release/keyhole gen completions fish --out dist-assets
+    cargo deb --no-build --no-strip
+    cargo generate-rpm
+
 # Cut a release via cargo-release: bump version, rewrite CHANGELOG.md, commit,
 # tag `vX.Y.Z`, and push (the tag triggers .github/workflows/release.yml).
 # cargo-release is dry-run by default — append `-x` to actually execute:

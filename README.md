@@ -162,6 +162,29 @@ nix run github:AlexKasapis/Keyhole               # try it without installing
 nix profile install github:AlexKasapis/Keyhole   # install into your profile
 ```
 
+### Distro packages (.deb / .rpm)
+
+Each release attaches a Debian/Ubuntu `.deb` and an openSUSE/Fedora `.rpm` (both
+the full **glibc** feature set, x86_64), so you can install from a file without
+adding a repository. Download the package for your distro from the [Releases
+page] and install it with your package manager so dependencies resolve:
+
+```sh
+# Debian / Ubuntu
+sudo apt install ./keyhole_*_amd64.deb
+
+# openSUSE
+sudo zypper install ./keyhole-*.x86_64.rpm
+
+# Fedora
+sudo dnf install ./keyhole-*.x86_64.rpm
+```
+
+Both bundle the man page, shell completions, and licenses, and declare their
+runtime dependencies (libc + a recommended `gnome-keyring` for the OS-keyring
+secret backend). For other architectures, use the prebuilt tarball above or
+`cargo install`.
+
 ### Other package managers _(coming soon)_
 
 These reuse the same binaries/assets and go live as each channel is published;
@@ -169,8 +192,6 @@ the package definitions live in [`packaging/`](packaging/):
 
 - **Arch (AUR):** `keyhole` (from source) / `keyhole-bin` (prebuilt)
 - **Homebrew (incl. Linuxbrew):** `brew install AlexKasapis/tap/keyhole`
-- **openSUSE / Fedora:** `zypper install ./keyhole.rpm` / `dnf install ./keyhole.rpm`
-- **Debian / Ubuntu:** `apt install ./keyhole.deb`
 
 [Releases page]: https://github.com/AlexKasapis/Keyhole/releases
 [cyclonedx]: https://cyclonedx.org/

@@ -116,6 +116,53 @@ else
     bad "flake.lock is not valid JSON"
 fi
 
+echo "== Tier 3: .deb / .rpm packaging metadata (Cargo.toml) =="
+# cargo-deb and cargo-generate-rpm read name/version/license/description straight
+# from [package], so — unlike the AUR/Homebrew artifacts — there is no version or
+# checksum to keep in sync here. Validate instead that both packages exist, carry
+# the full payload (binary + man + the three completions + both licenses), use the
+# per-distro completion directories, and declare the agreed dependency policy.
+
+# Print the body of TOML table `$2` from file `$1`: the lines after that header up
+# to the next `[table]` header. Scopes each assertion to a single metadata section
+# so a match in a neighbouring section cannot mask a real omission. (Asset lines
+# are indented, so the `^\[` header test never trips over an array/inline-table.)
+toml_section() {
+    awk -v want="[$2]" '
+        /^\[/ { inq = ($0 == want); next }
+        inq   { print }
+    ' "$1"
+}
+deb_meta=$(toml_section Cargo.toml package.metadata.deb)
+rpm_meta=$(toml_section Cargo.toml package.metadata.generate-rpm)
+rpm_rec=$(toml_section Cargo.toml package.metadata.generate-rpm.recommends)
+
+[ -n "$deb_meta" ] && pass "[package.metadata.deb] present" || bad "[package.metadata.deb] missing from Cargo.toml"
+[ -n "$rpm_meta" ] && pass "[package.metadata.generate-rpm] present" || bad "[package.metadata.generate-rpm] missing from Cargo.toml"
+
+# Payload both packages must install (substrings of the asset destination paths).
+for needle in 'usr/bin/' 'man/man1/' 'bash-completion/completions/keyhole' 'fish/vendor_completions.d/keyhole.fish' 'LICENSE-MIT' 'LICENSE-APACHE'; do
+    printf '%s' "$deb_meta" | grep -qF "$needle" && pass "deb installs $needle" || bad "deb missing asset: $needle"
+    printf '%s' "$rpm_meta" | grep -qF "$needle" && pass "rpm installs $needle" || bad "rpm missing asset: $needle"
+done
+
+# zsh completions follow each distro's fpath convention.
+printf '%s' "$deb_meta" | grep -qF 'zsh/vendor-completions/_keyhole' && pass "deb uses zsh vendor-completions" || bad "deb zsh completion path wrong"
+printf '%s' "$rpm_meta" | grep -qF 'zsh/site-functions/_keyhole' && pass "rpm uses zsh site-functions" || bad "rpm zsh completion path wrong"
+
+# Dependency policy: hard deps auto-detected from the ELF (so the glibc floor is
+# exact); the keyring Secret Service daemon is a weak (Recommends) dep, not hard.
+printf '%s' "$deb_meta" | grep -qE 'depends *= *"\$auto"' && pass "deb auto-detects shared-lib depends" || bad "deb depends policy changed"
+printf '%s' "$deb_meta" | grep -qE 'recommends *= *"gnome-keyring"' && pass "deb recommends gnome-keyring" || bad "deb keyring recommends missing"
+printf '%s' "$rpm_meta" | grep -qE 'auto-req *= *"builtin"' && pass "rpm auto-detects requires (builtin)" || bad "rpm auto-req policy changed"
+printf '%s' "$rpm_rec" | grep -qE '^gnome-keyring' && pass "rpm recommends gnome-keyring" || bad "rpm keyring recommends missing"
+
+# The committed asset sources must be real files (the binary + man/completions are
+# generated at build time, so they are exercised by the CI `packages` job instead).
+for src in LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md; do
+    [ -f "$src" ] && pass "asset source $src exists" || bad "asset source $src missing from repo"
+done
+
 echo "== release generator round-trip =="
 work=$(mktemp -d "${TMPDIR:-/tmp}/keyhole-pkg-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -182,6 +229,26 @@ if command -v nix >/dev/null 2>&1; then
     nix flake check --no-build >/dev/null 2>&1 && pass "nix flake check (eval) clean" || bad "nix flake check failed"
 else
     skip "nix not installed (cannot evaluate/build the flake)"
+fi
+# Build the actual packages from the metadata when the packagers and a release
+# build (binary + generated assets) are present — e.g. after `just build-release`
+# + `keyhole gen`. The full build+install-in-a-distro-container proof is CI's
+# dedicated `packages` job; this is just a fast "the metadata still produces a
+# package" check for local runs. The .deb leg also needs dpkg-shlibdeps (for the
+# `$auto` depends), which is Debian-only, so it skips on non-Debian hosts.
+if [ -x target/release/keyhole ] && [ -f dist-assets/keyhole.1 ]; then
+    if command -v cargo-deb >/dev/null 2>&1 && command -v dpkg-shlibdeps >/dev/null 2>&1; then
+        cargo deb --no-build --no-strip >/dev/null 2>&1 && pass "cargo deb builds a .deb from the metadata" || bad "cargo deb failed on the metadata"
+    else
+        skip "cargo-deb / dpkg-shlibdeps absent (full build+install is CI's 'packages' job)"
+    fi
+    if command -v cargo-generate-rpm >/dev/null 2>&1; then
+        cargo generate-rpm >/dev/null 2>&1 && pass "cargo generate-rpm builds an .rpm from the metadata" || bad "cargo generate-rpm failed on the metadata"
+    else
+        skip "cargo-generate-rpm absent (full build+install is CI's 'packages' job)"
+    fi
+else
+    skip "no release binary + dist-assets present (build them to exercise cargo-deb/generate-rpm locally)"
 fi
 
 echo

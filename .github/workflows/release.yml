@@ -190,16 +190,80 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # Integrity layer: once every binary tarball + the SBOM are on the release,
-  # attach the verifiable extras. Adds, to the release:
+  # Tier 3 — distro-native packages. Build the full-feature glibc `.deb` (apt)
+  # and `.rpm` (zypper/dnf) for x86_64 and upload them to the release, so
+  # Debian/Ubuntu and openSUSE/Fedora users can `apt|zypper|dnf install ./keyhole…`
+  # straight from a file without waiting on official-repo inclusion. The feature
+  # set, dependency declarations, and install layout live in `[package.metadata.deb]`
+  # / `[package.metadata.generate-rpm]` in Cargo.toml.
+  #
+  # Built natively (not cross-compiled) on purpose: cargo-deb's dpkg-shlibdeps and
+  # cargo-generate-rpm's builtin ELF dependency scan then pin the exact glibc
+  # floor of the build toolchain. x86_64 only — these target normal desktop /
+  # session-bus systems; aarch64 and everything else use the static musl tarball
+  # or `cargo install`. Adding aarch64 means a native `ubuntu-24.04-arm` matrix
+  # leg: a cross-built package would carry a wrong/loose dependency floor.
+  packages:
+    needs: [create-release, assets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Download generated man page + completions
+        # The same artifact the tarballs bundle; Cargo.toml's package assets read
+        # it from ./dist-assets (alongside the binary in ./target/release).
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: packaging-assets
+          path: dist-assets
+
+      - name: Build the full-feature glibc binary
+        # Default features (keyring + amqp + rabbitmq); the release profile strips
+        # it, so the packagers below run with --no-strip.
+        run: cargo build --locked --release
+
+      - name: Install cargo-deb + cargo-generate-rpm
+        # `cargo install` rather than a prebuilt-binary action so the step never
+        # depends on a third party publishing a build for these two packagers.
+        run: cargo install --locked cargo-deb cargo-generate-rpm
+
+      - name: Build the .deb and .rpm
+        run: |
+          # cargo-deb's $auto depends shells out to dpkg-shlibdeps (dpkg-dev);
+          # preinstalled on the runner, but make the dependency explicit.
+          command -v dpkg-shlibdeps >/dev/null || { sudo apt-get update && sudo apt-get install -y dpkg-dev; }
+          cargo deb --no-build --no-strip
+          cargo generate-rpm
+          {
+            echo '## Distro packages'
+            echo '```'
+            ls -l target/debian/*.deb target/generate-rpm/*.rpm
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the .deb and .rpm to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            target/debian/*.deb target/generate-rpm/*.rpm
+
+  # Integrity layer: once every binary tarball, the distro packages, and the SBOM
+  # are on the release, attach the verifiable extras. Adds, to the release:
   #   * SHA256SUMS ............. one aggregate checksum over all artifacts
   #   * keyhole.cdx.json ....... the CycloneDX SBOM
   #   * <artifact>.sig/.pem .... cosign keyless (sigstore) signatures
-  # and records SLSA build-provenance attestations for the binaries (verifiable
-  # with `gh attestation verify <file> --repo AlexKasapis/Keyhole`). The
-  # installer (scripts/install.sh) verifies the cosign signature when available.
+  # and records SLSA build-provenance attestations for the binaries + packages
+  # (verifiable with `gh attestation verify <file> --repo AlexKasapis/Keyhole`).
+  # The installer (scripts/install.sh) verifies the cosign signature when available.
   sign:
-    needs: [create-release, assets, upload-binaries]
+    needs: [create-release, assets, upload-binaries, packages]
     runs-on: ubuntu-latest
     permissions:
       contents: write # upload signatures / checksums / SBOM to the release
@@ -212,19 +276,19 @@ jobs:
           name: sbom
           path: artifacts
 
-      - name: Download the release tarballs
+      - name: Download the release tarballs + distro packages
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd artifacts
           gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
-            --pattern '*.tar.gz'
+            --pattern '*.tar.gz' --pattern '*.deb' --pattern '*.rpm'
           ls -l
 
       - name: Generate aggregate SHA256SUMS
         working-directory: artifacts
         run: |
-          sha256sum ./*.tar.gz keyhole.cdx.json > SHA256SUMS
+          sha256sum ./*.tar.gz ./*.deb ./*.rpm keyhole.cdx.json > SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign
@@ -233,7 +297,7 @@ jobs:
       - name: Sign artifacts (cosign keyless)
         working-directory: artifacts
         run: |
-          for f in ./*.tar.gz SHA256SUMS keyhole.cdx.json; do
+          for f in ./*.tar.gz ./*.deb ./*.rpm SHA256SUMS keyhole.cdx.json; do
             cosign sign-blob --yes \
               --output-signature "${f}.sig" \
               --output-certificate "${f}.pem" \
@@ -241,10 +305,13 @@ jobs:
           done
           ls -l
 
-      - name: Attest build provenance for the binaries
+      - name: Attest build provenance for the binaries + packages
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
         with:
-          subject-path: artifacts/*.tar.gz
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.deb
+            artifacts/*.rpm
 
       - name: Upload signatures, checksums, and SBOM to the release
         env:
