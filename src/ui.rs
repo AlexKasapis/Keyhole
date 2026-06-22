@@ -28,7 +28,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     match app.screen {
         Screen::Connections => views::connections(frame, app, &theme, body_area),
         Screen::Browser => views::browser(frame, app, &theme, body_area),
-        Screen::Dashboard => views::dashboard(frame, app, &theme, body_area),
         Screen::Realtime => views::realtime(frame, app, &theme, body_area),
         Screen::Recordings => views::recordings(frame, app, &theme, body_area),
         Screen::Console => views::console(frame, app, &theme, body_area),
@@ -58,7 +57,6 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let screen = match app.screen {
         Screen::Connections => "connections",
         Screen::Browser => "browser",
-        Screen::Dashboard => "dashboard",
         Screen::Realtime => "realtime",
         Screen::Recordings => "recordings",
         Screen::Console => "console",
@@ -176,7 +174,6 @@ fn hints(screen: Screen) -> &'static str {
         Screen::Browser => {
             "  ↑↓ keys · / filter · [ ] db · t tail · s sub · e console · w watch · : palette · ? help"
         }
-        Screen::Dashboard => "  b browser · w watch · e console · c conns · r refresh · : palette · ? help",
         Screen::Realtime => {
             "  ↑↓ scroll · Tab tab · s sub · m monitor · r rec · x stop · G follow · : palette · ? help"
         }
@@ -284,7 +281,7 @@ mod tests {
 
     #[test]
     fn data_screens_render_no_connection_placeholders() {
-        for screen in [Screen::Browser, Screen::Dashboard, Screen::Realtime] {
+        for screen in [Screen::Browser, Screen::Realtime] {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             assert!(
@@ -475,11 +472,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dashboard_renders_stats() {
+    async fn browser_shows_server_stats_band() {
+        // The Dashboard's server stats are now merged into the Browser as a
+        // compact band atop the keys/value panes (Redis has `can_dashboard`).
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Dashboard;
+        app.screen = Screen::Browser;
         app.connections[0].stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
+            connected_clients: Some(7),
             used_memory: Some(1024),
             maxmemory: Some(4096),
             keyspace_hits: Some(3),
@@ -488,16 +488,38 @@ mod tests {
             ..Default::default()
         });
         let text = screen_text(&mut app);
-        assert!(text.contains("Version"));
-        assert!(text.contains("7.4.0"));
-        assert!(text.contains("Hit ratio"));
+        assert!(text.contains("Server"), "the stats band has a title");
+        assert!(text.contains("7.4.0"), "version in the metrics line");
+        assert!(text.contains("clients"), "client count in the metrics line");
+        // The gauges' name prefixes render.
+        assert!(text.contains("Mem"));
+        assert!(text.contains("Hit"));
     }
 
     #[tokio::test]
-    async fn dashboard_shows_loading_without_stats() {
+    async fn browser_stats_band_shows_loading_without_stats() {
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Dashboard;
+        app.screen = Screen::Browser;
+        // No stats yet → the band shows a loading placeholder, not gauges.
         assert!(screen_text(&mut app).contains("Loading server stats"));
+    }
+
+    #[tokio::test]
+    async fn browser_without_dashboard_capability_hides_band() {
+        // A browse-capable broker that lacks server stats shows no band at all —
+        // the keys/value panes get the full height. (Redis is the only such
+        // broker today, so this guards the capability gate, not a live config.)
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        app.connections[0].caps.can_dashboard = false;
+        app.connections[0].keys = vec![entry("mykey", ValueType::String)];
+        let text = screen_text(&mut app);
+        assert!(text.contains("mykey"), "the key table still renders");
+        assert!(!text.contains("Server"), "no stats band title");
+        assert!(
+            !text.contains("Loading server stats"),
+            "no band placeholder"
+        );
     }
 
     #[tokio::test]
@@ -718,10 +740,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_dashboard() {
+    async fn snapshot_browser_with_stats() {
+        // The Browser with its merged server-stats band atop the keys + value
+        // panes (the former Dashboard content, now part of the main panel).
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
-        app.screen = Screen::Dashboard;
+        app.screen = Screen::Browser;
+        app.connections[0].keys = vec![
+            entry("user:1", ValueType::String),
+            entry("session:abc", ValueType::Hash),
+        ];
+        app.connections[0].complete = true;
+        app.connections[0].table.select(Some(0));
+        app.connections[0].value_key = Some("user:1".into());
+        app.connections[0].value = Some(ValueView::Str {
+            total_bytes: 5,
+            shown_bytes: 5,
+            text: "alice".into(),
+            encoding: PayloadEncoding::Utf8,
+        });
         app.connections[0].stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             uptime_seconds: Some(3661),
@@ -729,12 +766,13 @@ mod tests {
             instantaneous_ops_per_sec: Some(120),
             used_memory: Some(1024 * 1024),
             used_memory_peak: Some(2 * 1024 * 1024),
+            maxmemory: Some(4 * 1024 * 1024),
             keyspace_hits: Some(900),
             keyspace_misses: Some(100),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
         });
-        insta::assert_snapshot!("dashboard", render_lines(&mut app, 90, 20));
+        insta::assert_snapshot!("browser_with_stats", render_lines(&mut app, 90, 20));
     }
 
     #[tokio::test]

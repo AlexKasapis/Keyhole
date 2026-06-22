@@ -19,7 +19,6 @@ pub enum Action {
     AddConnection,
     GotoConnections,
     GotoBrowser,
-    GotoDashboard,
     GotoRealtime,
     GotoRecordings,
     /// Open the read-only command console.
@@ -70,7 +69,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('c')) => Some(Action::GotoConnections),
         (false, Char('b')) => Some(Action::GotoBrowser),
-        (false, Char('d')) => Some(Action::GotoDashboard),
         (false, Char('w')) => Some(Action::GotoRealtime),
         (false, Char('R')) => Some(Action::GotoRecordings),
         (false, Char('e')) => Some(Action::GotoConsole),
@@ -104,7 +102,6 @@ pub struct PaletteItem {
 pub const PALETTE_ITEMS: &[PaletteItem] = &[
     pal("Go to: Connections", Action::GotoConnections),
     pal("Go to: Browser", Action::GotoBrowser),
-    pal("Go to: Dashboard", Action::GotoDashboard),
     pal("Go to: Realtime tails", Action::GotoRealtime),
     pal("Go to: Recordings", Action::GotoRecordings),
     pal("Go to: Command console", Action::GotoConsole),
@@ -160,7 +157,6 @@ mod tests {
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('c')), Some(Action::GotoConnections));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
-        assert_eq!(plain(Char('d')), Some(Action::GotoDashboard));
         assert_eq!(plain(Char('w')), Some(Action::GotoRealtime));
         assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
         assert_eq!(plain(Char('e')), Some(Action::GotoConsole));
@@ -185,7 +181,11 @@ mod tests {
     #[test]
     fn ctrl_paging_is_distinct_from_plain_letters() {
         assert_eq!(ctrl(Char('d')), Some(Action::PageDown));
-        assert_eq!(plain(Char('d')), Some(Action::GotoDashboard));
+        assert_eq!(
+            plain(Char('d')),
+            None,
+            "plain 'd' is unbound: the Dashboard merged into the Browser"
+        );
         assert_eq!(ctrl(Char('u')), Some(Action::PageUp));
         assert_eq!(plain(Char('u')), None, "plain 'u' is unbound");
         // The physical Page keys page too (regardless of modifiers).

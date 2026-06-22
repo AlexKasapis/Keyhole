@@ -476,18 +476,6 @@ impl App {
                 Some(false) => self.set_status("this broker has no key browser".to_string(), true),
                 None => {}
             },
-            Action::GotoDashboard => {
-                match self.active_conn().map(|c| (c.id, c.caps.can_dashboard)) {
-                    Some((id, true)) => {
-                        self.screen = Screen::Dashboard;
-                        self.request_stats(id);
-                    }
-                    Some((_, false)) => {
-                        self.set_status("this broker has no dashboard".to_string(), true)
-                    }
-                    None => {}
-                }
-            }
             Action::GotoRealtime => {
                 if self.active.is_some() {
                     self.screen = Screen::Realtime;
@@ -556,10 +544,10 @@ impl App {
                     }
                 }
             }
-            // `r`: refresh data (Browser/Dashboard), toggle recording (Realtime),
-            // rescan files (Recordings).
+            // `r`: refresh data (Browser — keys and the server-stats band),
+            // toggle recording (Realtime), rescan files (Recordings).
             Action::Refresh => match self.screen {
-                Screen::Browser | Screen::Dashboard => {
+                Screen::Browser => {
                     if let Some(id) = self.active_id() {
                         self.start_browse(id, true);
                         self.request_stats(id);
@@ -680,7 +668,6 @@ impl App {
                 self.recordings_state.select(next);
             }
             Screen::Console => self.scroll_console(delta),
-            Screen::Dashboard => {}
         }
     }
 
@@ -732,7 +719,6 @@ impl App {
                     conn.console.scroll = if top { u16::MAX } else { 0 };
                 }
             }
-            Screen::Dashboard => {}
         }
     }
 
@@ -1866,11 +1852,7 @@ mod tests {
     #[test]
     fn goto_data_screens_requires_active_connection() {
         let (mut app, _rx) = test_app();
-        for action in [
-            Action::GotoBrowser,
-            Action::GotoDashboard,
-            Action::GotoRealtime,
-        ] {
+        for action in [Action::GotoBrowser, Action::GotoRealtime] {
             app.apply(action);
             assert_eq!(
                 app.screen,
@@ -1890,8 +1872,6 @@ mod tests {
     async fn goto_screens_switch_with_active_connection() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.apply(Action::GotoDashboard);
-        assert_eq!(app.screen, Screen::Dashboard);
         app.apply(Action::GotoRealtime);
         assert_eq!(app.screen, Screen::Realtime);
         app.apply(Action::GotoConnections);
@@ -1955,7 +1935,7 @@ mod tests {
     async fn change_db_only_acts_in_browser() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 4).await;
-        app.screen = Screen::Dashboard;
+        app.screen = Screen::Realtime;
         app.change_db(1);
         assert_eq!(app.connections[0].db, 0, "no DB change outside the Browser");
     }
@@ -2637,7 +2617,6 @@ mod tests {
         connect_amqp(&mut app, 1, "mq").await;
         for (action, needle) in [
             (Action::GotoBrowser, "no key browser"),
-            (Action::GotoDashboard, "no dashboard"),
             (Action::GotoConsole, "no command console"),
         ] {
             app.screen = Screen::Realtime;

@@ -15,8 +15,10 @@ use crate::broker::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
     Connections,
+    /// Key browser + value inspector for the active connection. For brokers with
+    /// server statistics (Redis) it also carries a compact stats band up top —
+    /// the former standalone Dashboard, now merged into this main panel.
     Browser,
-    Dashboard,
     /// Live tails (pub/sub, streams, keyspace, MONITOR) for the active connection.
     Realtime,
     /// On-disk recordings.

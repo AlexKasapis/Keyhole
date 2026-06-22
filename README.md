@@ -15,9 +15,9 @@ temporary bound queue — observing never consumes or mutates data.
 
 ### Brokers
 
-- **Redis** — full support: keyspace browser, value inspector, server
-  dashboard, read-only command console, and realtime tails. Multiplexed,
-  auto-reconnecting connection with per-database `SELECT`.
+- **Redis** — full support: keyspace browser with an inline server-statistics
+  band, value inspector, read-only command console, and realtime tails.
+  Multiplexed, auto-reconnecting connection with per-database `SELECT`.
 - **AMQP 1.0** — read + record surface (ActiveMQ / Amazon MQ / RabbitMQ 4.x):
   non-destructively tail a **topic** (multicast — each subscriber gets a copy)
   or **queue** (browse mode — messages are read, not consumed). `amqps://` TLS
@@ -35,8 +35,8 @@ brokers that support it.
 ### Screens
 
 - **Connections** — manage saved connection profiles, connect/disconnect.
-- **Browser** — navigate the keyspace and inspect values (Redis).
-- **Dashboard** — live server statistics from `INFO` (Redis).
+- **Browser** — navigate the keyspace and inspect values, with a live
+  server-statistics band (from `INFO`) atop the panes (Redis).
 - **Realtime** — live tails (see below).
 - **Recordings** — browse on-disk `.jsonl` recordings.
 - **Console** — read-only command console (Redis).

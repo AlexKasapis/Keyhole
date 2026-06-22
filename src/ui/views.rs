@@ -8,7 +8,7 @@ use ratatui::Frame;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ConnForm, RecordState, SubState};
+use crate::app::{App, ConnForm, Connection, RecordState, SubState};
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
 
@@ -66,8 +66,21 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         return;
     };
 
-    let [info_area, body_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    // Brokers that expose server statistics (Redis) carry a compact stats band
+    // — the former standalone Dashboard — between the info bar and the panes.
+    let (info_area, band_area, body_area) = if conn.caps.can_dashboard {
+        let [info, band, body] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(SERVER_BAND_HEIGHT),
+            Constraint::Min(0),
+        ])
+        .areas(area);
+        (info, Some(band), body)
+    } else {
+        let [info, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        (info, None, body)
+    };
 
     let scanning = if conn.complete { "" } else { " · scanning…" };
     let info = Line::from(vec![
@@ -76,6 +89,10 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         Span::styled(format!(" {} keys{scanning} ", conn.keys.len()), theme.dim),
     ]);
     frame.render_widget(Paragraph::new(info).style(theme.status_bar), info_area);
+
+    if let Some(band_area) = band_area {
+        server_stats_band(frame, conn, theme, band_area);
+    }
 
     let [table_area, value_area] =
         Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
@@ -133,25 +150,25 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     frame.render_widget(value, value_area);
 }
 
-/// Dashboard screen: server stats for the active connection.
-pub fn dashboard(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(conn) = app.active_conn() else {
-        frame.render_widget(
-            Paragraph::new("No active connection.").style(theme.dim),
-            area,
-        );
-        return;
-    };
+/// Total height (rows) reserved for the Browser's server-stats band: a border
+/// (2) wrapping a gauges row (1) and a one-line metrics summary (1).
+const SERVER_BAND_HEIGHT: u16 = 4;
+
+/// The server-stats band shown atop the Browser for brokers that expose server
+/// statistics (Redis) — the former standalone Dashboard, merged into the main
+/// panel. A compact, full-width strip: a Memory and a Hit-ratio gauge over a
+/// one-line metrics summary (version, uptime, clients, ops/sec, keys-per-DB).
+fn server_stats_band(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
     let block = Block::bordered()
-        .title(format!(" Dashboard — {} ", conn.name))
+        .title(" Server ")
         .title_style(theme.heading)
         .border_style(theme.border);
 
+    // Stats arrive asynchronously after connect; until the first reply, hold the
+    // band's height with a placeholder so the panes below don't jump.
     let Some(stats) = conn.stats.as_ref() else {
         frame.render_widget(
-            Paragraph::new("Loading server stats…")
-                .style(theme.dim)
-                .block(block),
+            Paragraph::new(Line::styled("Loading server stats…", theme.dim)).block(block),
             area,
         );
         return;
@@ -161,10 +178,11 @@ pub fn dashboard(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(block, area);
 
     let [gauges, metrics] =
-        Layout::vertical([Constraint::Length(3), Constraint::Min(0)]).areas(inner);
-    let [g1, g2] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+    let [g_mem, g_hit] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(gauges);
 
+    // Memory: used / maxmemory when a cap is set, else used / peak, else just used.
     let used = stats.used_memory.unwrap_or(0);
     let (mem_ratio, mem_label) = if let Some(max) = stats.maxmemory.filter(|m| *m > 0) {
         (
@@ -179,82 +197,74 @@ pub fn dashboard(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     } else {
         (0.0, human_bytes(used))
     };
-    frame.render_widget(
-        Gauge::default()
-            .block(Block::bordered().title("Memory").border_style(theme.border))
-            .gauge_style(theme.gauge)
-            .ratio(gauge_ratio(mem_ratio))
-            .label(mem_label),
-        g1,
-    );
+    inline_gauge(frame, g_mem, theme, "Mem ", mem_ratio, mem_label);
 
     let hit = stats.hit_ratio().unwrap_or(0.0);
-    frame.render_widget(
-        Gauge::default()
-            .block(
-                Block::bordered()
-                    .title("Hit ratio")
-                    .border_style(theme.border),
-            )
-            .gauge_style(theme.gauge)
-            .ratio(gauge_ratio(hit))
-            .label(format!("{:.1}%", hit * 100.0)),
-        g2,
+    inline_gauge(
+        frame,
+        g_hit,
+        theme,
+        "Hit ",
+        hit,
+        format!("{:.1}%", hit * 100.0),
     );
 
-    let mut lines: Vec<Line> = Vec::new();
-    {
-        let mut row = |k: &str, v: String| {
-            lines.push(Line::from(vec![
-                Span::styled(format!("{k:<16}"), theme.accent),
-                Span::raw(v),
-            ]));
-        };
-        row(
-            "Version",
-            stats.redis_version.clone().unwrap_or_else(|| "?".into()),
-        );
-        row(
-            "Uptime",
-            stats
-                .uptime_seconds
-                .map(human_duration)
-                .unwrap_or_else(|| "?".into()),
-        );
-        row("Clients", opt_num(stats.connected_clients));
-        row("Ops/sec", opt_num(stats.instantaneous_ops_per_sec));
-        row("Memory used", human_bytes(used));
-        row(
-            "Memory peak",
-            stats
-                .used_memory_peak
-                .map(human_bytes)
-                .unwrap_or_else(|| "?".into()),
-        );
-        row(
-            "Hits / Misses",
-            format!(
-                "{} / {}",
-                opt_num(stats.keyspace_hits),
-                opt_num(stats.keyspace_misses)
-            ),
-        );
-        let dbs = stats
-            .db_keys
-            .iter()
-            .map(|(db, n)| format!("db{db}={n}"))
-            .collect::<Vec<_>>()
-            .join("  ");
-        row(
-            "Keys per DB",
-            if dbs.is_empty() {
-                "(empty)".into()
-            } else {
-                dbs
-            },
-        );
+    // Metrics line: the fields not already shown by the two gauges, joined with
+    // dim separators. Missing fields are simply omitted.
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(v) = &stats.redis_version {
+        parts.push(format!("v{v}"));
     }
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), metrics);
+    if let Some(up) = stats.uptime_seconds {
+        parts.push(format!("up {}", human_duration(up)));
+    }
+    if let Some(c) = stats.connected_clients {
+        parts.push(format!("{c} clients"));
+    }
+    if let Some(ops) = stats.instantaneous_ops_per_sec {
+        parts.push(format!("{ops} ops/s"));
+    }
+    let dbs = stats
+        .db_keys
+        .iter()
+        .map(|(db, n)| format!("db{db}={n}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !dbs.is_empty() {
+        parts.push(dbs);
+    }
+    frame.render_widget(
+        Paragraph::new(Line::styled(parts.join("  ·  "), theme.dim)),
+        metrics,
+    );
+}
+
+/// Render a one-row labelled gauge: a short `prefix` name followed by a filled
+/// bar carrying `label` (the value). Used by the Browser's server-stats band,
+/// where a full bordered [`Gauge`] would be too tall.
+fn inline_gauge(
+    frame: &mut Frame,
+    area: Rect,
+    theme: &Theme,
+    prefix: &str,
+    ratio: f64,
+    label: String,
+) {
+    // `prefix` is short ASCII, so its byte length equals its display width.
+    let [name_area, bar_area] =
+        Layout::horizontal([Constraint::Length(prefix.len() as u16), Constraint::Min(0)])
+            .areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::styled(prefix.to_string(), theme.accent)),
+        name_area,
+    );
+    frame.render_widget(
+        Gauge::default()
+            .gauge_style(theme.gauge)
+            .ratio(gauge_ratio(ratio))
+            .label(label),
+        bar_area,
+    );
 }
 
 /// Realtime screen: live tail tabs + the focused tail's scrollback ring buffer.
@@ -681,9 +691,10 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Enter connect (Connections)    : command palette"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
-        Line::from("  c connections  b browser  d dashboard  w realtime  R recordings  e console"),
+        Line::from("  c connections  b browser  w realtime  R recordings  e console"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
+        Line::from("  server stats (Redis) appear in a band above the panes"),
         Line::from("  / filter   [ ] change DB   n load more   r refresh"),
         Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),
         Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
@@ -886,13 +897,9 @@ fn fmt_datetime(t: OffsetDateTime) -> String {
     )
 }
 
-fn opt_num(v: Option<u64>) -> String {
-    v.map(|n| n.to_string()).unwrap_or_else(|| "?".into())
-}
-
 /// Clamp a gauge ratio into `[0, 1]`, mapping non-finite values (NaN/∞) to 0.
 /// `f64::clamp` passes NaN through unchanged, which would trip `Gauge::ratio`'s
-/// internal `0.0..=1.0` assertion and panic the dashboard.
+/// internal `0.0..=1.0` assertion and panic the render.
 fn gauge_ratio(r: f64) -> f64 {
     if r.is_finite() {
         r.clamp(0.0, 1.0)
@@ -1015,12 +1022,6 @@ mod tests {
             fmt_datetime(datetime!(2026 - 06 - 19 09:08:07 UTC)),
             "2026-06-19 09:08"
         );
-    }
-
-    #[test]
-    fn opt_num_renders_placeholder_for_none() {
-        assert_eq!(opt_num(Some(42)), "42");
-        assert_eq!(opt_num(None), "?");
     }
 
     #[test]

@@ -141,7 +141,7 @@ pub struct Capabilities {
     pub databases: u32,
     /// Key/destination browser (Browser screen).
     pub can_browse: bool,
-    /// Server statistics (Dashboard screen).
+    /// Server statistics (shown as a stats band atop the Browser screen).
     pub can_dashboard: bool,
     /// Read-only command console (Console screen).
     pub can_console: bool,

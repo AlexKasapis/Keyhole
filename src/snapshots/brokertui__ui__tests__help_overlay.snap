@@ -9,9 +9,10 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │  Enter connect (Connections)    : command palette              │           │
 │           │                                                                │           │
 │           │Screens                                                         │           │
-│           │  c connections  b browser  d dashboard  w realtime  R recording│           │
+│           │  c connections  b browser  w realtime  R recordings  e console │           │
 │           │                                                                │           │
 │           │Browser                                                         │           │
+│           │  server stats (Redis) appear in a band above the panes         │           │
 │           │  / filter   [ ] change DB   n load more   r refresh            │           │
 │           │  PgUp/PgDn (or Ctrl-u/d) scroll the value pane                 │           │
 │           │  t tail selected stream    s subscribe (pub/sub or stream)     │           │
@@ -27,7 +28,6 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │                                                                │           │
 │           │General                                                         │           │
 │           │  a add connection    ? toggle help    q / Ctrl-c quit          │           │
-│           │                                                                │           │
 │           │                                                                │           │
 │           │                                                                │           │
 │           │                                                                │           │

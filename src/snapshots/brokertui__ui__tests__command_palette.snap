@@ -10,7 +10,6 @@ expression: "render_lines(&mut app, 90, 24)"
 │                │› ▏                                                   │                │
 │                │▶ Go to: Connections                                  │                │
 │                │  Go to: Browser                                      │                │
-│                │  Go to: Dashboard                                    │                │
 │                │  Go to: Realtime tails                               │                │
 │                │  Go to: Recordings                                   │                │
 │                │  Go to: Command console                              │                │
@@ -21,6 +20,7 @@ expression: "render_lines(&mut app, 90, 24)"
 │                │  Refresh / toggle recording                          │                │
 │                │  Toggle help                                         │                │
 │                │  Quit                                                │                │
+│                │                                                      │                │
 │                └──────────────────────────────────────────────────────┘                │
 │                                                                                        │
 │                                                                                        │
