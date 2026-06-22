@@ -2,9 +2,12 @@
 //! and `export` subcommands run headlessly (no terminal), reusing the broker and
 //! recording stack minus `ui/`.
 
+use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use anyhow::Context;
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 
 /// Keyhole — connect to brokers, browse data, and record live streams.
 #[derive(Debug, Parser)]
@@ -54,6 +57,94 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         out: Option<PathBuf>,
     },
+    /// Generate packaging assets (man page, shell completions) and exit.
+    ///
+    /// Hidden from `--help`: this is a maintainer/packaging helper, not an
+    /// end-user command. It introspects the live clap definition, so the
+    /// artifacts never drift from the actual flags.
+    #[command(hide = true)]
+    Gen {
+        #[command(subcommand)]
+        asset: GenAsset,
+    },
+}
+
+/// Which packaging asset `keyhole gen` should emit.
+#[derive(Debug, Subcommand)]
+pub enum GenAsset {
+    /// Write the roff man page (to stdout, or `DIR/keyhole.1` with `--out`).
+    Man {
+        /// Write `keyhole.1` into this directory instead of stdout.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
+    /// Write a shell completion script (to stdout, or into `DIR` with `--out`).
+    Completions {
+        /// Target shell.
+        #[arg(value_name = "SHELL")]
+        shell: Shell,
+        /// Write the conventionally-named script into this directory instead
+        /// of stdout (e.g. `keyhole.bash`, `_keyhole`, `keyhole.fish`).
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
+    },
+}
+
+/// Render the roff man page for the whole CLI into bytes.
+pub fn render_man() -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    clap_mangen::Man::new(Cli::command()).render(&mut buf)?;
+    Ok(buf)
+}
+
+/// Render the completion script for `shell` into bytes.
+pub fn render_completions(shell: Shell) -> Vec<u8> {
+    let mut cmd = Cli::command();
+    let bin = cmd.get_name().to_string();
+    let mut buf = Vec::new();
+    clap_complete::generate(shell, &mut cmd, bin, &mut buf);
+    buf
+}
+
+/// Execute `keyhole gen`: write the requested asset to stdout or a directory.
+///
+/// Pure and side-effect-light by design — it touches neither logging, config,
+/// nor the terminal, so it runs in a minimal packaging container.
+pub fn run_gen(asset: &GenAsset) -> anyhow::Result<()> {
+    match asset {
+        GenAsset::Man { out } => {
+            let bytes = render_man().context("rendering man page")?;
+            match out {
+                Some(dir) => {
+                    std::fs::create_dir_all(dir)
+                        .with_context(|| format!("creating {}", dir.display()))?;
+                    let path = dir.join("keyhole.1");
+                    std::fs::write(&path, bytes)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    println!("{}", path.display());
+                }
+                None => std::io::stdout()
+                    .write_all(&bytes)
+                    .context("writing man page to stdout")?,
+            }
+        }
+        GenAsset::Completions { shell, out } => match out {
+            // `generate_to` picks the shell's conventional filename for us.
+            Some(dir) => {
+                std::fs::create_dir_all(dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+                let mut cmd = Cli::command();
+                let bin = cmd.get_name().to_string();
+                let path = clap_complete::generate_to(*shell, &mut cmd, bin, dir)
+                    .with_context(|| format!("writing completions into {}", dir.display()))?;
+                println!("{}", path.display());
+            }
+            None => std::io::stdout()
+                .write_all(&render_completions(*shell))
+                .context("writing completions to stdout")?,
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -172,5 +263,94 @@ mod tests {
     #[test]
     fn export_requires_a_file_argument() {
         assert!(Cli::try_parse_from(["keyhole", "export"]).is_err());
+    }
+
+    #[test]
+    fn gen_man_parses_with_optional_out() {
+        let cli = Cli::try_parse_from(["keyhole", "gen", "man"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Command::Gen {
+                asset: GenAsset::Man { out: None }
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["keyhole", "gen", "man", "--out", "/pkg"]).unwrap();
+        match cli.command {
+            Some(Command::Gen {
+                asset: GenAsset::Man { out },
+            }) => assert_eq!(out.as_deref(), Some(Path::new("/pkg"))),
+            other => panic!("expected gen man, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gen_completions_parses_a_shell_and_optional_out() {
+        let cli = Cli::try_parse_from(["keyhole", "gen", "completions", "bash"]).unwrap();
+        match cli.command {
+            Some(Command::Gen {
+                asset: GenAsset::Completions { shell, out },
+            }) => {
+                assert_eq!(shell, Shell::Bash);
+                assert!(out.is_none());
+            }
+            other => panic!("expected gen completions, got {other:?}"),
+        }
+
+        let cli =
+            Cli::try_parse_from(["keyhole", "gen", "completions", "zsh", "--out", "/pkg"]).unwrap();
+        match cli.command {
+            Some(Command::Gen {
+                asset: GenAsset::Completions { shell, out },
+            }) => {
+                assert_eq!(shell, Shell::Zsh);
+                assert_eq!(out.as_deref(), Some(Path::new("/pkg")));
+            }
+            other => panic!("expected gen completions, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gen_rejects_unknown_shells_and_missing_subcommands() {
+        assert!(Cli::try_parse_from(["keyhole", "gen", "completions", "tcsh"]).is_err());
+        assert!(Cli::try_parse_from(["keyhole", "gen", "completions"]).is_err());
+        assert!(Cli::try_parse_from(["keyhole", "gen"]).is_err());
+    }
+
+    #[test]
+    fn man_page_renders_and_mentions_the_binary() {
+        let man = String::from_utf8(render_man().expect("man page should render"))
+            .expect("man page is valid UTF-8");
+        // The roff `.TH` title header and the binary name must be present.
+        assert!(man.contains(".TH"), "missing roff title header");
+        assert!(man.contains("keyhole"), "man page omits the binary name");
+        // The subcommands surface; the hidden `gen` command must not leak.
+        assert!(
+            man.contains("record"),
+            "man page omits the record subcommand"
+        );
+        assert!(
+            !man.contains("\\fIgen\\fR") && !man.contains("gen man"),
+            "hidden gen subcommand leaked into the man page"
+        );
+    }
+
+    #[test]
+    fn completions_render_non_empty_for_every_shell() {
+        for shell in [
+            Shell::Bash,
+            Shell::Zsh,
+            Shell::Fish,
+            Shell::PowerShell,
+            Shell::Elvish,
+        ] {
+            let script = String::from_utf8(render_completions(shell))
+                .unwrap_or_else(|_| panic!("{shell} completions are valid UTF-8"));
+            assert!(!script.is_empty(), "{shell} completion script is empty");
+            assert!(
+                script.contains("keyhole"),
+                "{shell} completion script omits the binary name"
+            );
+        }
     }
 }

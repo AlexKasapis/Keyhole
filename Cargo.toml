@@ -3,11 +3,24 @@ name = "keyhole"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.96"
+authors = ["Alex Kasapis <akasapis@trigonongroup.com>"]
 description = "A terminal UI to connect to message/data brokers (Redis, AMQP), browse data, watch realtime activity, and record live streams to disk."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
+repository = "https://github.com/AlexKasapis/Keyhole"
+homepage = "https://github.com/AlexKasapis/Keyhole"
+documentation = "https://github.com/AlexKasapis/Keyhole"
 keywords = ["tui", "redis", "amqp", "broker", "terminal"]
 categories = ["command-line-utilities", "database"]
+# Keep the published crate slim: ship sources, README, licenses, and CHANGELOG,
+# but drop dev-only tooling that the build/install path never needs.
+exclude = [
+    ".github/",
+    "docs/",
+    "scripts/",
+    "docker-compose.yml",
+    "justfile",
+]
 
 [dependencies]
 # --- async runtime ---
@@ -43,6 +56,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"    # file-only logging (TUI owns the terminal)
 clap = { version = "4", features = ["derive"] }
+# Generate the man page and shell completions from the clap `Command` via the
+# hidden `keyhole gen` subcommand (consumed by the .deb/.rpm/AUR/Homebrew/Nix
+# packaging in later tiers). Both are small and introspect the live CLI, so the
+# artifacts can never drift from the actual flags.
+clap_complete = "4"
+clap_mangen = "0.2"
 # `serde-well-known` provides the RFC 3339 (de)serializers for recording timestamps.
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "macros"] }
 base64 = "0.22"

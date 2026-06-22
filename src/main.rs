@@ -50,6 +50,13 @@ const RECORD_PROGRESS_EVERY: u64 = 50;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // `gen` is a packaging helper: emit the man page / completions and exit
+    // before any logging, config, or terminal setup, so it runs in a minimal
+    // build environment with no writable home directory.
+    if let Some(Command::Gen { asset }) = &cli.command {
+        return cli::run_gen(asset);
+    }
+
     let paths = config::paths().context("resolving application directories")?;
     // The guard must stay alive for the whole program so buffered logs flush.
     let _log_guard =
@@ -76,6 +83,8 @@ async fn main() -> anyhow::Result<()> {
             let dir = out.unwrap_or_else(|| paths.recordings_dir());
             run_record(config, &connect, &source, dir).await
         }
+        // Handled above, before logging/config setup.
+        Some(Command::Gen { .. }) => unreachable!("`gen` is dispatched before this match"),
         // Default: the interactive TUI.
         None => {
             let recordings_dir = paths.recordings_dir();

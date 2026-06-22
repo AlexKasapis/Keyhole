@@ -80,7 +80,47 @@ keyhole record --connect prod --source stream:events --out ./caps   # record unt
 keyhole export caps/events-….jsonl --csv --out events.csv           # convert to CSV
 ```
 
-## Quick start
+## Installation
+
+Keyhole is a single self-contained binary. The first tagged release is still in
+progress, so the channels marked _(coming soon)_ below are placeholders — track
+the [Releases page] for status.
+
+### From crates.io
+
+```sh
+cargo install keyhole
+```
+
+This builds the full feature set (keyring + AMQP + RabbitMQ), which needs a C
+toolchain and D-Bus / Secret Service headers at build time. For a minimal,
+dependency-free build (Redis only, env-var secrets), add `--no-default-features`:
+
+```sh
+cargo install keyhole --no-default-features
+```
+
+### Prebuilt binaries
+
+Download a tarball for your platform from the [Releases page] _(coming soon)_,
+or use the install script _(coming soon)_:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh | sh
+```
+
+### Distro & package managers _(coming soon)_
+
+- **Arch (AUR):** `keyhole` (from source) / `keyhole-bin` (prebuilt)
+- **openSUSE / Fedora:** `zypper install ./keyhole.rpm` / `dnf install ./keyhole.rpm`
+- **Debian / Ubuntu:** `apt install ./keyhole.deb`
+- **Homebrew (incl. Linuxbrew):** `brew install AlexKasapis/tap/keyhole`
+- **Nix:** `nix run github:AlexKasapis/Keyhole`
+
+[Releases page]: https://github.com/AlexKasapis/Keyhole/releases
+
+## Development quick start
 
 ```sh
 just setup          # install the pinned Rust toolchain
