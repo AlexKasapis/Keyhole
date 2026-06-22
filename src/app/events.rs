@@ -146,7 +146,12 @@ impl App {
                 // keeps the old view until its atomic swap on completion.
                 match &step {
                     ScanStep::Stale => return, // page from a superseded scan; drop it
-                    ScanStep::Done => conn.rebuild_view(),
+                    ScanStep::Done => {
+                        // The first finished scan starts the tree fully folded so
+                        // entering the browser shows only the top-level namespaces.
+                        conn.collapse_groups_on_first_load();
+                        conn.rebuild_view();
+                    }
                     ScanStep::Continue(_) if conn.browser.scan_live => {
                         conn.rebuild_view_throttled(VIEW_REBUILD_INTERVAL)
                     }

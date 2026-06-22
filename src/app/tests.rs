@@ -457,6 +457,59 @@ async fn keys_page_builds_the_view_so_render_need_not_rebuild() {
     );
 }
 
+#[tokio::test]
+async fn first_scan_starts_with_groups_collapsed() {
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    finish_initial_scan(
+        &mut app,
+        id,
+        vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("user:2", ValueType::String),
+            stream_entry("cache:x", ValueType::String),
+        ],
+    );
+    // Entering the browser shows only the top-level group headers; the keys are
+    // folded away until a group is expanded.
+    assert!(
+        view_keys(&app.connections[0]).is_empty(),
+        "every group starts collapsed on first load"
+    );
+    let groups = app.connections[0]
+        .browser
+        .view
+        .iter()
+        .filter(|r| matches!(r, ViewRow::Group { .. }))
+        .count();
+    assert_eq!(groups, 2, "both namespaces show as headers");
+
+    // The user expands a group; a later (background) refresh must not re-fold it.
+    app.connections[0].browser.collapsed.remove("user");
+    app.connections[0].rebuild_view();
+    assert_eq!(view_keys(&app.connections[0]), ["user:1", "user:2"]);
+    app.start_scan(id, false);
+    let epoch = app.active_conn().unwrap().browser.scan_epoch;
+    app.handle_event(AppEvent::KeysPage {
+        id,
+        page: BrowsePage {
+            db: 0,
+            entries: vec![
+                stream_entry("user:1", ValueType::String),
+                stream_entry("user:2", ValueType::String),
+                stream_entry("cache:x", ValueType::String),
+            ],
+            next_cursor: 0,
+            epoch,
+        },
+    });
+    assert_eq!(
+        view_keys(&app.connections[0]),
+        ["user:1", "user:2"],
+        "a refresh leaves the user's expanded group expanded"
+    );
+}
+
 #[test]
 fn refresh_ticks_rounds_up_and_disables_on_zero() {
     assert_eq!(refresh_ticks(0), 0, "zero disables auto-refresh");
@@ -906,7 +959,7 @@ fn view_keys(conn: &Connection) -> Vec<String> {
         .view
         .iter()
         .filter_map(|r| match r {
-            ViewRow::Entry(i) => Some(conn.browser.keys[*i].key.clone()),
+            ViewRow::Entry { idx, .. } => Some(conn.browser.keys[*idx].key.clone()),
             ViewRow::Group { .. } => None,
         })
         .collect()

@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 16)"
 ---
- Keyhole   no connection  · connections                          ○ offline   12:34:56 UTC
+ no connection  · connections                                    ○ offline   12:34:56 UTC
 ┌ Connections ───────────────────────────────────────────────────────────────────────────┐
 │                                                                                        │
 │                                  No saved connections.                                 │

@@ -6,14 +6,15 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Row, Table,
-    TableState, Tabs, Wrap,
+    TableState, Wrap,
 };
 use ratatui::Frame;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, ConnForm, Connection, InputMode, PanelTab, RecordState, SubState, Subscription, ViewRow,
+    App, ConnForm, ConnHealth, Connection, InputMode, PanelTab, RecordState, SubState,
+    Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
@@ -153,6 +154,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // of the active connection below.
     let mode = app.mode;
     let subscribe_buf = app.subscribe_buf.clone();
+    // The connection-health indicator now lives in the Server band, and the
+    // bottom panel's height tracks the window; both are read before the `&mut`
+    // borrow of the active connection below.
+    let health = app.conn_health();
+    let panel_h = panel_band_height(frame.area().height);
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
             .style(theme.dim)
@@ -171,68 +177,33 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         "view must be rebuilt in the update phase before render"
     );
 
-    // The Browser stacks, top to bottom: a one-line info bar; an optional
-    // server-stats band (Redis — the former standalone Dashboard); the keys +
-    // value panes; and an optional, always-visible tabbed bottom panel pinned to
-    // the bottom (Redis — the former standalone Console and Realtime screens),
-    // carrying the read-only console and one tab per live tail.
-    let mut rows = vec![Constraint::Length(1)];
+    // The Browser stacks, top to bottom: an optional server-stats band (Redis —
+    // the former standalone Dashboard, now also carrying the connection-health
+    // dot); the keys + value panes; and an optional, always-visible tabbed
+    // bottom panel pinned to the bottom (Redis — the read-only console and one
+    // tab per live tail). The former one-line info bar is gone: its key count
+    // moved up to the header and its match/sort indicators down to the footer.
+    let mut rows = Vec::new();
     if conn.caps.can_dashboard {
         rows.push(Constraint::Length(SERVER_BAND_HEIGHT));
     }
     rows.push(Constraint::Min(0));
     if conn.caps.can_console {
-        rows.push(Constraint::Length(PANEL_BAND_HEIGHT));
+        rows.push(Constraint::Length(panel_h));
     }
     let chunks = Layout::vertical(rows).split(area);
-    let info_area = chunks[0];
-    let band_area = conn.caps.can_dashboard.then(|| chunks[1]);
-    // Body sits after the info bar and the optional stats band.
-    let body_idx = if conn.caps.can_dashboard { 2 } else { 1 };
+    let band_area = conn.caps.can_dashboard.then(|| chunks[0]);
+    // Body sits after the optional stats band.
+    let body_idx = if conn.caps.can_dashboard { 1 } else { 0 };
     let body_area = chunks[body_idx];
     let panel_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
 
-    // Top info bar, laid out as a balanced toolbar: the browsing context (db,
-    // match pattern, sort) sits flush left, while the key count — the one figure
-    // that grows — is pinned to the right so it always lands in the same place
-    // and fills what was dead space. Labels are dim, values inherit the bar's
-    // foreground, and the db anchor is accented. A single `·` separates fields
-    // for an even rhythm.
-    let sort_dir = if conn.browser.sort_desc { "↓" } else { "↑" };
-    let left = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("db ", theme.dim),
-        Span::styled(conn.db.to_string(), theme.accent),
-        Span::styled(" · ", theme.dim),
-        Span::styled("match ", theme.dim),
-        Span::raw(conn.browser.pattern.clone()),
-        Span::styled(" · ", theme.dim),
-        Span::styled("sort ", theme.dim),
-        Span::raw(format!("{} {sort_dir}", conn.browser.sort.label())),
-    ]);
-    let mut right = vec![
-        Span::raw(conn.browser.keys.len().to_string()),
-        Span::styled(" keys", theme.dim),
-    ];
-    if !conn.browser.complete {
-        right.push(Span::styled(" · scanning…", theme.accent));
-    }
-    right.push(Span::raw(" "));
-    let right = Line::from(right);
-    let [info_left, info_right] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(line_width(&right) as u16),
-    ])
-    .areas(info_area);
-    frame.render_widget(Paragraph::new(left).style(theme.status_bar), info_left);
-    frame.render_widget(Paragraph::new(right).style(theme.status_bar), info_right);
-
     if let Some(band_area) = band_area {
-        server_stats_band(frame, conn, theme, band_area);
+        server_stats_band(frame, conn, health, theme, band_area);
     }
 
     let [table_area, value_area] =
-        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .areas(body_area);
 
     // The key list is a pure viewport: only the rows that fall inside the
@@ -259,25 +230,22 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 
     // One rendered row per *visible* view entry: a styled, key-count-bearing
     // header for a group (with a fold marker), or a key with its type / TTL /
-    // size. Keys are always grouped, so each key is indented under its prefix
-    // header.
+    // size. Groups nest, so each row is indented two spaces per nesting level;
+    // a key shows the segment relative to its parent group (the full key rides
+    // in the value-pane title).
     let rows: Vec<Row> = conn.browser.view[offset..end]
         .iter()
         .filter_map(|vr| match vr {
-            ViewRow::Group { prefix, count } => {
-                let marker = if conn.browser.collapsed.contains(prefix) {
+            ViewRow::Group { path, depth, count } => {
+                let marker = if conn.browser.collapsed.contains(path) {
                     "▸"
                 } else {
                     "▾"
                 };
-                let name = if prefix.is_empty() {
-                    "(no prefix)"
-                } else {
-                    prefix.as_str()
-                };
+                let name = group_label(path);
                 Some(
                     Row::new(vec![
-                        Cell::from(format!("{marker} {name} ({count})")),
+                        Cell::from(format!("{}{marker} {name} ({count})", indent(*depth))),
                         Cell::from(""),
                         Cell::from(""),
                         Cell::from(""),
@@ -287,7 +255,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             }
             // `get` rather than indexing: a stale view (keys mutated without a
             // rebuild) must skip the row, never panic.
-            ViewRow::Entry(i) => conn.browser.keys.get(*i).map(|e| {
+            ViewRow::Entry { idx, depth } => conn.browser.keys.get(*idx).map(|e| {
                 let ttl = match e.ttl {
                     Ttl::NoExpire => "—".to_string(),
                     Ttl::Seconds(s) => human_duration(s.max(0) as u64),
@@ -298,7 +266,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
                     None => "—".to_string(),
                 };
                 Row::new(vec![
-                    Cell::from(format!("  {}", e.key)),
+                    Cell::from(format!("{}{}", indent(*depth), entry_label(&e.key))),
                     Cell::from(e.vtype.label().to_string()),
                     Cell::from(ttl),
                     Cell::from(size),
@@ -310,10 +278,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         Constraint::Min(10),
         Constraint::Length(6),
         Constraint::Length(8),
-        Constraint::Length(8),
+        Constraint::Length(7),
     ];
     let table = Table::new(rows, widths)
         .header(Row::new(["Key", "Type", "TTL", "Size"]).style(theme.header))
+        .column_spacing(2)
         .block(
             Block::bordered()
                 .title(" Keys ")
@@ -329,11 +298,22 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     win.select(selected.map(|s| s.saturating_sub(offset)));
     frame.render_stateful_widget(table, table_area, &mut win);
 
-    let title = match &conn.inspector.value_key {
-        Some(k) => format!(" {k} "),
-        None => " Value ".to_string(),
+    // The value pane mirrors the *current* selection. When the cursor sits on a
+    // group header (not a key), show a neutral prompt rather than "loading…" or
+    // the last-inspected key's stale value.
+    let on_key = conn.selected().is_some();
+    let title = match (on_key, &conn.inspector.value_key) {
+        (true, Some(k)) => format!(" {k} "),
+        _ => " Value ".to_string(),
     };
-    let value_lines = render_value(theme, conn.inspector.value.as_ref());
+    let value_lines = if on_key {
+        render_value(theme, conn.inspector.value.as_ref())
+    } else {
+        vec![Line::styled(
+            "Select a key to inspect its value.",
+            theme.dim,
+        )]
+    };
     // Clamp the scroll offset so paging can't run off the end of the value (the
     // second of the two deliberate viewport-derived render writes noted above).
     // The bound uses logical line count (wrapping may split lines further, as the
@@ -361,22 +341,63 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 /// (2) wrapping a gauges row (1) and a one-line metrics summary (1).
 const SERVER_BAND_HEIGHT: u16 = 4;
 
-/// Total height (rows) reserved for the Browser's tabbed bottom panel: a border
-/// (2) wrapping a tab strip (1) and the active tab's content (up to ~9 rows).
-/// Taller than the former console-only band so a tail tab can show a useful
-/// window of events, not just a couple of lines.
-const PANEL_BAND_HEIGHT: u16 = 12;
+/// The Browser's tabbed bottom panel sizes to a third of the terminal height,
+/// clamped to `[PANEL_BAND_MIN, PANEL_BAND_MAX]`. The maximum is 1.5× the former
+/// fixed height, so a tall terminal gives a tail a generous event window while a
+/// short one still leaves the keys/value panes usable.
+const PANEL_BAND_MIN: u16 = 6;
+const PANEL_BAND_MAX: u16 = 18;
+
+/// The bottom panel's height for a terminal `window_height` rows tall.
+fn panel_band_height(window_height: u16) -> u16 {
+    (window_height / 3).clamp(PANEL_BAND_MIN, PANEL_BAND_MAX)
+}
+
+/// Two spaces of indentation per nesting level, for the key browser's tree.
+fn indent(depth: usize) -> String {
+    "  ".repeat(depth)
+}
+
+/// A group header's display label: its last path segment, or "(no prefix)" for
+/// the root bucket of separator-less keys.
+fn group_label(path: &str) -> &str {
+    if path.is_empty() {
+        "(no prefix)"
+    } else {
+        path.rsplit_once(':').map_or(path, |(_, tail)| tail)
+    }
+}
+
+/// A key entry's display label under its group: the segment after the last
+/// separator (the full key would just repeat the group path indented above it).
+fn entry_label(key: &str) -> &str {
+    key.rsplit_once(':').map_or(key, |(_, tail)| tail)
+}
 
 /// The server-stats band shown atop the Browser for brokers that expose server
 /// statistics (Redis) — the former standalone Dashboard, merged into the main
 /// panel. A compact, full-width strip: a Memory and a Hit-ratio gauge over a
 /// one-line metrics summary (version, uptime, clients, ops/sec, keys-per-DB).
-fn server_stats_band(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
+fn server_stats_band(
+    frame: &mut Frame,
+    conn: &Connection,
+    health: ConnHealth,
+    theme: &Theme,
+    area: Rect,
+) {
     // A one-column inner margin keeps the content off the border on both sides,
     // so the band reads as a panel rather than text crammed against a frame.
+    // The connection-health indicator (the former top-right header dot) rides in
+    // the title here, beside the "Server" label.
+    let (dot, hlabel, dot_style) = crate::ui::health_indicator(health, theme);
+    let title = Line::from(vec![
+        Span::styled(" Server ", theme.heading),
+        Span::styled(format!(" {dot} "), dot_style),
+        Span::styled(hlabel, theme.dim),
+        Span::raw(" "),
+    ]);
     let block = Block::bordered()
-        .title(" Server ")
-        .title_style(theme.heading)
+        .title(title)
         .border_style(theme.border)
         .padding(Padding::horizontal(1));
 
@@ -517,12 +538,14 @@ fn meter(frame: &mut Frame, area: Rect, theme: &Theme, label: &str, ratio: f64, 
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// The Browser's tabbed bottom panel: a tab strip over the active tab's content.
-/// The five fixed anchors (Console, Monitor, Keyspace, Pub/Sub, Tail) are always
-/// present and joined by one tab per live pub/sub or stream tail; tabs are
-/// reached only by cycling with Tab / Shift-Tab. The Console and the Pub/Sub /
-/// Tail anchors carry always-shown input prompts; Monitor/Keyspace and the
-/// per-tail tabs show a live feed. Only drawn for brokers with a panel (Redis).
+/// The Browser's tabbed bottom panel: one bordered box whose *title line is the
+/// tab strip itself*, so there is a single frame rather than a title plus a
+/// separate tab row. The five fixed anchors (Console, Monitor, Keyspace,
+/// Pub/Sub, Tail) are always present and joined by one tab per live pub/sub or
+/// stream tail; the active tab is highlighted. Tabs are reached only by cycling
+/// with Tab / Shift-Tab. The Console and the Pub/Sub / Tail anchors carry
+/// always-shown input prompts; Monitor/Keyspace and the per-tail tabs show a
+/// live feed. Only drawn for brokers with a panel (Redis).
 fn panel_band(
     frame: &mut Frame,
     conn: &Connection,
@@ -531,55 +554,30 @@ fn panel_band(
     theme: &Theme,
     area: Rect,
 ) {
-    let active = conn.active_panel();
-    // Title follows the active tab.
-    let title = match active {
-        PanelTab::Console => format!(" Console — {} (read-only) ", conn.name),
-        PanelTab::Monitor => format!(" Monitor — {} ", conn.name),
-        PanelTab::Keyspace => format!(" Keyspace — db{} ", conn.db),
-        PanelTab::PubSub => " Pub/Sub ".to_string(),
-        PanelTab::Tail => " Tail ".to_string(),
-        PanelTab::Sub(_) => match conn.panel_subscription() {
-            Some(sub) => format!(" {} ", sub.label),
-            None => " Panel ".to_string(),
-        },
-    };
-    let block = Block::bordered()
-        .title(title)
-        .title_style(theme.heading)
-        .border_style(theme.border);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let [tabs_area, content_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-
-    // Tab strip: the fixed anchors plus the live-tail tabs, in panel order. A dim
-    // divider keeps the separators quiet next to the highlighted active tab.
     let slots = conn.panel_slots();
     let selected = conn.panel_tab.min(slots.len().saturating_sub(1));
-    let titles: Vec<Line> = slots
-        .iter()
-        .map(|t| match t {
-            PanelTab::Console => Line::from("Console"),
-            PanelTab::Monitor => anchor_tab_title("Monitor", conn.monitor_sub(), theme),
-            PanelTab::Keyspace => anchor_tab_title("Keyspace", conn.keyspace_sub(), theme),
-            PanelTab::PubSub => Line::from("Pub/Sub"),
-            PanelTab::Tail => Line::from("Tail"),
-            PanelTab::Sub(i) => match conn.subs.get(*i) {
-                Some(sub) => sub_tab_title(sub, theme),
-                None => Line::from("?"),
-            },
-        })
-        .collect();
-    let tabs = Tabs::new(titles)
-        .select(selected)
-        .style(theme.dim)
-        .highlight_style(theme.selected)
-        .divider(Span::styled("│", theme.dim));
-    frame.render_widget(tabs, tabs_area);
+
+    // The tab strip is the panel's title (it rides on the top border), so the
+    // box has a single frame. The active tab is highlighted; live feeds carry
+    // their recording / paused / lifecycle marks. Short labels only — no
+    // "read-only", connection name, or db, all of which read elsewhere now.
+    let mut title_spans: Vec<Span> = vec![Span::raw(" ")];
+    for (i, slot) in slots.iter().enumerate() {
+        if i > 0 {
+            title_spans.push(Span::styled(" │ ", theme.dim));
+        }
+        title_spans.extend(tab_spans(slot, conn, i == selected, theme));
+    }
+    title_spans.push(Span::raw(" "));
+
+    let block = Block::bordered()
+        .title(Line::from(title_spans))
+        .border_style(theme.border);
+    let content_area = block.inner(area);
+    frame.render_widget(block, area);
 
     // Content follows the active tab.
+    let active = conn.active_panel();
     match active {
         PanelTab::Console => console_content(frame, conn, mode, theme, content_area),
         PanelTab::PubSub => anchor_input(
@@ -614,14 +612,41 @@ fn panel_band(
     }
 }
 
-/// A fixed anchor tab's strip title (Monitor / Keyspace), tagged with a recording
-/// dot and a paused marker when its feed is live.
-fn anchor_tab_title(
-    name: &'static str,
-    sub: Option<&Subscription>,
+/// The spans for one tab in the panel's title strip: the label (highlighted when
+/// active, otherwise dim) plus any live-feed marks.
+fn tab_spans(
+    slot: &PanelTab,
+    conn: &Connection,
+    active: bool,
     theme: &Theme,
-) -> Line<'static> {
-    let mut spans = vec![Span::raw(name)];
+) -> Vec<Span<'static>> {
+    let base = if active { theme.selected } else { theme.dim };
+    let mut spans = Vec::new();
+    match slot {
+        PanelTab::Console => spans.push(Span::styled("Console", base)),
+        PanelTab::Monitor => {
+            spans.push(Span::styled("Monitor", base));
+            push_feed_marks(&mut spans, conn.monitor_sub(), theme);
+        }
+        PanelTab::Keyspace => {
+            spans.push(Span::styled("Keyspace", base));
+            push_feed_marks(&mut spans, conn.keyspace_sub(), theme);
+        }
+        PanelTab::PubSub => spans.push(Span::styled("Pub/Sub", base)),
+        PanelTab::Tail => spans.push(Span::styled("Tail", base)),
+        PanelTab::Sub(i) => match conn.subs.get(*i) {
+            Some(sub) => {
+                spans.push(Span::styled(sub.label.clone(), base));
+                push_sub_marks(&mut spans, sub, theme);
+            }
+            None => spans.push(Span::styled("?", base)),
+        },
+    }
+    spans
+}
+
+/// Append a fixed-anchor feed's recording (●) and paused (⏸) marks when it is live.
+fn push_feed_marks(spans: &mut Vec<Span<'static>>, sub: Option<&Subscription>, theme: &Theme) {
     if let Some(sub) = sub {
         if sub.recording.is_on() {
             spans.push(Span::styled(" ●", theme.error));
@@ -630,7 +655,18 @@ fn anchor_tab_title(
             spans.push(Span::styled(" ⏸", theme.accent));
         }
     }
-    Line::from(spans)
+}
+
+/// Append a pub/sub or stream tail tab's recording (●) and lifecycle (… / ✗) marks.
+fn push_sub_marks(spans: &mut Vec<Span<'static>>, sub: &Subscription, theme: &Theme) {
+    if sub.recording.is_on() {
+        spans.push(Span::styled(" ●", theme.error));
+    }
+    match &sub.state {
+        SubState::Connecting => spans.push(Span::styled(" …", theme.dim)),
+        SubState::Ended(_) => spans.push(Span::styled(" ✗", theme.dim)),
+        SubState::Active => {}
+    }
 }
 
 /// An input-anchor's content: the always-shown prompt echoing the typed text
@@ -662,21 +698,6 @@ fn anchor_input(
     ]);
     frame.render_widget(Paragraph::new(prompt), prompt_area);
     frame.render_widget(Paragraph::new(Line::styled(hint, theme.dim)), hint_area);
-}
-
-/// One bottom-panel tail tab's title: the tail label plus its recording (●) and
-/// lifecycle (… connecting, ✗ ended) indicators.
-fn sub_tab_title(sub: &Subscription, theme: &Theme) -> Line<'static> {
-    let mut spans = vec![Span::raw(sub.label.clone())];
-    if sub.recording.is_on() {
-        spans.push(Span::styled(" ●", theme.error));
-    }
-    match &sub.state {
-        SubState::Connecting => spans.push(Span::styled(" …", theme.dim)),
-        SubState::Ended(_) => spans.push(Span::styled(" ✗", theme.dim)),
-        SubState::Active => {}
-    }
-    Line::from(spans)
 }
 
 /// A tail tab's content: a one-line status row (live state, event tally, and the
@@ -1096,7 +1117,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
         Line::from("  / filter   [ ] change DB   o sort column   O direction"),
-        Line::from("  keys are grouped by prefix into collapsible sections"),
+        Line::from("  keys nest into collapsible groups by each ':' (start folded)"),
         Line::from("  Enter/Space collapse/expand group   z fold/unfold all"),
         Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),
         Line::from(""),
@@ -1104,7 +1125,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  fixed tabs: Console · Monitor · Keyspace · Pub/Sub · Tail"),
         Line::from("  plus one tab per pub/sub or stream tail"),
         Line::from("  Tab / Shift-Tab cycle tabs (the only way to switch)"),
-        Line::from("  Monitor/Keyspace live only while focused · p play/pause"),
+        Line::from("  Monitor/Keyspace run while focused, start paused · p play/pause"),
         Line::from("  Pub/Sub & Tail: type in the tab, Enter subscribes/tails"),
         Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
         Line::from("  r record the focused feed   x close a pub/sub or tail tab"),

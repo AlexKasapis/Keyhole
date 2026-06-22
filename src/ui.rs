@@ -43,11 +43,13 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    // The right side carries the connection indicator (a coloured dot + word)
-    // followed by the clock, right-aligned. The column is wide enough for the
-    // longest label ("connecting") so nothing clips.
+    // One row carries everything: the active-connection label (with its db) and
+    // the screen on the left; the clock on the right, preceded — depending on the
+    // screen — by the key count (Browser, where the health dot has moved into the
+    // Server band) or the connection indicator (everywhere else). The "Keyhole"
+    // brand was dropped to keep the row to one line.
     let [left, right] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(30)]).areas(area);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(40)]).areas(area);
 
     let active = app
         .active_conn()
@@ -59,21 +61,38 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Screen::Recordings => "recordings",
     };
     let line = Line::from(vec![
-        Span::styled(" Keyhole ", theme.title),
-        Span::raw("  "),
+        Span::raw(" "),
         Span::styled(active, theme.accent),
         Span::styled(format!("  · {screen}"), theme.dim),
     ]);
     frame.render_widget(Paragraph::new(line).style(theme.status_bar), left);
 
-    let (dot, label, dot_style) = conn_indicator(app, theme);
-    let right_line = Line::from(vec![
-        Span::styled(format!("{dot} "), dot_style),
-        Span::raw(format!("{label}   ")),
-        Span::raw(format!("{} ", clock(app))),
-    ]);
+    let mut right_spans = Vec::new();
+    let on_browser = app.screen == Screen::Browser;
+    let key_count = on_browser
+        .then(|| app.active_conn())
+        .flatten()
+        .filter(|c| c.caps.can_browse);
+    match key_count {
+        // On the Browser the key count leads (the health dot lives in the Server
+        // band); a running scan is flagged so a growing count reads as expected.
+        Some(conn) => {
+            right_spans.push(Span::raw(conn.browser.keys.len().to_string()));
+            right_spans.push(Span::styled(" keys", theme.dim));
+            if !conn.browser.complete {
+                right_spans.push(Span::styled(" · scanning…", theme.accent));
+            }
+            right_spans.push(Span::raw("   "));
+        }
+        None => {
+            let (dot, label, dot_style) = conn_indicator(app, theme);
+            right_spans.push(Span::styled(format!("{dot} "), dot_style));
+            right_spans.push(Span::raw(format!("{label}   ")));
+        }
+    }
+    right_spans.push(Span::raw(format!("{} ", clock(app))));
     frame.render_widget(
-        Paragraph::new(right_line)
+        Paragraph::new(Line::from(right_spans))
             .alignment(Alignment::Right)
             .style(theme.status_bar),
         right,
@@ -82,11 +101,20 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 /// The header connection indicator: a status-dot glyph, a one-word label, and
 /// the style that colours the dot to convey connection health at a glance.
-/// A filled `●` marks any live or transitional state; a dim hollow `○` marks
-/// having no connection. The word keeps the state legible under `NO_COLOR`,
-/// where the dot colours collapse to modifiers.
 fn conn_indicator(app: &App, theme: &Theme) -> (&'static str, &'static str, Style) {
-    match app.conn_health() {
+    health_indicator(app.conn_health(), theme)
+}
+
+/// Map a [`ConnHealth`] to a status-dot glyph, a one-word label, and the style
+/// that colours the dot. A filled `●` marks any live or transitional state; a
+/// dim hollow `○` marks having no connection. The word keeps the state legible
+/// under `NO_COLOR`, where the dot colours collapse to modifiers. Shared by the
+/// header (off-Browser) and the Browser's Server band.
+pub(crate) fn health_indicator(
+    health: ConnHealth,
+    theme: &Theme,
+) -> (&'static str, &'static str, Style) {
+    match health {
         ConnHealth::Connected => ("●", "connected", theme.success),
         ConnHealth::Connecting => ("●", "connecting", theme.warning),
         ConnHealth::Error => ("●", "error", theme.error),
@@ -132,22 +160,9 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
-        InputMode::Command => {
-            let input = app
-                .active_conn()
-                .map(|c| c.console.input.as_str())
-                .unwrap_or("");
-            let line = Line::from(vec![
-                Span::styled(" cmd ", theme.accent),
-                Span::raw(format!("{input}▏")),
-                Span::styled(
-                    "   ^P/^N history · PgUp/PgDn scroll · ^L clear · Enter run · Esc back",
-                    theme.dim,
-                ),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
-        }
-        InputMode::Normal => match &app.status {
+        // The console tab has its own input prompt inside the panel, so command
+        // mode keeps the keybind row rather than echoing the input a second time.
+        InputMode::Normal | InputMode::Command => match &app.status {
             // A status message shares the row: hints left, status right.
             Some(status) => {
                 let [hints_area, status_area] =
@@ -182,27 +197,54 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 
 /// The footer keybinds for the active screen, grouped into labelled sections.
 /// Each entry is a `(section label, keys)` pair; the keys within a section keep
-/// the `·` separator. [`hint_line`] turns these into a styled row.
-fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
+/// the `·` separator. [`hint_line`] turns these into a styled row. The Browser's
+/// "view" section also carries the live sort (and any non-default match) — the
+/// former top info-bar indicators now live with their controls here.
+fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
+    let owned = |pairs: &[(&'static str, &str)]| {
+        pairs
+            .iter()
+            .map(|(l, k)| (*l, k.to_string()))
+            .collect::<Vec<_>>()
+    };
     match app.screen {
-        Screen::Connections => vec![
+        Screen::Connections => owned(&[
             ("nav", "↑↓ move"),
             ("conn", "Enter connect · a add"),
             ("go", "R recordings"),
             ("app", "? help · Esc Esc quit"),
-        ],
+        ]),
         // Keys are always grouped by prefix, so the footer always offers the
         // collapse/expand controls — there is no grouping toggle. The bottom
         // panel's fixed tabs are cycled with Tab / Shift-Tab (the only way).
-        Screen::Browser => vec![
-            ("nav", "↑↓ keys · [ ] db"),
-            ("groups", "⏎/Space collapse · z all"),
-            ("view", "/ filter · o sort · O dir"),
-            ("panel", "Tab tabs · p play/pause · r rec · x close"),
-            ("go", "R recordings"),
-            ("app", "? help · Esc back"),
-        ],
-        Screen::Recordings => vec![("nav", "↑↓ move"), ("app", "? help · Esc back")],
+        Screen::Browser => {
+            let (sort, arrow, pattern) = app
+                .active_conn()
+                .map(|c| {
+                    let arrow = if c.browser.sort_desc { "↓" } else { "↑" };
+                    (c.browser.sort.label(), arrow, c.browser.pattern.clone())
+                })
+                .unwrap_or(("name", "↑", "*".to_string()));
+            // Show the match pattern only once it differs from the default `*`,
+            // so the everyday case stays terse.
+            let filter = if pattern == "*" {
+                "/ filter".to_string()
+            } else {
+                format!("/ filter {pattern}")
+            };
+            vec![
+                ("nav", "↑↓ keys · [ ] db".to_string()),
+                ("groups", "⏎/Space collapse · z all".to_string()),
+                ("view", format!("{filter} · o sort {sort}{arrow} · O dir")),
+                (
+                    "panel",
+                    "Tab tabs · p play/pause · r rec · x close".to_string(),
+                ),
+                ("go", "R recordings".to_string()),
+                ("app", "? help · Esc back".to_string()),
+            ]
+        }
+        Screen::Recordings => owned(&[("nav", "↑↓ move"), ("app", "? help · Esc back")]),
     }
 }
 
@@ -284,10 +326,12 @@ mod tests {
     // -- header & footer (always drawn) --------------------------------------
 
     #[test]
-    fn header_shows_title_and_clock() {
+    fn header_shows_connection_label_and_clock() {
+        // The "Keyhole" brand was dropped to keep the header to one row; what
+        // remains is the active-connection label (here, none) and the clock.
         let (mut app, _rx) = test_app();
         let text = screen_text(&mut app);
-        assert!(text.contains("Keyhole"));
+        assert!(!text.contains("Keyhole"), "the brand label is gone");
         assert!(text.contains("UTC"), "the clock is in the header");
         assert!(text.contains("no connection"), "no active connection label");
     }
@@ -408,7 +452,7 @@ mod tests {
             let app_keys = sections
                 .iter()
                 .find(|(label, _)| *label == "app")
-                .map(|(_, keys)| *keys)
+                .map(|(_, keys)| keys.as_str())
                 .unwrap_or_else(|| panic!("{screen:?} footer has no 'app' group"));
             assert!(
                 app_keys.contains("? help"),
@@ -430,7 +474,7 @@ mod tests {
             let go = sections
                 .iter()
                 .find(|(label, _)| *label == "go")
-                .map(|(_, keys)| *keys)
+                .map(|(_, keys)| keys.as_str())
                 .unwrap_or_else(|| panic!("{screen:?} footer has no 'go' navigation group"));
             for target in targets {
                 assert!(
@@ -788,7 +832,9 @@ mod tests {
             app.screen = Screen::Browser;
             app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
             app.connections[0].rebuild_view();
-            app.connections[0].browser.table.select(Some(0));
+            // Row 0 is the "(no prefix)" group header; the key itself is row 1.
+            // Select it so the value pane actually renders the view under test.
+            app.connections[0].browser.table.select(Some(1));
             app.connections[0].inspector.value_key = Some("mykey".into());
             app.connections[0].inspector.value = Some(view);
             // The assertion is implicit: render_value must not panic for any view.
@@ -1178,7 +1224,9 @@ mod tests {
         ];
         app.connections[0].rebuild_view();
         app.connections[0].browser.complete = true;
-        app.connections[0].browser.table.select(Some(0));
+        // Rows: [session hdr, session:abc, user hdr, user:1] — select the user:1
+        // key (row 3) so the value pane shows its string value, not the prompt.
+        app.connections[0].browser.table.select(Some(3));
         app.connections[0].inspector.value_key = Some("user:1".into());
         app.connections[0].inspector.value = Some(ValueView::Str {
             total_bytes: 5,

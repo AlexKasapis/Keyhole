@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 33)"
 ---
- Keyhole   n┌ Help ──────────────────────────────────────────────────────────┐2:34:56 UTC
+ no connecti┌ Help ──────────────────────────────────────────────────────────┐2:34:56 UTC
 ┌ Connection│Navigation                                                      │───────────┐
 │           │  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel sc│           │
 │           │  Enter connect (Connections)   Esc step back / quit            │           │
@@ -13,7 +13,7 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │
 │           │  / filter   [ ] change DB   o sort column   O direction        │           │
-│           │  keys are grouped by prefix into collapsible sections          │           │
+│           │  keys nest into collapsible groups by each ':' (start folded)  │           │
 │           │  Enter/Space collapse/expand group   z fold/unfold all         │           │
 │           │  PgUp/PgDn scroll the value pane   keys auto-refresh           │           │
 │           │                                                                │           │
@@ -21,7 +21,7 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │  fixed tabs: Console · Monitor · Keyspace · Pub/Sub · Tail     │           │
 │           │  plus one tab per pub/sub or stream tail                       │           │
 │           │  Tab / Shift-Tab cycle tabs (the only way to switch)           │           │
-│           │  Monitor/Keyspace live only while focused · p play/pause       │           │
+│           │  Monitor/Keyspace run while focused, start paused · p play/paus│           │
 │           │  Pub/Sub & Tail: type in the tab, Enter subscribes/tails       │           │
 │           │  (empty Tail = selected key · a glob makes a pattern)          │           │
 │           │  r record the focused feed   x close a pub/sub or tail tab     │           │

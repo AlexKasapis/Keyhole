@@ -14,7 +14,6 @@ use crate::config::ThemeConfig;
 #[derive(Debug, Clone, Copy)]
 pub struct Theme {
     pub status_bar: Style,
-    pub title: Style,
     pub heading: Style,
     pub dim: Style,
     pub selected: Style,
@@ -41,10 +40,6 @@ impl Theme {
     pub fn dark() -> Self {
         Self {
             status_bar: Style::new().bg(Color::Indexed(236)).fg(Color::Gray),
-            title: Style::new()
-                .bg(Color::Cyan)
-                .fg(Color::Black)
-                .add_modifier(Modifier::BOLD),
             heading: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(Color::DarkGray),
             // A background highlight (not reverse video) so per-span foreground
@@ -70,10 +65,6 @@ impl Theme {
     pub fn light() -> Self {
         Self {
             status_bar: Style::new().bg(Color::Indexed(254)).fg(Color::Indexed(238)),
-            title: Style::new()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
             heading: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(Color::Indexed(245)),
             // Background highlight (see the dark palette) so foreground colours
@@ -101,7 +92,6 @@ impl Theme {
         let none = Style::new();
         Self {
             status_bar: none.add_modifier(Modifier::REVERSED),
-            title: none.add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),
             heading: none.add_modifier(Modifier::BOLD),
             dim: none.add_modifier(Modifier::DIM),
             selected: none.add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),

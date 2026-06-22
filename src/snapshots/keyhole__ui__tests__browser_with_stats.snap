@@ -2,23 +2,23 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 20)"
 ---
- Keyhole   prod (db0)  · browser                               ● connected   12:34:56 UTC
- db 0 · match * · sort name ↑                                                      2 keys
-┌ Server ────────────────────────────────────────────────────────────────────────────────┐
+ prod (db0)  · browser                                              2 keys   12:34:56 UTC
+┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
 │ Memory ▕████░░░░░░░░░░▏ 1.0 MiB / 4.0 MiB  Hit ▕████████████████████████████░░░▏ 90.0% │
 │ v7.4.0 · up 1h 1m 1s · 7 clients · 120 ops/s                  49 keys · db0 42 · db1 7 │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-┌ Keys ───────────────────────────────────┐┌ user:1 ─────────────────────────────────────┐
-┌ Console — prod (read-only) ────────────────────────────────────────────────────────────┐
-│ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail                                          │
-│Read-only command console.                                                              │
+┌ Keys ─────────────────────────────────────┐┌ user:1 ───────────────────────────────────┐
+│  Key             Type    TTL       Size   ││string · Utf8 · showing 5 of 5 bytes       │
+│  ▾ session (1)                            ││                                           │
+│    abc           hash    2m 0s     128 B  ││alice                                      │
+│  ▾ user (1)                               ││                                           │
+│▶   1             string  2m 0s     128 B  ││                                           │
+│                                           ││                                           │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ─────────────────────────────────────────┐
 │                                                                                        │
 │Just type a command and press Enter to run. Writes and admin commands are refused.      │
 │Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1               │
-│                                                                                        │
-│                                                                                        │
-│                                                                                        │
-│                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort · O dir
+  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·

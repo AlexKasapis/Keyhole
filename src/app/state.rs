@@ -276,27 +276,84 @@ impl SortKey {
     }
 }
 
-/// A single rendered row of the key browser: either a collapsible namespace
-/// group header (when grouping is on) or a key identified by its index into
-/// [`Connection::keys`].
+/// A single rendered row of the key browser: a collapsible namespace group
+/// header or a key identified by its index into [`Connection::keys`]. Keys are
+/// grouped by their `:`-delimited namespace at *every* level, so groups nest
+/// (`user` → `user:1000` → `user:1000:name`); `depth` carries the nesting level
+/// for indentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewRow {
-    /// A namespace-prefix group header and the number of keys it holds.
-    Group { prefix: String, count: usize },
-    /// A key entry; the index points into [`Connection::keys`].
-    Entry(usize),
+    /// A namespace group header. `path` is the full colon-joined prefix (e.g.
+    /// `user:1000`) — the unique collapse key — `depth` is the nesting level
+    /// (`0` at the top), and `count` is the number of keys in the whole subtree.
+    Group {
+        path: String,
+        depth: usize,
+        count: usize,
+    },
+    /// A key entry: `idx` points into [`Connection::keys`]; `depth` is the
+    /// indentation level (its parent group's depth + 1).
+    Entry { idx: usize, depth: usize },
 }
 
 /// Separator that delimits Redis key namespaces (`user:1000:name` → `user`).
 pub const PREFIX_SEPARATOR: char = ':';
 
-/// The grouping prefix of a key: everything before the first
-/// [`PREFIX_SEPARATOR`], or `""` when the key has no separator (such keys
-/// collect into a single "no prefix" group).
-fn key_prefix(key: &str) -> &str {
-    match key.split_once(PREFIX_SEPARATOR) {
-        Some((head, _)) => head,
-        None => "",
+/// The immediate parent group path of a key: everything before the *last*
+/// [`PREFIX_SEPARATOR`], or `""` (the root "no prefix" group) when the key has
+/// none. `user:1000:name` → `user:1000`, `user:1` → `user`, `loose` → ``.
+fn parent_path(key: &str) -> String {
+    match key.rsplit_once(PREFIX_SEPARATOR) {
+        Some((head, _)) => head.to_string(),
+        None => String::new(),
+    }
+}
+
+/// Every ancestor group path of a key, shallowest first. A key with no
+/// separator belongs to the single root "no prefix" group (`""`); otherwise it
+/// nests under one group per separator: `a:b:c` → `["a", "a:b"]`.
+fn prefix_paths(key: &str) -> Vec<String> {
+    let segs: Vec<&str> = key.split(PREFIX_SEPARATOR).collect();
+    if segs.len() <= 1 {
+        return vec![String::new()];
+    }
+    (1..segs.len()).map(|d| segs[..d].join(":")).collect()
+}
+
+/// Every distinct group path across `keys`, at all nesting depths — including
+/// groups not currently visible because an ancestor is folded. Used to
+/// collapse / expand or pre-collapse the whole tree.
+fn all_group_paths(keys: &[EntryMeta]) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    for e in keys {
+        paths.extend(prefix_paths(&e.key));
+    }
+    paths
+}
+
+/// The first `n` colon-separated segments of `key`, re-joined.
+/// `prefix_path("a:b:c", 2)` → `"a:b"`.
+fn prefix_path(key: &str, n: usize) -> String {
+    key.split(PREFIX_SEPARATOR)
+        .take(n)
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The segment of `key` at nesting `depth`, and whether the key continues past
+/// it (has a deeper segment). `("user:1000:name", 1)` → `("1000", true)`;
+/// `("user:1", 1)` → `("1", false)`.
+fn segment_at(key: &str, depth: usize) -> (&str, bool) {
+    let mut rest = key;
+    for _ in 0..depth {
+        match rest.split_once(PREFIX_SEPARATOR) {
+            Some((_, tail)) => rest = tail,
+            None => return ("", false),
+        }
+    }
+    match rest.split_once(PREFIX_SEPARATOR) {
+        Some((head, _)) => (head, true),
+        None => (rest, false),
     }
 }
 
@@ -345,18 +402,18 @@ fn entry_cmp(a: &EntryMeta, b: &EntryMeta, sort: SortKey) -> Ordering {
 
 /// Build the ordered, prefix-grouped list of display rows over `keys`.
 ///
-/// Keys are always bucketed by their namespace prefix; each bucket yields a
-/// [`ViewRow::Group`] header followed (unless the prefix is in `collapsed`) by
-/// its entries in sorted order. Groups are always listed alphabetically by
-/// prefix; `desc` reverses only the order of keys within a group, not the
-/// groups themselves.
+/// Keys are bucketed by their `:`-delimited namespace at every level, so groups
+/// nest: a [`ViewRow::Group`] header is emitted for each namespace, followed
+/// (unless its `path` is in `collapsed`) by its subgroups and then its own keys.
+/// Groups are always listed alphabetically by segment; `desc` reverses only the
+/// order of the keys within a group, not the groups themselves.
 pub fn build_view(
     keys: &[EntryMeta],
     sort: SortKey,
     desc: bool,
     collapsed: &HashSet<String>,
 ) -> Vec<ViewRow> {
-    let order = |a: usize, b: usize| {
+    let cmp = |a: usize, b: usize| {
         let o = entry_cmp(&keys[a], &keys[b], sort);
         if desc {
             o.reverse()
@@ -364,23 +421,84 @@ pub fn build_view(
             o
         }
     };
-
-    let mut buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
-    for (i, e) in keys.iter().enumerate() {
-        buckets.entry(key_prefix(&e.key)).or_default().push(i);
-    }
     let mut rows = Vec::new();
-    for (prefix, mut members) in buckets {
-        members.sort_by(|&a, &b| order(a, b));
-        rows.push(ViewRow::Group {
-            prefix: prefix.to_string(),
-            count: members.len(),
-        });
-        if !collapsed.contains(prefix) {
-            rows.extend(members.into_iter().map(ViewRow::Entry));
+    emit_level(
+        keys,
+        (0..keys.len()).collect(),
+        0,
+        &cmp,
+        collapsed,
+        &mut rows,
+    );
+    rows
+}
+
+/// Emit the rows for one nesting level. `indices` are the keys under the current
+/// parent (the whole keyspace at the root). At the root, keys with no separator
+/// collect into a single "no prefix" group (`""`); below the root they render as
+/// direct entries beneath their parent. Subgroups come before this level's own
+/// keys; groups stay alphabetical while `desc` reverses only the keys.
+fn emit_level(
+    keys: &[EntryMeta],
+    indices: Vec<usize>,
+    depth: usize,
+    cmp: &impl Fn(usize, usize) -> Ordering,
+    collapsed: &HashSet<String>,
+    rows: &mut Vec<ViewRow>,
+) {
+    let mut branches: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    let mut terminals: Vec<usize> = Vec::new();
+    for i in indices {
+        let (seg, more) = segment_at(&keys[i].key, depth);
+        if more {
+            branches.entry(seg).or_default().push(i);
+        } else {
+            terminals.push(i);
         }
     }
-    rows
+
+    if depth == 0 {
+        // Root: keys with no separator collect into the "no prefix" group (""),
+        // which — sorting first — leads the named groups (BTreeMap order).
+        if !terminals.is_empty() {
+            branches.entry("").or_default().extend(terminals);
+        }
+        for (head, members) in branches {
+            emit_group(keys, head.to_string(), members, 0, cmp, collapsed, rows);
+        }
+    } else {
+        // Subgroups first (alphabetical), then this level's own keys (sorted).
+        for members in branches.values() {
+            let path = prefix_path(&keys[members[0]].key, depth + 1);
+            emit_group(keys, path, members.clone(), depth, cmp, collapsed, rows);
+        }
+        terminals.sort_by(|&a, &b| cmp(a, b));
+        for idx in terminals {
+            rows.push(ViewRow::Entry { idx, depth });
+        }
+    }
+}
+
+/// Emit a group header at `depth` and, unless it is collapsed, recurse into its
+/// members at `depth + 1`.
+fn emit_group(
+    keys: &[EntryMeta],
+    path: String,
+    members: Vec<usize>,
+    depth: usize,
+    cmp: &impl Fn(usize, usize) -> Ordering,
+    collapsed: &HashSet<String>,
+    rows: &mut Vec<ViewRow>,
+) {
+    let expanded = !collapsed.contains(&path);
+    rows.push(ViewRow::Group {
+        path,
+        depth,
+        count: members.len(),
+    });
+    if expanded {
+        emit_level(keys, members, depth + 1, cmp, collapsed, rows);
+    }
 }
 
 /// Identity of the selected row, captured before a [`Connection::rebuild_view`]
@@ -453,6 +571,11 @@ pub struct KeyBrowser {
     /// throttle progressive rebuilds (see [`Connection::rebuild_view_throttled`]).
     /// Reset at the start of every scan; `None` forces the first page to build.
     last_view_build: Option<Instant>,
+    /// Whether the one-time "start fully collapsed" fold has run. Set when the
+    /// first scan of this connection completes (see
+    /// [`Connection::collapse_groups_on_first_load`]); later scans then leave the
+    /// user's expand/collapse choices alone.
+    did_initial_collapse: bool,
     pub table: TableState,
     /// Ticks elapsed since the last automatic key-browser refresh.
     pub browse_ticks: u32,
@@ -476,6 +599,7 @@ impl KeyBrowser {
             collapsed: HashSet::new(),
             view: Vec::new(),
             last_view_build: None,
+            did_initial_collapse: false,
             table,
             browse_ticks: 0,
         }
@@ -562,7 +686,7 @@ impl Connection {
             .selected()
             .and_then(|i| self.browser.view.get(i))
         {
-            Some(ViewRow::Entry(i)) => self.browser.keys.get(*i),
+            Some(ViewRow::Entry { idx, .. }) => self.browser.keys.get(*idx),
             _ => None,
         }
     }
@@ -579,12 +703,10 @@ impl Connection {
             .selected()
             .and_then(|i| self.browser.view.get(i))
         {
-            Some(ViewRow::Group { prefix, .. }) => Some(prefix.clone()),
-            Some(ViewRow::Entry(i)) => self
-                .browser
-                .keys
-                .get(*i)
-                .map(|e| key_prefix(&e.key).to_string()),
+            Some(ViewRow::Group { path, .. }) => Some(path.clone()),
+            Some(ViewRow::Entry { idx, .. }) => {
+                self.browser.keys.get(*idx).map(|e| parent_path(&e.key))
+            }
             None => None,
         }
     }
@@ -714,13 +836,13 @@ impl Connection {
             .selected()
             .and_then(|i| self.browser.view.get(i))
         {
-            Some(ViewRow::Entry(i)) => self
+            Some(ViewRow::Entry { idx, .. }) => self
                 .browser
                 .keys
-                .get(*i)
+                .get(*idx)
                 .map(|e| SelAnchor::Entry(e.key.clone()))
                 .unwrap_or(SelAnchor::None),
-            Some(ViewRow::Group { prefix, .. }) => SelAnchor::Group(prefix.clone()),
+            Some(ViewRow::Group { path, .. }) => SelAnchor::Group(path.clone()),
             None => SelAnchor::None,
         }
     }
@@ -735,14 +857,14 @@ impl Connection {
         let keys = &self.browser.keys;
         let found = match anchor {
             SelAnchor::Entry(key) => self.browser.view.iter().position(|r| match r {
-                ViewRow::Entry(i) => keys[*i].key == key,
+                ViewRow::Entry { idx, .. } => keys[*idx].key == key,
                 ViewRow::Group { .. } => false,
             }),
-            SelAnchor::Group(prefix) => self
+            SelAnchor::Group(path) => self
                 .browser
                 .view
                 .iter()
-                .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix)),
+                .position(|r| matches!(r, ViewRow::Group { path: p, .. } if *p == path)),
             SelAnchor::None => None,
         };
         let idx = found.unwrap_or_else(|| {
@@ -787,33 +909,41 @@ impl Connection {
             .browser
             .view
             .iter()
-            .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix))
+            .position(|r| matches!(r, ViewRow::Group { path: p, .. } if *p == prefix))
         {
             self.browser.table.select(Some(idx));
         }
         true
     }
 
-    /// Collapse every group when any is currently expanded, otherwise expand
-    /// them all. No-op when grouping is off.
-    pub fn toggle_all_groups(&mut self) {
-        let prefixes: Vec<String> = self
-            .browser
-            .view
-            .iter()
-            .filter_map(|r| match r {
-                ViewRow::Group { prefix, .. } => Some(prefix.clone()),
-                ViewRow::Entry(_) => None,
-            })
-            .collect();
-        if prefixes.is_empty() {
+    /// On the first completed scan of this connection, fold every group so
+    /// entering the browser shows just the top-level namespaces. Idempotent: it
+    /// runs once, then later scans (DB switch, auto-refresh) leave the user's
+    /// expand/collapse choices untouched.
+    pub fn collapse_groups_on_first_load(&mut self) {
+        if self.browser.did_initial_collapse {
             return;
         }
-        let any_expanded = prefixes.iter().any(|p| !self.browser.collapsed.contains(p));
+        self.browser.did_initial_collapse = true;
+        self.browser
+            .collapsed
+            .extend(all_group_paths(&self.browser.keys));
+    }
+
+    /// Collapse every group when any is currently expanded, otherwise expand
+    /// them all. Acts on the whole nested tree — including groups hidden inside a
+    /// folded ancestor — so "expand all" reveals every level at once. No-op when
+    /// there are no groups.
+    pub fn toggle_all_groups(&mut self) {
+        let paths = all_group_paths(&self.browser.keys);
+        if paths.is_empty() {
+            return;
+        }
+        let any_expanded = paths.iter().any(|p| !self.browser.collapsed.contains(p));
         if any_expanded {
-            self.browser.collapsed.extend(prefixes);
+            self.browser.collapsed.extend(paths);
         } else {
-            for p in &prefixes {
+            for p in &paths {
                 self.browser.collapsed.remove(p);
             }
         }
@@ -1138,18 +1268,18 @@ mod tests {
     fn entry_keys(view: &[ViewRow], keys: &[EntryMeta]) -> Vec<String> {
         view.iter()
             .filter_map(|r| match r {
-                ViewRow::Entry(i) => Some(keys[*i].key.clone()),
+                ViewRow::Entry { idx, .. } => Some(keys[*idx].key.clone()),
                 ViewRow::Group { .. } => None,
             })
             .collect()
     }
 
-    /// The `(prefix, count)` of each [`ViewRow::Group`] header, in view order.
+    /// The `(path, count)` of each [`ViewRow::Group`] header, in view order.
     fn group_headers(view: &[ViewRow]) -> Vec<(String, usize)> {
         view.iter()
             .filter_map(|r| match r {
-                ViewRow::Group { prefix, count } => Some((prefix.clone(), *count)),
-                ViewRow::Entry(_) => None,
+                ViewRow::Group { path, count, .. } => Some((path.clone(), *count)),
+                ViewRow::Entry { .. } => None,
             })
             .collect()
     }
@@ -1245,6 +1375,69 @@ mod tests {
             [("cache".to_string(), 1), ("user".to_string(), 2)]
         );
         assert_eq!(entry_keys(&view, &keys), ["cache:x"]);
+    }
+
+    /// One short tag per row: `G path@depth(count)` for a group, `E key@depth`
+    /// for an entry — enough to pin the whole nested structure in one assert.
+    fn row_tags(view: &[ViewRow], keys: &[EntryMeta]) -> Vec<String> {
+        view.iter()
+            .map(|r| match r {
+                ViewRow::Group { path, depth, count } => format!("G {path}@{depth}({count})"),
+                ViewRow::Entry { idx, depth } => format!("E {}@{depth}", keys[*idx].key),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_view_nests_groups_at_every_separator() {
+        // Multi-segment keys nest: `user` holds the `user:1000` subgroup (with its
+        // own keys at depth 2) plus user's own direct keys. Subgroups lead their
+        // level's direct entries; group counts are the whole subtree.
+        let keys = vec![
+            meta("user:1", ValueType::String, Ttl::NoExpire, None),
+            meta("user:1000:name", ValueType::String, Ttl::NoExpire, None),
+            meta("user:1000:email", ValueType::String, Ttl::NoExpire, None),
+            meta("user:2", ValueType::String, Ttl::NoExpire, None),
+            meta("cache:x", ValueType::String, Ttl::NoExpire, None),
+            meta("loose", ValueType::String, Ttl::NoExpire, None),
+        ];
+        let view = build_view(&keys, SortKey::Name, false, &HashSet::new());
+        assert_eq!(
+            row_tags(&view, &keys),
+            [
+                "G @0(1)", // (no prefix) — colonless keys, sorts first
+                "E loose@1",
+                "G cache@0(1)",
+                "E cache:x@1",
+                "G user@0(4)",         // subtree count includes the nested keys
+                "G user:1000@1(2)",    // subgroup before user's own direct keys
+                "E user:1000:email@2", // name-asc within the subgroup
+                "E user:1000:name@2",
+                "E user:1@1",
+                "E user:2@1",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_view_collapsing_a_parent_hides_its_subgroups() {
+        let keys = vec![
+            meta("user:1000:name", ValueType::String, Ttl::NoExpire, None),
+            meta("user:1", ValueType::String, Ttl::NoExpire, None),
+        ];
+        // Folding the inner `user:1000` group hides only its keys; `user` and its
+        // direct key `user:1` stay.
+        let mut collapsed = HashSet::new();
+        collapsed.insert("user:1000".to_string());
+        let view = build_view(&keys, SortKey::Name, false, &collapsed);
+        assert_eq!(
+            row_tags(&view, &keys),
+            ["G user@0(2)", "G user:1000@1(1)", "E user:1@1"]
+        );
+        // Folding the outer `user` group hides the whole subtree, subgroup and all.
+        collapsed.insert("user".to_string());
+        let view = build_view(&keys, SortKey::Name, false, &collapsed);
+        assert_eq!(row_tags(&view, &keys), ["G user@0(2)"]);
     }
 
     #[test]

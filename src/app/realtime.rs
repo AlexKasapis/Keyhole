@@ -233,6 +233,9 @@ impl App {
 
     /// Start a focus-scoped feed (MONITOR / keyspace) without changing the
     /// focused tab — these render under their fixed anchor, not as a `Sub` tab.
+    /// They start *paused* (frozen view): the feed accumulates from the moment it
+    /// opens, but the user presses `p` to begin following, so simply focusing the
+    /// tab doesn't immediately flood the panel with a live MONITOR stream.
     pub(super) fn start_feed(&mut self, spec: SubSpec) {
         let Some(id) = self.active_id() else {
             return;
@@ -246,7 +249,9 @@ impl App {
                 spec: spec.clone(),
                 record: false,
             });
-            conn.subs.push(Subscription::new(sub_id, spec, capacity));
+            let mut sub = Subscription::new(sub_id, spec, capacity);
+            sub.follow = false;
+            conn.subs.push(sub);
         }
     }
 
