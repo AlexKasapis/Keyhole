@@ -2,7 +2,14 @@
 # pulled from CHANGELOG.md and upload, for every supported Linux target:
 #   * a `.tar.gz` (binary + man page + completions + LICENSEs + README/CHANGELOG)
 #   * a `.sha256` checksum next to it
-#   * the `keyhole-installer.sh` curl|sh installer (once, shared by all targets)
+#   * a cosign keyless signature pair (`.sig` + `.pem`)
+# plus, once per release:
+#   * the `keyhole-installer.sh` curl|sh installer (shared by all targets)
+#   * `SHA256SUMS` — one aggregate checksum file over every artifact (signed)
+#   * `keyhole.cdx.json` — a CycloneDX SBOM (signed)
+#   * SLSA build-provenance attestations for the binaries (gh attestation verify)
+#
+# Nothing publishes until the `verify` gate (fmt/clippy/tests) is green.
 #
 # Feature policy (see the README "Build variants" table): the glibc (`gnu`)
 # targets carry the full default feature set (keyring + AMQP + RabbitMQ); the
@@ -23,16 +30,46 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Release gate: a tag must never publish a binary that fails fmt/clippy/tests.
+  # This runs the fast unit + snapshot suite (default feature set: keyring + amqp
+  # + rabbitmq); the full broker-backed integration suite gates the same commit
+  # via ci.yml, which also fires on the tag push. `cargo test` deliberately omits
+  # `--all-features`: that would enable the `integration` feature and run the
+  # broker tests with no brokers present. Everything below `needs: [verify]`.
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Tests (fast unit + snapshot suite)
+        run: cargo test --locked
+
   # Create the GitHub Release (notes from CHANGELOG.md) and attach the
   # version-independent installer script. Fast, so it gates the rest.
   create-release:
+    needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
-      - uses: taiki-e/create-gh-release-action@v1
+      - uses: taiki-e/create-gh-release-action@eba8ea96c86cca8a37f1b56e94b4d13301fba651 # v1.11.0
         with:
           # Extracts the section matching the tag's version as the release body.
           changelog: CHANGELOG.md
@@ -55,14 +92,15 @@ jobs:
   # --no-default-features purely for speed — `keyhole gen` introspects the clap
   # definition, which is identical regardless of the broker feature flags.
   assets:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build (headless feature set, for `gen` only)
-        run: cargo build --release --no-default-features
+        run: cargo build --locked --release --no-default-features
 
       - name: Generate man page and completions
         run: |
@@ -73,10 +111,25 @@ jobs:
           ./target/release/keyhole gen completions fish --out dist-assets
           ls -l dist-assets
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: packaging-assets
           path: dist-assets/
+          if-no-files-found: error
+
+      # CycloneDX SBOM of the dependency graph. Generated with --all-features, so
+      # it describes the full glibc build (the superset); the static musl build
+      # is a strict subset of these crates. Shared with the `sign` job, which
+      # publishes and signs it.
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          cargo install cargo-cyclonedx --locked
+          cargo cyclonedx --format json --all-features
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom
+          path: keyhole.cdx.json
           if-no-files-found: error
 
   # Cross-compile and upload one tarball + checksum per target.
@@ -100,19 +153,19 @@ jobs:
           - target: aarch64-unknown-linux-musl
             no_default_features: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Download generated man page + completions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: packaging-assets
           path: dist-assets
 
-      - uses: taiki-e/upload-rust-binary-action@v1
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: keyhole
           target: ${{ matrix.target }}
@@ -136,3 +189,67 @@ jobs:
           ref: ${{ github.ref }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Integrity layer: once every binary tarball + the SBOM are on the release,
+  # attach the verifiable extras. Adds, to the release:
+  #   * SHA256SUMS ............. one aggregate checksum over all artifacts
+  #   * keyhole.cdx.json ....... the CycloneDX SBOM
+  #   * <artifact>.sig/.pem .... cosign keyless (sigstore) signatures
+  # and records SLSA build-provenance attestations for the binaries (verifiable
+  # with `gh attestation verify <file> --repo AlexKasapis/Keyhole`). The
+  # installer (scripts/install.sh) verifies the cosign signature when available.
+  sign:
+    needs: [create-release, assets, upload-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload signatures / checksums / SBOM to the release
+      id-token: write # OIDC for cosign keyless signing + provenance
+      attestations: write # record build-provenance attestations
+    steps:
+      - name: Download the SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: sbom
+          path: artifacts
+
+      - name: Download the release tarballs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          gh release download "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.tar.gz'
+          ls -l
+
+      - name: Generate aggregate SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum ./*.tar.gz keyhole.cdx.json > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign artifacts (cosign keyless)
+        working-directory: artifacts
+        run: |
+          for f in ./*.tar.gz SHA256SUMS keyhole.cdx.json; do
+            cosign sign-blob --yes \
+              --output-signature "${f}.sig" \
+              --output-certificate "${f}.pem" \
+              "$f"
+          done
+          ls -l
+
+      - name: Attest build provenance for the binaries
+        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        with:
+          subject-path: artifacts/*.tar.gz
+
+      - name: Upload signatures, checksums, and SBOM to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: artifacts
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber \
+            SHA256SUMS keyhole.cdx.json ./*.sig ./*.pem

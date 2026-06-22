@@ -1,0 +1,71 @@
+# cargo-deny configuration (https://embarkstudios.github.io/cargo-deny/).
+#
+# Gates the dependency graph on four axes:
+#   * advisories — RUSTSEC vulnerabilities / yanked crates (subsumes cargo-audit)
+#   * licenses   — only the permissive licenses our distribution allows
+#   * bans       — wildcard version requirements; duplicate versions (warn)
+#   * sources    — crates must come from crates.io (no surprise git/registries)
+#
+# Run locally with `just deny` / `cargo deny check`. CI runs it on every push
+# (.github/workflows/ci.yml) and on a daily schedule (.github/workflows/audit.yml)
+# so a newly-disclosed advisory pages even without a commit.
+
+# Scan the full feature set so the optional amqp / rabbitmq / keyring deps and
+# their TLS stacks are covered, not just the default build.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# Deny crates pulled in at a version the registry has yanked.
+yanked = "deny"
+# Advisory IDs to temporarily tolerate, each with a justification + tracking note.
+# Keep this empty; add entries only with a comment explaining why and when it goes.
+ignore = []
+
+[licenses]
+version = 2
+# The allow-list is calibrated against the real graph (`cargo deny --all-features
+# list`). Every entry is required by at least one crate that is licensed *solely*
+# under it (multi-licensed crates resolve against whichever option here matches):
+#   MIT / Apache-2.0 ............ the overwhelming majority
+#   Apache-2.0 WITH LLVM-exception  rustix / linux-raw-sys / wasi
+#   BSD-2-Clause ................ amq-protocol* (lapin), tcp-stream, async-rs
+#   BSD-3-Clause ................ redis, subtle, sha1_smol, aws-lc-sys
+#   ISC ......................... untrusted, ring, rustls (aws-lc / TLS stack)
+#   BSL-1.0 ..................... xxhash-rust
+#   CDLA-Permissive-2.0 ......... webpki-roots, webpki-root-certs
+#   MPL-2.0 ..................... option-ext (weak, file-level copyleft — OK to ship)
+#   Unicode-3.0 ................. icu_* / unicode-ident
+#   Zlib ........................ foldhash, arcstr
+#   Unlicense / MIT-0 / CC0-1.0 . public-domain-equivalent fallbacks (dunce, etc.)
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    "CC0-1.0",
+]
+# Require a high-confidence textual match before trusting a detected license.
+confidence-threshold = 0.8
+
+[bans]
+# A 450+ crate graph inevitably carries a few duplicate major versions; surface
+# them (so they can be deduped over time) without failing the build.
+multiple-versions = "warn"
+# No first-party manifest uses a `*` version requirement — keep it that way.
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

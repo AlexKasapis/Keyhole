@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Release artifacts are now signed (sigstore/cosign keyless), carry SLSA
+  build-provenance attestations, and ship a CycloneDX SBOM plus an aggregate
+  `SHA256SUMS`. The install script additionally verifies the cosign signature
+  when `cosign` is available. See the README "Verifying a download" section.
+
 ### Removed
 
 - Command palette (`:`). Every action it launched is reachable directly by its

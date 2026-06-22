@@ -126,6 +126,32 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 > The first tagged release is still in progress — these links go live once
 > `v0.1.0` is published. Track the [Releases page] for status.
 
+### Verifying a download
+
+Every release artifact ships with three independent ways to verify it, from
+quickest to strongest:
+
+```sh
+# 1. Checksum — detects corruption/truncation (the install script does this for you).
+sha256sum -c keyhole-x86_64-unknown-linux-gnu.tar.gz.sha256
+#    …or against the aggregate file covering every artifact:
+sha256sum --ignore-missing -c SHA256SUMS
+
+# 2. Signature — sigstore/cosign keyless; proves it was signed by this repo's release workflow.
+cosign verify-blob \
+  --signature  keyhole-x86_64-unknown-linux-gnu.tar.gz.sig \
+  --certificate keyhole-x86_64-unknown-linux-gnu.tar.gz.pem \
+  --certificate-identity-regexp '^https://github\.com/AlexKasapis/Keyhole/\.github/workflows/release\.yml@refs/tags/v.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  keyhole-x86_64-unknown-linux-gnu.tar.gz
+
+# 3. Build provenance — SLSA attestation tying the binary to the exact workflow run.
+gh attestation verify keyhole-x86_64-unknown-linux-gnu.tar.gz --repo AlexKasapis/Keyhole
+```
+
+A [CycloneDX SBOM][cyclonedx] (`keyhole.cdx.json`) of the dependency graph is
+published alongside, also signed.
+
 ### Distro & package managers _(coming soon)_
 
 - **Arch (AUR):** `keyhole` (from source) / `keyhole-bin` (prebuilt)
@@ -135,6 +161,7 @@ curl --proto '=https' --tlsv1.2 -LsSf \
 - **Nix:** `nix run github:AlexKasapis/Keyhole`
 
 [Releases page]: https://github.com/AlexKasapis/Keyhole/releases
+[cyclonedx]: https://cyclonedx.org/
 
 ## Development quick start
 

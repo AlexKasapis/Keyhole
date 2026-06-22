@@ -9,6 +9,12 @@
 # It detects your OS/arch, downloads the matching tarball + its .sha256, verifies
 # the checksum, and installs `keyhole` (plus the man page, best-effort).
 #
+# If `cosign` is installed and a sigstore signature is published for the tarball,
+# the signature is also verified (keyless, against the release workflow's
+# identity). Without cosign the checksum is still enforced; for the strongest
+# check, verify the GitHub build-provenance attestation:
+#   gh attestation verify keyhole-<target>.tar.gz --repo AlexKasapis/Keyhole
+#
 # Two build flavors are published per architecture (see the README "Build
 # variants" table). The default is the full glibc build (keyring + AMQP +
 # RabbitMQ); the `musl` flavor is a dependency-free static binary (Redis only,
@@ -31,6 +37,12 @@ set -eu
 REPO="AlexKasapis/Keyhole"
 BIN="keyhole"
 DEFAULT_BASE="https://github.com/${REPO}/releases/latest/download"
+
+# Expected sigstore signer for cosign keyless verification: the release workflow
+# of this repo, asserted by GitHub's OIDC issuer. A signature that verifies under
+# any *other* identity is rejected.
+COSIGN_IDENTITY_REGEXP="^https://github\.com/${REPO}/\.github/workflows/release\.yml@refs/tags/v.*"
+COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 say() { printf '%s\n' "$*"; }
 err() { printf 'keyhole-installer: %s\n' "$*" >&2; }
@@ -108,6 +120,35 @@ verify_sha256() {
         die "checksum mismatch for $(basename "$file"): expected ${expected}, got ${actual}"
 }
 
+# Best-effort sigstore/cosign signature check of archive $1 using its sidecar
+# signature $2 (.sig) and certificate $3 (.pem). Semantics mirror verify_sha256:
+# if verification *can* run and FAILS, that's fatal (a forged/replaced artifact);
+# if it can't run — cosign not installed, or no signature published — fall back
+# to the checksum already verified above and continue with a notice.
+verify_cosign() {
+    archive_path="$1"
+    sig="$2"
+    cert="$3"
+    if ! command -v cosign >/dev/null 2>&1; then
+        say "cosign not installed; skipping signature verification (checksum already verified)."
+        return 0
+    fi
+    if [ ! -s "$sig" ] || [ ! -s "$cert" ]; then
+        err "no cosign signature published for $(basename "$archive_path"); skipping signature verification"
+        return 0
+    fi
+    if cosign verify-blob \
+        --signature "$sig" \
+        --certificate "$cert" \
+        --certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+        "$archive_path" >/dev/null 2>&1; then
+        say "Signature OK (cosign)."
+    else
+        die "cosign signature verification FAILED for $(basename "$archive_path")"
+    fi
+}
+
 main() {
     target=$(resolve_target)
     base="${KEYHOLE_INSTALL_BASE:-$DEFAULT_BASE}"
@@ -128,6 +169,12 @@ main() {
     else
         err "no .sha256 published for ${archive}; skipping checksum verification"
     fi
+
+    # Best-effort signature verification (sigstore/cosign keyless). Fetch the
+    # sidecar signature + certificate; verify_cosign decides whether it can run.
+    fetch "${url}.sig" "${tmp}/${archive}.sig" 2>/dev/null || true
+    fetch "${url}.pem" "${tmp}/${archive}.pem" 2>/dev/null || true
+    verify_cosign "${tmp}/${archive}" "${tmp}/${archive}.sig" "${tmp}/${archive}.pem"
 
     (cd "$tmp" && tar -xzf "$archive") || die "failed to extract ${archive}"
 

@@ -3,7 +3,9 @@
 #
 # Covers target-triple detection (every supported os/arch/flavor + rejections)
 # and the full download → checksum-verify → install flow against a locally
-# staged fake release (no network), including the corrupted-checksum abort.
+# staged fake release (no network), including the corrupted-checksum abort and
+# the cosign signature paths (valid / invalid / unsigned), driven by a stub
+# cosign so no real sigstore access is needed.
 #
 # Usage:
 #   scripts/test_install.sh         Run all installer tests.
@@ -106,6 +108,59 @@ if run_install "$good" >/dev/null 2>&1; then
     fi
 else
     bad "install with a valid checksum failed"
+fi
+
+echo "== cosign signature verification =="
+# Stub cosign on PATH: the installer only calls `verify-blob`, so the stub just
+# exits per STUB_COSIGN_EXIT — exercising the pass/fail branches without sigstore
+# or network access.
+mkdir -p "$work/stubbin"
+cat >"$work/stubbin/cosign" <<'STUB'
+#!/bin/sh
+[ "$1" = "verify-blob" ] && exit "${STUB_COSIGN_EXIT:-0}"
+exit 0
+STUB
+chmod +x "$work/stubbin/cosign"
+
+# Publish a (dummy) detached signature + certificate next to the archive.
+echo "dummy-signature" >"$stage/$archive.sig"
+echo "dummy-certificate" >"$stage/$archive.pem"
+
+cosign_install() {
+    # $1 = install root, $2 = stub `verify-blob` exit code.
+    env PATH="$work/stubbin:$PATH" STUB_COSIGN_EXIT="$2" \
+        KEYHOLE_UNAME_S=Linux KEYHOLE_UNAME_M=x86_64 \
+        KEYHOLE_INSTALL_BASE="file://$stage" \
+        KEYHOLE_INSTALL_DIR="$1/bin" KEYHOLE_INSTALL_MANDIR="$1/man" \
+        sh "$INSTALLER"
+}
+
+# (a) cosign present + valid signature -> installs.
+cdir="$work/cosign-ok"
+if cosign_install "$cdir" 0 >/dev/null 2>&1 && [ -x "$cdir/bin/keyhole" ]; then
+    pass "valid cosign signature: installed"
+else
+    bad "valid cosign signature: expected a successful install"
+fi
+
+# (b) cosign present + invalid signature -> aborts, nothing installed.
+cdir="$work/cosign-bad"
+if cosign_install "$cdir" 1 >/dev/null 2>&1; then
+    bad "invalid cosign signature: install should have aborted"
+elif [ -e "$cdir/bin/keyhole" ]; then
+    bad "invalid cosign signature: binary installed despite failed verification"
+else
+    pass "invalid cosign signature aborted, nothing installed"
+fi
+
+# (c) cosign present but NO signature published -> soft skip, still installs via
+# the checksum. STUB_COSIGN_EXIT=1 proves the skip happens before cosign runs.
+rm -f "$stage/$archive.sig" "$stage/$archive.pem"
+cdir="$work/cosign-missing"
+if cosign_install "$cdir" 1 >/dev/null 2>&1 && [ -x "$cdir/bin/keyhole" ]; then
+    pass "missing signature: soft-skipped, installed via checksum"
+else
+    bad "missing signature: expected a successful (checksum-only) install"
 fi
 
 echo "== corrupted checksum aborts =="

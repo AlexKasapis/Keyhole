@@ -68,3 +68,20 @@ release-lint:
     ./scripts/test_install.sh
     shellcheck scripts/install.sh scripts/test_install.sh
     command -v actionlint >/dev/null && actionlint || echo "actionlint not installed; skipping workflow lint"
+
+# Supply-chain audit (advisories/licenses/bans/sources); needs cargo-deny.
+deny:
+    cargo deny check
+
+# Line coverage + enforced floor, unit+snapshot only (no docker); needs cargo-llvm-cov.
+# (CI's coverage job adds the broker integration tests for the authoritative number.)
+coverage:
+    cargo llvm-cov --summary-only --fail-under-lines 85
+
+# Build on the declared MSRV (Cargo.toml rust-version) to catch drift.
+msrv:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v=$(grep -m1 -E '^rust-version' Cargo.toml | sed -E 's/.*"([0-9.]+)".*/\1/')
+    rustup toolchain install "$v" --profile minimal
+    cargo "+$v" check --locked --all-features

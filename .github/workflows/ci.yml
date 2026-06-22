@@ -4,9 +4,23 @@ on:
   push:
   pull_request:
 
+# Cancel a branch/PR's in-flight run when a newer commit is pushed, so queued
+# runners aren't spent on superseded commits. Keyed on the ref, so pushes to
+# different branches (and tags) never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+
+# Action-pinning policy: third-party actions are pinned to a full commit SHA
+# with the human-readable tag in a trailing comment; Dependabot's github-actions
+# updater bumps both. dtolnay/rust-toolchain is the deliberate exception — it is
+# pinned to a channel ref (`@stable` / `@master`) because that ref is precisely
+# how the action selects the Rust toolchain, and a branch SHA-pin could not be
+# kept current by Dependabot.
 
 jobs:
   build:
@@ -44,22 +58,22 @@ jobs:
           --health-retries 15
           --health-start-period 20s
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test
+        run: cargo test --locked
 
       - name: Install redis-cli
         run: sudo apt-get update && sudo apt-get install -y redis-tools
@@ -71,7 +85,7 @@ jobs:
       - name: Wait for ActiveMQ
         # ActiveMQ boots slowly; wait for its AMQP port before integration tests.
         run: |
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             (echo > /dev/tcp/127.0.0.1/5672) 2>/dev/null && exit 0
             sleep 2
           done
@@ -82,36 +96,36 @@ jobs:
           KEYHOLE_TEST_REDIS_PORT: "6379"
           KEYHOLE_TEST_AMQP_PORT: "5672"
           KEYHOLE_TEST_RABBITMQ_PORT: "5673"
-        run: cargo test --features integration -- --include-ignored
+        run: cargo test --locked --features integration -- --include-ignored
 
   # Headless, statically-linked build (env-var secrets only; no keyring backend).
   musl:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
           targets: x86_64-unknown-linux-musl
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Clippy (headless feature set)
-        run: cargo clippy --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
 
       - name: Build static musl binary
-        run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+        run: cargo build --locked --release --no-default-features --target x86_64-unknown-linux-musl
 
   # Guard the release plumbing (installer script + workflows) on every push,
   # so breakage is caught here rather than when a real `vX.Y.Z` tag is pushed.
   release-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Installer test suite
         # Target detection + full download/verify/install flow (no network).
@@ -121,19 +135,174 @@ jobs:
         # shellcheck is preinstalled on GitHub's ubuntu-latest runners.
         run: shellcheck scripts/install.sh scripts/test_install.sh
 
+      # Install actionlint from a pinned release rather than piping a script off
+      # the action's `main` branch (a mutable, unpinned supply-chain input).
+      - name: Install actionlint
+        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: actionlint@1.7.7
+
       - name: actionlint (workflow lint)
-        run: |
-          bash <(curl --proto '=https' --tlsv1.2 -fsSL \
-            https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
-          ./actionlint -color
+        run: actionlint -color
 
   # Keep the crates.io publish (Tier 1a) green: a from-scratch package + build
   # of exactly what `cargo publish` would upload.
   publish-dry-run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - name: cargo publish --dry-run
-        run: cargo publish --dry-run
+        run: cargo publish --dry-run --locked
+
+  # Supply-chain gate: RUSTSEC advisories, license policy, banned/duplicate
+  # crates, and crate sources. Policy lives in deny.toml; the action ships a
+  # prebuilt cargo-deny, so no Rust toolchain is needed here. A daily scheduled
+  # advisory-only scan also runs in .github/workflows/audit.yml.
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
+        with:
+          command: check
+
+  # Prove the crate still builds on its declared minimum supported Rust version.
+  # Every other job runs on stable, so without this the `rust-version` in
+  # Cargo.toml is an unverified claim that would drift as new language/std/dep
+  # features creep in. The version is read straight from Cargo.toml so it stays
+  # the single source of truth — bump it there and this job follows.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          version=$(grep -m1 -E '^rust-version' Cargo.toml | sed -E 's/.*"([0-9]+(\.[0-9]+)*)".*/\1/')
+          [ -n "$version" ] || { echo "could not parse rust-version from Cargo.toml" >&2; exit 1; }
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: cargo check (full feature set, on MSRV)
+        run: cargo check --locked --all-features
+
+      - name: cargo check (headless feature set, on MSRV)
+        run: cargo check --locked --no-default-features
+
+  # Measure line coverage across the FULL surface, including the broker-backed
+  # integration tests so the live connection code in src/broker/* is counted,
+  # then fail if it regresses below the floor. The broker services + readiness
+  # waits mirror the `build` job. CLAUDE.md mandates the codebase stays
+  # adequately covered; this job is what enforces it.
+  #
+  # The floor is 90%; the observed integration-inclusive line coverage is ~92%
+  # (326 tests). Ratchet it upward toward the observed number as coverage
+  # improves — never lower it (see CONTRIBUTING.md). cargo-llvm-cov needs the
+  # llvm-tools-preview component.
+  coverage:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      activemq:
+        image: apache/activemq-classic:latest
+        ports:
+          - 5672:5672
+      rabbitmq:
+        image: rabbitmq:3-management
+        env:
+          RABBITMQ_DEFAULT_USER: keyhole
+          RABBITMQ_DEFAULT_PASS: keyhole
+        ports:
+          - 5673:5672
+        options: >-
+          --health-cmd "rabbitmqctl -q authenticate_user keyhole keyhole"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 15
+          --health-start-period 20s
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install redis-cli
+        run: sudo apt-get update && sudo apt-get install -y redis-tools
+
+      - name: Enable keyspace notifications
+        run: redis-cli -h 127.0.0.1 -p 6379 config set notify-keyspace-events KEA
+
+      - name: Wait for ActiveMQ
+        run: |
+          for _ in $(seq 1 60); do
+            (echo > /dev/tcp/127.0.0.1/5672) 2>/dev/null && exit 0
+            sleep 2
+          done
+          echo "ActiveMQ did not become ready" >&2; exit 1
+
+      - name: Collect coverage (unit + snapshot + integration)
+        env:
+          KEYHOLE_TEST_REDIS_PORT: "6379"
+          KEYHOLE_TEST_AMQP_PORT: "5672"
+          KEYHOLE_TEST_RABBITMQ_PORT: "5673"
+        run: cargo llvm-cov --no-report --locked --all-features -- --include-ignored
+
+      - name: Report coverage + enforce floor
+        run: |
+          cargo llvm-cov report --lcov --output-path lcov.info
+          summary=$(cargo llvm-cov report --summary-only)
+          {
+            echo '### Coverage'
+            echo '```'
+            echo "$summary"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$summary"
+          # Gate: fail the job if line coverage drops below the floor.
+          cargo llvm-cov report --summary-only --fail-under-lines 90 >/dev/null
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+
+  # Compile every feature combination. The build/musl jobs only cover the two
+  # extremes (all-features and --no-default-features); this catches a broken
+  # intermediate combo (e.g. amqp without rabbitmq). `integration` only gates
+  # test code, so it is excluded from the powerset.
+  feature-combos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
+        with:
+          tool: cargo-hack
+      - name: cargo hack (feature powerset)
+        run: cargo hack --locked --feature-powerset --depth 2 --exclude-features integration check --all-targets
