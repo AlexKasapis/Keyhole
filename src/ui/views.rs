@@ -5,7 +5,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, Paragraph, Row, Table, Tabs, Wrap,
+    Block, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, Paragraph, Row, Table, TableState,
+    Tabs, Wrap,
 };
 use ratatui::Frame;
 use time::OffsetDateTime;
@@ -125,6 +126,25 @@ fn connection_info(conn: &Connection) -> String {
 }
 
 /// Browser screen: key table + value pane for the active connection.
+/// The scroll offset for a viewport that shows `viewport` rows out of `total`,
+/// given the previous offset and the selected row. The window stays put unless
+/// the selection would fall outside it (then it scrolls the minimum needed to
+/// bring the selection back into view), and is always clamped so the last row
+/// can't sit above an empty viewport — mirroring ratatui's own follow logic,
+/// which we replicate here because the table is fed a pre-sliced window.
+fn visible_offset(prev: usize, selected: Option<usize>, viewport: usize, total: usize) -> usize {
+    let max_offset = total.saturating_sub(viewport);
+    let mut off = prev.min(max_offset);
+    if let Some(sel) = selected {
+        if sel < off {
+            off = sel;
+        } else if viewport > 0 && sel >= off + viewport {
+            off = sel + 1 - viewport;
+        }
+    }
+    off.min(max_offset)
+}
+
 pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // The console band shows a typing cursor only in command mode; capture the
     // mode before the `&mut` borrow of the active connection below.
@@ -182,11 +202,29 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
             .areas(body_area);
 
-    // One rendered row per view entry: a styled, key-count-bearing header for a
-    // group (with a fold marker), or a key with its type / TTL / size. Keys are
-    // always grouped, so each key is indented under its prefix header.
-    let rows: Vec<Row> = conn
-        .view
+    // The key list is a pure viewport: only the rows that fall inside the
+    // visible window are turned into `Row`s each frame. With a large expanded
+    // keyspace (tens of thousands of keys) building the entire list — and a
+    // `format!`ed cell per column — on every frame is what makes the browser
+    // crawl, even though ratatui only ever paints the handful of visible rows.
+    // We therefore compute the scroll window ourselves and hand the widget just
+    // that slice. The viewport excludes the two border rows and the one header
+    // row.
+    let total = conn.view.len();
+    let viewport = table_area.height.saturating_sub(3) as usize;
+    let selected = conn.table.selected();
+    // Track the scroll offset on `conn.table` so it persists across frames
+    // (the window only shifts when the selection would leave it, matching
+    // ratatui's own follow behaviour) and so a shrunken view can't strand rows.
+    let offset = visible_offset(conn.table.offset(), selected, viewport, total);
+    *conn.table.offset_mut() = offset;
+    let end = offset.saturating_add(viewport).min(total);
+
+    // One rendered row per *visible* view entry: a styled, key-count-bearing
+    // header for a group (with a fold marker), or a key with its type / TTL /
+    // size. Keys are always grouped, so each key is indented under its prefix
+    // header.
+    let rows: Vec<Row> = conn.view[offset..end]
         .iter()
         .filter_map(|vr| match vr {
             ViewRow::Group { prefix, count } => {
@@ -231,7 +269,6 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             }),
         })
         .collect();
-    let row_count = rows.len();
     let widths = [
         Constraint::Min(10),
         Constraint::Length(6),
@@ -248,17 +285,12 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         )
         .row_highlight_style(theme.selected)
         .highlight_symbol("▶ ");
-    // Clamp the table's scroll offset so a shrunken view (e.g. collapsing a
-    // group while scrolled far down) can't leave rows stranded above the panel
-    // with blank space below. ratatui only ever grows the offset to keep the
-    // selection visible — it never pulls content back up — so we cap it here.
-    // The viewport excludes the two border rows and the one header row.
-    let viewport = table_area.height.saturating_sub(3) as usize;
-    let max_offset = row_count.saturating_sub(viewport);
-    if conn.table.offset() > max_offset {
-        *conn.table.offset_mut() = max_offset;
-    }
-    frame.render_stateful_widget(table, table_area, &mut conn.table);
+    // The rows are already sliced to the window, so the widget gets a
+    // viewport-local state: the selection rebased onto the slice and a zero
+    // offset. (The canonical selection/offset stay on `conn.table` above.)
+    let mut win = TableState::default();
+    win.select(selected.map(|s| s.saturating_sub(offset)));
+    frame.render_stateful_widget(table, table_area, &mut win);
 
     let title = match &conn.value_key {
         Some(k) => format!(" {k} "),
@@ -1104,6 +1136,24 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
 mod tests {
     use super::*;
     use time::macros::datetime;
+
+    #[test]
+    fn visible_offset_keeps_selection_in_window() {
+        // 200 rows, a 10-row viewport. From a settled top window, scrolling the
+        // selection down past the bottom edge advances the window by one row…
+        assert_eq!(visible_offset(0, Some(9), 10, 200), 0, "last visible row stays");
+        assert_eq!(visible_offset(0, Some(10), 10, 200), 1, "one past pushes down");
+        // …and the window otherwise stays put while the selection is inside it.
+        assert_eq!(visible_offset(50, Some(55), 10, 200), 50, "in-window: no move");
+        // Scrolling above the window pulls it straight up to the selection.
+        assert_eq!(visible_offset(50, Some(40), 10, 200), 40, "above pulls up");
+        // A stale/over-large offset (e.g. after a group collapse shrank the view)
+        // is clamped so the last rows can't sit above an empty viewport.
+        assert_eq!(visible_offset(190, None, 10, 30), 20, "clamped to max_offset");
+        assert_eq!(visible_offset(0, Some(0), 10, 0), 0, "empty view");
+        // A viewport taller than the list pins the window at the top.
+        assert_eq!(visible_offset(0, Some(3), 50, 5), 0, "fits entirely");
+    }
 
     #[test]
     fn human_bytes_scales_units() {

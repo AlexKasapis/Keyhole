@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ratatui::widgets::TableState;
 use time::OffsetDateTime;
@@ -419,6 +420,10 @@ pub struct Connection {
     /// `sort_desc`, and `collapsed`. The table's selected index points into
     /// this, not into `keys`. Rebuilt via [`Self::rebuild_view`].
     pub view: Vec<ViewRow>,
+    /// When [`Self::view`] was last rebuilt during the scan in progress, used to
+    /// throttle progressive rebuilds (see [`Self::rebuild_view_throttled`]).
+    /// Reset at the start of every scan; `None` forces the first page to build.
+    last_view_build: Option<Instant>,
     pub table: TableState,
     pub value: Option<ValueView>,
     pub value_key: Option<String>,
@@ -457,6 +462,7 @@ impl Connection {
             sort_desc: false,
             collapsed: HashSet::new(),
             view: Vec::new(),
+            last_view_build: None,
             table,
             value: None,
             value_key: None,
@@ -500,6 +506,26 @@ impl Connection {
         let anchor = self.selected_anchor();
         self.view = build_view(&self.keys, self.sort, self.sort_desc, &self.collapsed);
         self.restore_selection(anchor);
+        self.last_view_build = Some(Instant::now());
+    }
+
+    /// Rebuild the view during a progressive (foreground) scan, but at most once
+    /// per `min_interval`. A large keyspace arrives over many SCAN pages; if each
+    /// page triggered a full re-sort the cost would be quadratic in the key count
+    /// and the load would crawl. Throttling keeps the visible list updating
+    /// smoothly (~live) while bounding the total rebuild work to the scan's
+    /// wall-clock duration. The first page of a scan (`last_view_build == None`,
+    /// reset in [`Self::begin_scan`]) always rebuilds so keys appear at once; the
+    /// final page rebuilds unconditionally via [`Self::rebuild_view`] so the
+    /// finished list is always exact.
+    pub fn rebuild_view_throttled(&mut self, min_interval: Duration) {
+        let due = match self.last_view_build {
+            Some(last) => last.elapsed() >= min_interval,
+            None => true,
+        };
+        if due {
+            self.rebuild_view();
+        }
     }
 
     /// Begin a fresh keyspace scan, returning the first [`BrowseReq`] to send.
@@ -521,6 +547,9 @@ impl Connection {
         self.next_cursor = 0;
         self.scan_buf.clear();
         self.scan_live = live;
+        // A fresh scan: force the first arriving page to rebuild immediately,
+        // then throttle subsequent progressive rebuilds.
+        self.last_view_build = None;
         if live {
             // The whole result set is being replaced; drop the old selection and
             // value so nothing briefly points at a key from the previous result.
@@ -553,11 +582,14 @@ impl Connection {
         if self.scan_live {
             // Foreground: reveal keys as they load.
             self.keys.extend(page.entries);
-            self.rebuild_view();
         } else {
             // Background: stage until complete, leaving the visible list intact.
             self.scan_buf.extend(page.entries);
         }
+        // The view rebuild is deliberately *not* done here. The caller decides:
+        // a foreground scan rebuilds the view progressively but throttled (so a
+        // many-page scan isn't quadratic), and either kind rebuilds once the scan
+        // completes. See `App::on_keys_page`.
         if page.next_cursor != 0 {
             return ScanStep::Continue(BrowseReq {
                 db: self.db,
@@ -570,10 +602,10 @@ impl Connection {
         self.scanning = false;
         self.complete = true;
         if !self.scan_live {
-            // Atomically swap in the freshly scanned set, keeping the highlight
-            // on the same key/group where it still exists.
+            // Atomically swap in the freshly scanned set; the caller's
+            // completion rebuild then reflects it, keeping the highlight on the
+            // same key/group where it still exists.
             self.keys = std::mem::take(&mut self.scan_buf);
-            self.rebuild_view();
         }
         ScanStep::Done
     }

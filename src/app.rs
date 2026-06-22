@@ -11,6 +11,7 @@ pub use state::{
 };
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::widgets::{ListState, TableState};
@@ -42,6 +43,12 @@ const TICK_PERIOD_MS: u64 = 250;
 const STATS_REFRESH_TICKS: u32 = 8;
 /// How many elements of a value to fetch into the inspector at a time.
 const VALUE_LIMIT: usize = 200;
+/// Minimum wall-clock gap between progressive key-browser view rebuilds while a
+/// foreground scan streams in. A large keyspace arrives over many SCAN pages;
+/// rebuilding (a full re-sort) on every page is quadratic in the key count, so
+/// mid-scan rebuilds are coalesced to ~this cadence. The final page always
+/// rebuilds regardless, so the finished list is exact.
+const VIEW_REBUILD_INTERVAL: Duration = Duration::from_millis(100);
 /// Lines the Browser value pane scrolls per PageUp/PageDown.
 const VALUE_SCROLL_STEP: i32 = 10;
 /// Lines the Browser console band scrolls per PageUp/PageDown while focused —
@@ -317,11 +324,26 @@ impl App {
         // itself to completion by issuing the next request here (not on
         // navigation), so the full keyspace loads on its own.
         let next = match self.conn_by_id_mut(id) {
-            Some(conn) => match conn.apply_page(page, page_size) {
-                ScanStep::Stale => return, // page from a superseded scan; drop it
-                ScanStep::Continue(req) => Some(req),
-                ScanStep::Done => None,
-            },
+            Some(conn) => {
+                let step = conn.apply_page(page, page_size);
+                // `apply_page` no longer rebuilds the view itself — the cost is
+                // steered here so a many-page scan stays linear. A completed scan
+                // always rebuilds (the final list must be exact); a foreground
+                // scan rebuilds progressively but throttled; a background refresh
+                // keeps the old view until its atomic swap on completion.
+                match &step {
+                    ScanStep::Stale => return, // page from a superseded scan; drop it
+                    ScanStep::Done => conn.rebuild_view(),
+                    ScanStep::Continue(_) if conn.scan_live => {
+                        conn.rebuild_view_throttled(VIEW_REBUILD_INTERVAL)
+                    }
+                    ScanStep::Continue(_) => {}
+                }
+                match step {
+                    ScanStep::Continue(req) => Some(req),
+                    _ => None,
+                }
+            }
             None => return,
         };
         // Land the highlight on the first row as soon as there is one to show.
