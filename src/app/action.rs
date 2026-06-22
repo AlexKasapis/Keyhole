@@ -21,8 +21,12 @@ pub enum Action {
     Enter,
     /// Open the add-connection form.
     AddConnection,
+    /// Jump to the key browser of the most recently viewed connection (falling
+    /// back to the active one). Reachable from the home area's tabs.
     GotoBrowser,
-    GotoRecordings,
+    /// Delete the selected recording (Recordings tab). Needs a second
+    /// consecutive press to confirm (`dd`); any other key disarms it.
+    DeleteRecording,
     StartFilter,
     /// Cycle the Browser's bottom panel to the previous / next tab. The tabs are
     /// a fixed set (Console, Monitor, Keyspace, Pub/Sub, Tail) plus one tab per
@@ -45,8 +49,8 @@ pub enum Action {
     ToggleCollapse,
     /// Collapse or expand every group at once (Browser).
     ToggleAllGroups,
-    /// Toggle recording on the focused live-feed subpanel (Browser); rescan on
-    /// the Recordings screen. No longer refreshes the key list.
+    /// Toggle recording on the focused live-feed subpanel (Browser); rename the
+    /// selected recording on the Recordings tab. No longer refreshes the key list.
     Refresh,
     ToggleHelp,
     /// Toggle terminal mouse capture. With capture on the scroll wheel scrolls;
@@ -71,7 +75,7 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Enter) => Some(Action::Enter),
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('b')) => Some(Action::GotoBrowser),
-        (false, Char('R')) => Some(Action::GotoRecordings),
+        (false, Char('d')) => Some(Action::DeleteRecording),
         (false, Char('p')) => Some(Action::PlayPause),
         (false, Char('x')) => Some(Action::CloseTab),
         (false, Tab) => Some(Action::NextTab),
@@ -119,7 +123,7 @@ mod tests {
         assert_eq!(plain(Enter), Some(Action::Enter));
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
-        assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
+        assert_eq!(plain(Char('d')), Some(Action::DeleteRecording));
         assert_eq!(plain(Char('p')), Some(Action::PlayPause));
         assert_eq!(plain(Char('x')), Some(Action::CloseTab));
         assert_eq!(plain(Tab), Some(Action::NextTab));
@@ -141,8 +145,8 @@ mod tests {
         assert_eq!(ctrl(Char('d')), Some(Action::PageDown));
         assert_eq!(
             plain(Char('d')),
-            None,
-            "plain 'd' is unbound: the Dashboard merged into the Browser"
+            Some(Action::DeleteRecording),
+            "plain 'd' deletes a recording; Ctrl-d still pages"
         );
         assert_eq!(ctrl(Char('u')), Some(Action::PageUp));
         assert_eq!(plain(Char('u')), None, "plain 'u' is unbound");

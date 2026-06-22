@@ -7,8 +7,9 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel sc│           │
 │           │  Enter connect (Connections)   Esc step back / quit            │           │
 │           │                                                                │           │
-│           │Screens                                                         │           │
-│           │  b browser  R recordings                                       │           │
+│           │Home (Connections / Recordings tabs)                            │           │
+│           │  Tab / Shift-Tab switch tabs   b jump to last-viewed browser   │           │
+│           │  Recordings: ↑↓ select · PgUp/PgDn scroll · r rename · dd delet│           │
 │           │                                                                │           │
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │
@@ -32,6 +33,5 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │                                                                │           │
 │           │General                                                         │           │
 │           │  a add connection   ? toggle help   Esc back   Ctrl-c quit     │           │
-│           │  m toggle mouse capture (off = select/copy text)               │           │
-└───────────└────────────────────────────────────────────────────────────────┘───────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ go R recordings │ app ? help · Esc Esc quit
+└───────────│  m toggle mouse capture (off = select/copy text)               │───────────┘
+  nav ↑↓ mov└────────────────────────────────────────────────────────────────┘r │ app ? he

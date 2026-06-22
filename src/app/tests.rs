@@ -889,11 +889,12 @@ fn goto_browser_requires_active_connection() {
         Screen::Connections,
         "GotoBrowser needs a connection"
     );
-    app.apply(Action::GotoRecordings);
+    // Tab still switches to the Recordings tab even with no connection.
+    app.apply(Action::NextTab);
     assert_eq!(
         app.screen,
         Screen::Recordings,
-        "recordings is always reachable"
+        "the Recordings tab is always reachable"
     );
 }
 
@@ -901,11 +902,15 @@ fn goto_browser_requires_active_connection() {
 async fn goto_screens_switch_with_active_connection() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.apply(Action::GotoRecordings);
-    assert_eq!(app.screen, Screen::Recordings);
-    // From any screen, Esc (Back) returns to Connections.
+    // Connecting Redis lands on the Browser; Esc steps back to the home area.
     app.apply(Action::Back);
     assert_eq!(app.screen, Screen::Connections);
+    // Tab cycles the home tabs: Connections ↔ Recordings.
+    app.apply(Action::NextTab);
+    assert_eq!(app.screen, Screen::Recordings);
+    app.apply(Action::NextTab);
+    assert_eq!(app.screen, Screen::Connections);
+    // `b` jumps back into the browser of the last-viewed connection.
     app.apply(Action::GotoBrowser);
     assert_eq!(app.screen, Screen::Browser);
 }
@@ -1953,9 +1958,25 @@ fn recording_line(seq: u64, connection: &str, source: &str, payload: &str) -> St
     )
 }
 
+/// Switch to the Recordings tab pointed at a fresh temp dir holding `files`
+/// (each a `(name, body)`), returning the dir for cleanup. Built on the real
+/// Tab key path so the test exercises the home-tab switch and the scan.
+fn open_recordings(app: &mut App, tag: &str, files: &[(&str, String)]) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("keyhole-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, body) in files {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+    app.recordings_dir = dir.clone();
+    app.apply(Action::NextTab); // Connections -> Recordings, scans on entry
+    assert_eq!(app.screen, Screen::Recordings);
+    dir
+}
+
 #[test]
-fn refresh_does_not_rescan_the_recordings_list() {
-    let dir = std::env::temp_dir().join(format!("keyhole-rec-refresh-{}", std::process::id()));
+fn tab_switches_between_the_connections_and_recordings_tabs() {
+    let dir = std::env::temp_dir().join(format!("keyhole-rec-tab-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
@@ -1966,123 +1987,246 @@ fn refresh_does_not_rescan_the_recordings_list() {
 
     let (mut app, _rx) = test_app();
     app.recordings_dir = dir.clone();
-    // Entering the screen scans the directory.
-    app.apply(Action::GotoRecordings);
+    assert_eq!(app.screen, Screen::Connections);
+
+    // Tab moves to the Recordings tab and scans the directory; Shift-Tab back.
+    app.apply(Action::NextTab);
+    assert_eq!(app.screen, Screen::Recordings);
+    assert_eq!(app.recordings.len(), 1, "entering the tab scans");
+    app.apply(Action::PrevTab);
+    assert_eq!(app.screen, Screen::Connections);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn r_renames_the_selected_recording() {
+    let (mut app, _rx) = test_app();
+    let dir = open_recordings(
+        &mut app,
+        "rec-rename",
+        &[(
+            "old.jsonl",
+            format!("{}\n", recording_line(0, "c", "s", "x")),
+        )],
+    );
+
+    // `r` opens the rename editor primed with the current name.
+    app.apply(Action::Refresh);
+    assert_eq!(app.mode, InputMode::Rename);
+    assert_eq!(app.rename_buf, "old.jsonl");
+
+    // Replace the buffer with a new name and submit.
+    app.rename_buf = "new".into();
+    app.submit_rename();
+    assert_eq!(app.mode, InputMode::Normal);
+    // The `.jsonl` extension is appended automatically and the file moved.
+    assert!(dir.join("new.jsonl").exists(), "renamed file exists");
+    assert!(!dir.join("old.jsonl").exists(), "old name is gone");
+    assert_eq!(app.recordings.len(), 1);
+    assert_eq!(app.recordings[0].name, "new.jsonl");
+    // The highlight follows the renamed file.
+    assert_eq!(
+        app.recording_view.as_ref().unwrap().0,
+        "new.jsonl",
+        "the viewer tracks the renamed file"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rename_rejects_path_separators_and_collisions() {
+    let (mut app, _rx) = test_app();
+    let dir = open_recordings(
+        &mut app,
+        "rec-rename-bad",
+        &[
+            ("a.jsonl", format!("{}\n", recording_line(0, "c", "s", "x"))),
+            ("b.jsonl", format!("{}\n", recording_line(0, "c", "s", "y"))),
+        ],
+    );
+    // Newest-first ordering is by mtime; select a known file by name instead.
+    let a_idx = app
+        .recordings
+        .iter()
+        .position(|f| f.name == "a.jsonl")
+        .unwrap();
+    app.recordings_state.select(Some(a_idx));
+    app.load_recording_view();
+
+    // A path separator is refused; the file is untouched.
+    app.start_rename();
+    app.rename_buf = "../escape".into();
+    app.submit_rename();
+    assert!(
+        dir.join("a.jsonl").exists(),
+        "rename with a separator is refused"
+    );
+
+    // Renaming onto an existing name is refused.
+    app.start_rename();
+    app.rename_buf = "b".into();
+    app.submit_rename();
+    assert!(dir.join("a.jsonl").exists(), "a.jsonl still present");
+    assert!(dir.join("b.jsonl").exists(), "b.jsonl not clobbered");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn double_d_deletes_the_selected_recording() {
+    let (mut app, _rx) = test_app();
+    let dir = open_recordings(
+        &mut app,
+        "rec-delete",
+        &[
+            ("a.jsonl", format!("{}\n", recording_line(0, "c", "s", "x"))),
+            ("b.jsonl", format!("{}\n", recording_line(0, "c", "s", "y"))),
+        ],
+    );
+    let target = app.recordings[0].name.clone();
+
+    // A single `d` only arms the confirmation — nothing is deleted yet.
+    app.apply(Action::DeleteRecording);
+    assert!(app.recordings_delete_armed, "first d arms the confirmation");
+    assert_eq!(app.recordings.len(), 2, "nothing deleted on the first d");
+
+    // A second consecutive `d` deletes and rescans.
+    app.apply(Action::DeleteRecording);
+    assert!(!app.recordings_delete_armed, "delete disarms after firing");
+    assert!(!dir.join(&target).exists(), "the file is removed");
     assert_eq!(app.recordings.len(), 1);
 
-    // A new file appears, then `r` is pressed. Rescan was removed on this
-    // screen, so the list must not pick the new file up.
-    std::fs::write(
-        dir.join("b.jsonl"),
-        format!("{}\n", recording_line(0, "c", "s", "y")),
-    )
-    .unwrap();
-    app.apply(Action::Refresh);
-    assert_eq!(
-        app.recordings.len(),
-        1,
-        "`r` no longer rescans the recordings list"
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn intervening_input_disarms_the_recording_delete() {
+    let (mut app, _rx) = test_app();
+    let dir = open_recordings(
+        &mut app,
+        "rec-delete-disarm",
+        &[
+            ("a.jsonl", format!("{}\n", recording_line(0, "c", "s", "x"))),
+            ("b.jsonl", format!("{}\n", recording_line(0, "c", "s", "y"))),
+        ],
     );
+
+    app.apply(Action::DeleteRecording); // arm
+    assert!(app.recordings_delete_armed);
+    app.apply(Action::Down); // any other input disarms
+    assert!(!app.recordings_delete_armed);
+    app.apply(Action::DeleteRecording); // re-arms rather than deleting
+    assert_eq!(app.recordings.len(), 2, "no delete after disarm");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn goto_browser_is_blocked_from_the_recordings_screen() {
+async fn b_jumps_to_the_last_viewed_browser() {
     let (mut app, _rx) = test_app();
-    // A Redis connection can browse, so only the screen guard keeps `b` from
-    // leaving the Recordings screen.
+    // Two live Redis connections; the most recently focused is "two".
+    connect(&mut app, 1, "one", 16).await;
+    connect(&mut app, 2, "two", 16).await;
+    let two = app.active_conn().unwrap().id;
+    // Step back to the home area, then `b` returns to the last-viewed browser.
+    app.apply(Action::Back);
+    assert_eq!(app.screen, Screen::Connections);
+    app.apply(Action::GotoBrowser);
+    assert_eq!(app.screen, Screen::Browser);
+    assert_eq!(
+        app.active_conn().unwrap().id,
+        two,
+        "`b` lands on the last-viewed browser"
+    );
+}
+
+#[tokio::test]
+async fn b_works_from_the_recordings_tab() {
+    let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    app.screen = Screen::Recordings;
+    app.apply(Action::Back); // Browser -> Connections
+    app.apply(Action::NextTab); // -> Recordings tab
+    assert_eq!(app.screen, Screen::Recordings);
+    // `b` now jumps to the browser from the Recordings tab too.
     app.apply(Action::GotoBrowser);
     assert_eq!(
         app.screen,
-        Screen::Recordings,
-        "`b` does not leave the Recordings screen"
+        Screen::Browser,
+        "`b` reaches the browser from the Recordings tab"
     );
 }
 
 #[test]
-fn recordings_preview_loads_for_the_selected_file() {
-    let dir = std::env::temp_dir().join(format!("keyhole-rec-preview-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("only.jsonl"),
-        format!(
-            "{}\n{}\n",
-            recording_line(0, "prod", "news", "hello"),
-            recording_line(1, "prod", "news", "world"),
-        ),
-    )
-    .unwrap();
-
+fn recordings_view_loads_for_the_selected_file() {
     let (mut app, _rx) = test_app();
-    app.recordings_dir = dir.clone();
-    app.apply(Action::GotoRecordings);
+    let dir = open_recordings(
+        &mut app,
+        "rec-view",
+        &[(
+            "only.jsonl",
+            format!(
+                "{}\n{}\n",
+                recording_line(0, "prod", "news", "hello"),
+                recording_line(1, "prod", "news", "world"),
+            ),
+        )],
+    );
 
-    let (name, preview) = app
-        .recording_preview
+    let (name, view) = app
+        .recording_view
         .as_ref()
-        .expect("preview loads on entering the screen");
+        .expect("view loads on entering the tab");
     assert_eq!(name, &app.recordings[0].name);
-    assert_eq!(preview.connection.as_deref(), Some("prod"));
-    assert_eq!(preview.source_type.as_deref(), Some("pubsub"));
-    assert_eq!(preview.records.len(), 2);
-    assert_eq!(preview.records[0].payload, "hello");
+    assert_eq!(view.connection.as_deref(), Some("prod"));
+    assert_eq!(view.source_type.as_deref(), Some("pubsub"));
+    assert_eq!(view.records.len(), 2);
+    assert_eq!(view.records[0].payload, "hello");
+    // Record times carry millisecond precision.
+    assert_eq!(view.records[0].time, "09:08:07.000");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn recordings_preview_follows_the_selection() {
-    let dir = std::env::temp_dir().join(format!("keyhole-rec-nav-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("a.jsonl"),
-        format!("{}\n", recording_line(0, "a", "s", "p")),
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("b.jsonl"),
-        format!("{}\n", recording_line(0, "b", "s", "p")),
-    )
-    .unwrap();
-
+fn recordings_view_follows_the_selection_and_resets_scroll() {
     let (mut app, _rx) = test_app();
-    app.recordings_dir = dir.clone();
-    app.apply(Action::GotoRecordings);
+    let dir = open_recordings(
+        &mut app,
+        "rec-nav",
+        &[
+            ("a.jsonl", format!("{}\n", recording_line(0, "a", "s", "p"))),
+            ("b.jsonl", format!("{}\n", recording_line(0, "b", "s", "p"))),
+        ],
+    );
     assert_eq!(app.recordings.len(), 2);
     assert_eq!(
-        app.recording_preview.as_ref().unwrap().0,
+        app.recording_view.as_ref().unwrap().0,
         app.recordings[0].name
     );
-
-    // Moving the highlight reloads the preview for the newly-selected file.
+    // Scroll the viewer, then move the selection — scroll resets to the top.
+    app.scroll_recording(20);
+    assert!(app.recordings_scroll > 0);
     app.apply(Action::Down);
     assert_eq!(
-        app.recording_preview.as_ref().unwrap().0,
+        app.recording_view.as_ref().unwrap().0,
         app.recordings[1].name,
-        "the preview tracks the selected recording"
+        "the viewer tracks the selected recording"
+    );
+    assert_eq!(
+        app.recordings_scroll, 0,
+        "a new recording resets the scroll"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn recordings_preview_is_cleared_when_there_are_no_recordings() {
-    let dir = std::env::temp_dir().join(format!("keyhole-rec-none-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-
+fn recordings_view_is_cleared_when_there_are_no_recordings() {
     let (mut app, _rx) = test_app();
-    app.recordings_dir = dir.clone();
-    app.apply(Action::GotoRecordings);
-    assert!(
-        app.recording_preview.is_none(),
-        "no recordings -> no preview"
-    );
+    let dir = open_recordings(&mut app, "rec-none", &[]);
+    assert!(app.recording_view.is_none(), "no recordings -> no view");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

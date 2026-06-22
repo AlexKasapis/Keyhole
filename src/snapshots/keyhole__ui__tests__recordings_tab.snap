@@ -1,0 +1,18 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 100, 14)"
+---
+ no connection  · recordings                                               ○ offline   12:34:56 UTC
+┌ Connections │ Recordings ────────────────────────────────────────────────────────────────────────┐
+│▶ prod-pubsub-o…   4.0 KiB  2026-06-19 09:08│ prod-pubsub-orders-20260619-090807.jsonl            │
+│                                            │ pubsub · prod                                       │
+│                                            │ 2 records · 4.0 KiB · 2026-06-19 09:08              │
+│                                            │                                                     │
+│                                            │ #0    09:08:07.123 orders  first event              │
+│                                            │ #1    09:08:07.456 orders  second event             │
+│                                            │                                                     │
+│                                            │                                                     │
+│                                            │                                                     │
+│                                            │                                                     │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+  nav ↑↓ move · PgUp/PgDn scroll │ file r rename · dd delete │ tabs Tab connections │ go b browser │

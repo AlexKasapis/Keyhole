@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: "render_lines(&mut app, 90, 16)"
 ---
  no connection  · connections                                    ○ offline   12:34:56 UTC
-┌ Connections ───────────────────────────────────────────────────────────────────────────┐
+┌ Connections │ Recordings ──────────────────────────────────────────────────────────────┐
 │                                                                                        │
 │                                  No saved connections.                                 │
 │                                                                                        │
@@ -17,4 +17,4 @@ expression: "render_lines(&mut app, 90, 16)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ go R recordings │ app ? help · Esc Esc quit
+  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app ? he

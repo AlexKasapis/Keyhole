@@ -41,6 +41,8 @@ pub enum InputMode {
     Subscribe,
     /// Typing a command in the read-only console.
     Command,
+    /// Editing the name of the selected recording on the Recordings tab.
+    Rename,
 }
 
 /// One tab in the Browser's bottom panel. The first five are fixed and always

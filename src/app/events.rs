@@ -98,6 +98,8 @@ impl App {
         self.connections.push(conn);
         self.active = Some(self.connections.len() - 1);
         self.screen = initial_screen(&caps);
+        // A freshly-focused browser becomes the `b` target.
+        self.note_browser_view();
         // The header's green connection dot now signals "connected" — and the
         // active-connection label is shown there too — so no transient footer
         // message is needed for the success case (errors still surface there).
@@ -116,6 +118,10 @@ impl App {
             let name = self.connections[idx].name.clone();
             self.connections[idx].handle.shutdown();
             self.connections.remove(idx);
+            // Forget a dropped connection as the `b` target.
+            if self.last_browser == Some(id) {
+                self.last_browser = None;
+            }
             self.active = if self.connections.is_empty() {
                 None
             } else {

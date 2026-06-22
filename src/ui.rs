@@ -27,9 +27,10 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
     render_header(frame, app, &theme, header_area);
     match app.screen {
-        Screen::Connections => views::connections(frame, app, &theme, body_area),
+        // Connections and Recordings are two tabs of one merged home area,
+        // drawn as a single bordered box whose title is the tab strip.
+        Screen::Connections | Screen::Recordings => views::home(frame, app, &theme, body_area),
         Screen::Browser => views::browser(frame, app, &theme, body_area),
-        Screen::Recordings => views::recordings(frame, app, &theme, body_area),
     }
     render_footer(frame, app, &theme, footer_area);
 
@@ -142,6 +143,14 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 area,
             );
         }
+        InputMode::Rename => {
+            let line = Line::from(vec![
+                Span::styled(" rename ", theme.accent),
+                Span::raw(format!("{}▏", app.rename_buf)),
+                Span::styled("   Enter save · Esc cancel", theme.dim),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
         InputMode::Subscribe => {
             // The accepted source specs depend on the active broker, so the
             // prompt's hint follows its kind (falling back to Redis if somehow
@@ -211,7 +220,8 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
         Screen::Connections => owned(&[
             ("nav", "↑↓ move"),
             ("conn", "Enter connect · a add"),
-            ("go", "R recordings"),
+            ("tabs", "Tab recordings"),
+            ("go", "b browser"),
             ("app", "? help · Esc Esc quit"),
         ]),
         // Keys are always grouped by prefix, so the footer always offers the
@@ -240,11 +250,16 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     "panel",
                     "Tab tabs · p play/pause · r rec · x close".to_string(),
                 ),
-                ("go", "R recordings".to_string()),
                 ("app", "? help · Esc back".to_string()),
             ]
         }
-        Screen::Recordings => owned(&[("nav", "↑↓ move"), ("app", "? help · Esc back")]),
+        Screen::Recordings => owned(&[
+            ("nav", "↑↓ move · PgUp/PgDn scroll"),
+            ("file", "r rename · dd delete"),
+            ("tabs", "Tab connections"),
+            ("go", "b browser"),
+            ("app", "? help · Esc back"),
+        ]),
     }
 }
 
@@ -460,40 +475,45 @@ mod tests {
             );
         }
 
-        // The cross-screen jumps the palette used to provide now live in a "go"
-        // group on the screens that still navigate onward. The Recordings screen
-        // only steps back (Esc), so it offers neither a "go" group nor a rescan.
-        let expected_go = [
-            (Screen::Connections, vec!["recordings"]),
-            (Screen::Browser, vec!["recordings"]),
+        // Both home-area tabs offer the `b` jump to the browser in a "go" group
+        // and the Tab tab-switch in a "tabs" group. The Browser steps back with
+        // Esc, so it carries neither.
+        let expected = [
+            (Screen::Connections, "b browser", "recordings"),
+            (Screen::Recordings, "b browser", "connections"),
         ];
-        for (screen, targets) in expected_go {
+        for (screen, go_key, tab_target) in expected {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             let sections = hint_sections(&app);
-            let go = sections
-                .iter()
-                .find(|(label, _)| *label == "go")
-                .map(|(_, keys)| keys.as_str())
+            let group = |label: &str| {
+                sections
+                    .iter()
+                    .find(|(l, _)| *l == label)
+                    .map(|(_, keys)| keys.clone())
+            };
+            let go = group("go")
                 .unwrap_or_else(|| panic!("{screen:?} footer has no 'go' navigation group"));
-            for target in targets {
-                assert!(
-                    go.contains(target),
-                    "{screen:?} 'go' group should offer {target:?}: {go:?}"
-                );
-            }
+            assert!(
+                go.contains(go_key),
+                "{screen:?} 'go' group should offer {go_key:?}: {go:?}"
+            );
+            let tabs =
+                group("tabs").unwrap_or_else(|| panic!("{screen:?} footer has no 'tabs' group"));
+            assert!(
+                tabs.contains(tab_target),
+                "{screen:?} 'tabs' group should switch to {tab_target:?}: {tabs:?}"
+            );
         }
 
+        // The Browser footer no longer advertises a cross-screen jump (the `R`
+        // recordings keybind is gone; Esc backs out to the home area).
         let (mut app, _rx) = test_app();
-        app.screen = Screen::Recordings;
-        let recordings = hint_sections(&app);
+        app.screen = Screen::Browser;
+        let browser = hint_sections(&app);
         assert!(
-            !recordings.iter().any(|(label, _)| *label == "go"),
-            "Recordings footer must not offer a 'go' group: {recordings:?}"
-        );
-        assert!(
-            !recordings.iter().any(|(_, keys)| keys.contains("rescan")),
-            "Recordings footer must not advertise a rescan: {recordings:?}"
+            !browser.iter().any(|(label, _)| *label == "go"),
+            "Browser footer must not offer a 'go' group: {browser:?}"
         );
     }
 
@@ -1062,9 +1082,10 @@ mod tests {
     }
 
     #[test]
-    fn recordings_screen_renders_list_and_preview_panes() {
-        use crate::recording::{PreviewRecord, RecordingPreview};
+    fn recordings_tab_renders_list_and_viewer_panes() {
+        use crate::recording::{RecordingView, ViewRecord};
         let (mut app, _rx) = test_app();
+        // The Recordings tab is part of the merged home area, reached with Tab.
         app.screen = Screen::Recordings;
         app.recordings = vec![crate::app::RecordingFile {
             name: "prod-pubsub-news-20260619-090807.jsonl".into(),
@@ -1072,28 +1093,36 @@ mod tests {
             modified: None,
         }];
         app.recordings_state.select(Some(0));
-        app.recording_preview = Some((
+        app.recording_view = Some((
             "prod-pubsub-news-20260619-090807.jsonl".into(),
-            RecordingPreview {
+            RecordingView {
                 connection: Some("prod".into()),
                 source_type: Some("pubsub".into()),
-                records: vec![PreviewRecord {
+                records: vec![ViewRecord {
                     seq: 0,
-                    time: "09:08:07".into(),
+                    time: "09:08:07.000".into(),
                     source: "news".into(),
                     payload: "hello world".into(),
                 }],
-                truncated: false,
                 error: None,
             },
         ));
         let text = render_lines(&mut app, 120, 16);
-        assert!(text.contains("Recordings"), "the list pane is titled");
-        assert!(text.contains("Preview"), "the preview pane is titled");
-        assert!(text.contains("pubsub"), "the preview shows the source type");
+        // The home box's tab strip carries both tab labels, Recordings active.
+        assert!(
+            text.contains("Connections"),
+            "the tab strip lists both tabs"
+        );
+        assert!(text.contains("Recordings"), "the Recordings tab is shown");
+        assert!(text.contains("pubsub"), "the viewer shows the source type");
         assert!(
             text.contains("hello world"),
-            "the preview shows the record payload: {text:?}"
+            "the viewer shows the record payload: {text:?}"
+        );
+        // Exact count, never a "1000+" estimate.
+        assert!(
+            text.contains("1 record"),
+            "the viewer shows the exact count"
         );
     }
 
@@ -1107,6 +1136,47 @@ mod tests {
         let (mut app, _rx) = test_app();
         pin_clock(&mut app);
         insta::assert_snapshot!("connections_empty", render_lines(&mut app, 90, 16));
+    }
+
+    #[test]
+    fn snapshot_recordings_tab() {
+        // The Recordings tab of the merged home area: the single-frame tab strip
+        // (Recordings active), the borderless file list, and the scrollable
+        // viewer ruled off by a left border, with an exact record count and
+        // millisecond record times.
+        use crate::recording::{RecordingView, ViewRecord};
+        let (mut app, _rx) = test_app();
+        pin_clock(&mut app);
+        app.screen = Screen::Recordings;
+        app.recordings = vec![crate::app::RecordingFile {
+            name: "prod-pubsub-orders-20260619-090807.jsonl".into(),
+            size: 4096,
+            modified: Some(time::macros::datetime!(2026 - 06 - 19 09:08:07 UTC)),
+        }];
+        app.recordings_state.select(Some(0));
+        app.recording_view = Some((
+            "prod-pubsub-orders-20260619-090807.jsonl".into(),
+            RecordingView {
+                connection: Some("prod".into()),
+                source_type: Some("pubsub".into()),
+                records: vec![
+                    ViewRecord {
+                        seq: 0,
+                        time: "09:08:07.123".into(),
+                        source: "orders".into(),
+                        payload: "first event".into(),
+                    },
+                    ViewRecord {
+                        seq: 1,
+                        time: "09:08:07.456".into(),
+                        source: "orders".into(),
+                        payload: "second event".into(),
+                    },
+                ],
+                error: None,
+            },
+        ));
+        insta::assert_snapshot!("recordings_tab", render_lines(&mut app, 100, 14));
     }
 
     #[tokio::test]

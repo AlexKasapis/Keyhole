@@ -39,7 +39,7 @@ use crate::broker::{
 };
 use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;
-use crate::recording::{self, RecordingPreview, RecordingStatus};
+use crate::recording::{self, RecordingStatus, RecordingView};
 use crate::theme::Theme;
 
 /// Nominal period of one UI tick, mirroring `crate::TICK_PERIOD`. Used to turn
@@ -109,14 +109,29 @@ pub struct App {
     pub(crate) mouse_capture: bool,
     pub(crate) recordings: Vec<RecordingFile>,
     pub(crate) recordings_state: ListState,
-    /// Cached preview of the selected recording: `(file name, parsed head)`.
+    /// Loaded view of the selected recording: `(file name, parsed records)`.
     /// Reloaded only when the selection lands on a different file, so it is
-    /// cheap to refresh after every navigation step.
-    pub(crate) recording_preview: Option<(String, RecordingPreview)>,
+    /// cheap to refresh after every navigation step. Unlike a bounded preview,
+    /// this holds the whole file so the viewer scrolls every record.
+    pub(crate) recording_view: Option<(String, RecordingView)>,
+    /// Vertical scroll offset (logical lines from the top) of the recording
+    /// viewer pane. Reset to `0` whenever the selected recording changes.
+    pub(crate) recordings_scroll: u16,
+    /// The recording-name buffer being edited in [`InputMode::Rename`], primed
+    /// with the current name when rename starts.
+    pub(crate) rename_buf: String,
+    /// Set after a first `d` on the Recordings tab: a second consecutive `d`
+    /// deletes the selected recording; any other key disarms it.
+    pub(crate) recordings_delete_armed: bool,
     pub(crate) now: OffsetDateTime,
     /// Set when a quit was requested from the home screen but not yet
     /// confirmed: closing the app needs a second consecutive Esc.
     quit_armed: bool,
+    /// The connection whose key browser was viewed most recently. `b` jumps
+    /// back to it (so with several brokers open it lands on the last one
+    /// browsed), falling back to the active connection. Cleared when that
+    /// connection drops. See [`Self::goto_browser`].
+    last_browser: Option<ConnId>,
 }
 
 impl App {
@@ -173,9 +188,13 @@ impl App {
             mouse_capture: true,
             recordings: Vec::new(),
             recordings_state: ListState::default(),
-            recording_preview: None,
+            recording_view: None,
+            recordings_scroll: 0,
+            rename_buf: String::new(),
+            recordings_delete_armed: false,
             now: OffsetDateTime::now_utc(),
             quit_armed: false,
+            last_browser: None,
         }
     }
 
@@ -236,6 +255,15 @@ impl App {
 
     fn conn_by_id_mut(&mut self, id: ConnId) -> Option<&mut Connection> {
         self.connections.iter_mut().find(|c| c.id == id)
+    }
+
+    /// Remember the active connection as the most recently viewed browser when
+    /// the Browser screen is showing, so `b` can return to it later (see
+    /// [`Self::goto_browser`]). A no-op off the Browser.
+    fn note_browser_view(&mut self) {
+        if self.screen == Screen::Browser {
+            self.last_browser = self.active_id();
+        }
     }
 
     fn set_status(&mut self, message: String, is_error: bool) {

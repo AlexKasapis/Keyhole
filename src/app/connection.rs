@@ -20,6 +20,7 @@ impl App {
         {
             self.active = Some(idx);
             self.screen = initial_screen(&self.connections[idx].caps);
+            self.note_browser_view();
             return;
         }
         self.start_connect(profile, None);

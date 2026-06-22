@@ -32,6 +32,22 @@ impl App {
             InputMode::Form => self.handle_form_key(key),
             InputMode::Subscribe => self.handle_subscribe_key(key),
             InputMode::Command => self.handle_command_key(key),
+            InputMode::Rename => self.handle_rename_key(key),
+        }
+    }
+
+    pub(super) fn handle_rename_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.mode = InputMode::Normal;
+                self.rename_buf.clear();
+            }
+            KeyCode::Enter => self.submit_rename(),
+            KeyCode::Char(c) => self.rename_buf.push(c),
+            KeyCode::Backspace => {
+                self.rename_buf.pop();
+            }
+            _ => {}
         }
     }
 
@@ -40,6 +56,11 @@ impl App {
         // confirmation (see `Action::Back`).
         if action != Action::Back {
             self.quit_armed = false;
+        }
+        // Likewise, any input other than a repeated `d` cancels a pending
+        // recording-delete confirmation (see `Action::DeleteRecording`).
+        if action != Action::DeleteRecording {
+            self.recordings_delete_armed = false;
         }
         match action {
             Action::Quit => self.running = false,
@@ -68,23 +89,19 @@ impl App {
             }
             Action::Up => self.nav(-1),
             Action::Down => self.nav(1),
-            // In the Browser these page the focused value pane (the key list
-            // still has ↑↓ / g / G / n); on every other screen they page the
-            // focused list.
-            Action::PageUp => {
-                if self.screen == Screen::Browser {
-                    self.scroll_value(-VALUE_SCROLL_STEP);
-                } else {
-                    self.nav(-10);
-                }
-            }
-            Action::PageDown => {
-                if self.screen == Screen::Browser {
-                    self.scroll_value(VALUE_SCROLL_STEP);
-                } else {
-                    self.nav(10);
-                }
-            }
+            // In the Browser these page the focused value pane and on the
+            // Recordings tab the focused recording viewer (both list-navigated
+            // with ↑↓ / g / G); on the Connections tab they page the list.
+            Action::PageUp => match self.screen {
+                Screen::Browser => self.scroll_value(-VALUE_SCROLL_STEP),
+                Screen::Recordings => self.scroll_recording(-VALUE_SCROLL_STEP),
+                Screen::Connections => self.nav(-10),
+            },
+            Action::PageDown => match self.screen {
+                Screen::Browser => self.scroll_value(VALUE_SCROLL_STEP),
+                Screen::Recordings => self.scroll_recording(VALUE_SCROLL_STEP),
+                Screen::Connections => self.nav(10),
+            },
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
             Action::Enter => match self.screen {
@@ -97,28 +114,15 @@ impl App {
                 self.form = Some(ConnForm::new());
                 self.mode = InputMode::Form;
             }
-            // Reachable from Connections; a no-op from the Recordings screen,
-            // which only steps back to Connections.
-            Action::GotoBrowser if self.screen != Screen::Recordings => {
-                match self.active_conn().map(|c| c.caps.can_browse) {
-                    Some(true) => {
-                        self.screen = Screen::Browser;
-                        // Reconcile the panel (mode + focused feed) on entry.
-                        self.sync_panel_focus();
-                    }
-                    Some(false) => {
-                        self.set_status("this broker has no key browser".to_string(), true)
-                    }
-                    None => {}
+            // `b` jumps to the most recently viewed browser (falling back to the
+            // active connection); reachable from either home-area tab.
+            Action::GotoBrowser => self.goto_browser(),
+            // `d` deletes the selected recording on the Recordings tab, after a
+            // confirming second press; a no-op elsewhere.
+            Action::DeleteRecording => {
+                if self.screen == Screen::Recordings {
+                    self.confirm_delete_recording();
                 }
-            }
-            Action::GotoBrowser => {}
-            Action::GotoRecordings => {
-                // Leaving the Browser unfocuses the panel.
-                self.stop_focus_feeds();
-                self.mode = InputMode::Normal;
-                self.screen = Screen::Recordings;
-                self.scan_recordings();
             }
             Action::StartFilter => {
                 if self.screen == Screen::Browser && self.active.is_some() {
@@ -126,11 +130,18 @@ impl App {
                     self.mode = InputMode::Filter;
                 }
             }
-            // Tab / Shift-Tab cycle the Browser's bottom-panel tabs — the only
-            // way to move between them. Each cycle also starts/stops the
-            // focus-scoped MONITOR/keyspace feeds and sets the focused tab's mode.
-            Action::PrevTab => self.cycle_panel(-1),
-            Action::NextTab => self.cycle_panel(1),
+            // Tab / Shift-Tab move between tabs: in the Browser they cycle the
+            // bottom-panel tabs (also starting/stopping the focus-scoped
+            // MONITOR/keyspace feeds and setting the focused tab's mode); in the
+            // home area they switch between the Connections and Recordings tabs.
+            Action::PrevTab => match self.screen {
+                Screen::Browser => self.cycle_panel(-1),
+                Screen::Connections | Screen::Recordings => self.switch_home_tab(),
+            },
+            Action::NextTab => match self.screen {
+                Screen::Browser => self.cycle_panel(1),
+                Screen::Connections | Screen::Recordings => self.switch_home_tab(),
+            },
             // `p` freezes/resumes the focused live feed's view.
             Action::PlayPause => self.toggle_play_pause(),
             // `x` closes the focused pub/sub or stream tab (the fixed tabs stay).
@@ -161,16 +172,14 @@ impl App {
                 "toggled all groups".to_string()
             }),
             Action::ToggleCollapse => self.toggle_selected_group(),
-            // `r` on the Browser toggles recording for the focused live feed,
-            // and only there — it is a no-op on the Console / Pub/Sub / Tail
-            // anchors (no feed to record). Manual key-list refresh was dropped;
-            // the keyspace auto-refreshes on its own timer. It does nothing on
-            // the other screens — the Recordings list (re)scans on entry.
-            Action::Refresh => {
-                if self.screen == Screen::Browser {
-                    self.toggle_recording();
-                }
-            }
+            // `r` on the Browser toggles recording for the focused live feed
+            // (a no-op on the Console / Pub/Sub / Tail anchors — no feed to
+            // record); on the Recordings tab it renames the selected recording.
+            Action::Refresh => match self.screen {
+                Screen::Browser => self.toggle_recording(),
+                Screen::Recordings => self.start_rename(),
+                Screen::Connections => {}
+            },
             Action::ToggleHelp => self.show_help = !self.show_help,
             // Flip the desired capture state and report it; the render loop
             // applies the change to the real terminal (keeping terminal I/O out
@@ -313,7 +322,7 @@ impl App {
                 let len = self.recordings.len();
                 let next = move_selection(self.recordings_state.selected(), len, delta);
                 self.recordings_state.select(next);
-                self.load_recording_preview();
+                self.load_recording_view();
             }
         }
     }
@@ -347,7 +356,7 @@ impl App {
                     self.recordings_state
                         .select(Some(if top { 0 } else { len - 1 }));
                 }
-                self.load_recording_preview();
+                self.load_recording_view();
             }
         }
     }
@@ -360,6 +369,14 @@ impl App {
             let next = conn.inspector.value_scroll as i32 + delta;
             conn.inspector.value_scroll = next.clamp(0, u16::MAX as i32) as u16;
         }
+    }
+
+    /// Scroll the Recordings viewer pane by `delta` logical lines (negative =
+    /// up). Clamped against the content height when rendered, so an over-scroll
+    /// just rests at the bottom.
+    pub(super) fn scroll_recording(&mut self, delta: i32) {
+        let next = self.recordings_scroll as i32 + delta;
+        self.recordings_scroll = next.clamp(0, u16::MAX as i32) as u16;
     }
 
     pub(super) fn change_db(&mut self, delta: i32) {
@@ -407,5 +424,66 @@ impl App {
         if let Some(conn) = self.active_conn_mut() {
             conn.toggle_selected_group();
         }
+    }
+
+    /// Jump to a connection's key browser. Prefers the most recently viewed
+    /// browser ([`Self::last_browser`]) so that with several brokers open `b`
+    /// lands on the last one browsed; falls back to the active connection. A
+    /// no-op (with an explanatory status when a connection exists but can't
+    /// browse) otherwise.
+    pub(super) fn goto_browser(&mut self) {
+        let target = self
+            .last_browser
+            .filter(|id| self.conn_by_id(*id).is_some_and(|c| c.caps.can_browse))
+            .or_else(|| {
+                self.active_conn()
+                    .filter(|c| c.caps.can_browse)
+                    .map(|c| c.id)
+            });
+        match target {
+            Some(id) => {
+                self.active = self.connections.iter().position(|c| c.id == id);
+                self.last_browser = Some(id);
+                self.screen = Screen::Browser;
+                // Reconcile the panel (mode + focused feed) on entry.
+                self.sync_panel_focus();
+            }
+            // A live but non-browsable broker (e.g. AMQP) earns a hint; with no
+            // connection at all there is simply nothing to do.
+            None if self.active_conn().is_some() => {
+                self.set_status("this broker has no key browser".to_string(), true);
+            }
+            None => {}
+        }
+    }
+
+    /// Switch between the two home-area tabs (Connections ↔ Recordings). Cycled
+    /// with Tab / Shift-Tab; entering Recordings (re)scans the directory.
+    pub(super) fn switch_home_tab(&mut self) {
+        match self.screen {
+            Screen::Connections => self.enter_recordings_tab(),
+            Screen::Recordings => {
+                self.leave_recordings_tab();
+                self.screen = Screen::Connections;
+            }
+            Screen::Browser => {}
+        }
+    }
+
+    /// Enter the Recordings tab: scan the directory afresh and reset its
+    /// transient edit state.
+    pub(super) fn enter_recordings_tab(&mut self) {
+        self.mode = InputMode::Normal;
+        self.recordings_delete_armed = false;
+        self.rename_buf.clear();
+        self.screen = Screen::Recordings;
+        self.scan_recordings();
+    }
+
+    /// Leave the Recordings tab: drop any in-progress rename / delete-arm.
+    fn leave_recordings_tab(&mut self) {
+        self.mode = InputMode::Normal;
+        self.recordings_delete_armed = false;
+        self.rename_buf.clear();
     }
 }
