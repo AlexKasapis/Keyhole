@@ -665,7 +665,11 @@ fn console_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &T
             Span::styled(format!("running {pending}"), theme.dim),
         ])
     } else {
-        let cursor = if mode == InputMode::Command { "▏" } else { "" };
+        let cursor = if mode == InputMode::Command {
+            "▏"
+        } else {
+            ""
+        };
         Line::from(vec![
             Span::styled("❯ ", theme.accent),
             Span::raw(format!("{}{cursor}", console.input)),

@@ -508,8 +508,10 @@ impl App {
             // `i` focuses the Browser's console band to type a command (only on
             // the Browser, and only for brokers that have a console).
             Action::ConsoleEdit => {
-                let has_console =
-                    self.active_conn().map(|c| c.caps.can_console).unwrap_or(false);
+                let has_console = self
+                    .active_conn()
+                    .map(|c| c.caps.can_console)
+                    .unwrap_or(false);
                 if self.screen == Screen::Browser && has_console {
                     self.enter_command_mode();
                 }
@@ -2884,7 +2886,11 @@ mod tests {
         // No connection: `i` is inert.
         app.screen = Screen::Browser;
         app.apply(Action::ConsoleEdit);
-        assert_eq!(app.mode, InputMode::Normal, "no connection → no command mode");
+        assert_eq!(
+            app.mode,
+            InputMode::Normal,
+            "no connection → no command mode"
+        );
 
         connect(&mut app, 1, "prod", 16).await;
         // Console-capable, but not on the Browser screen: still inert.
@@ -3006,7 +3012,6 @@ mod tests {
         app.handle_key(key(KeyCode::PageDown)); // clamped at the bottom
         assert_eq!(app.connections[0].console.scroll, 0);
     }
-
 
     // -- command palette -----------------------------------------------------
 
