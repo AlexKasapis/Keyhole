@@ -40,8 +40,6 @@ pub enum InputMode {
     Subscribe,
     /// Typing a command in the read-only console.
     Command,
-    /// Filtering the command palette.
-    Palette,
 }
 
 /// A transient status-bar message.
@@ -204,13 +202,6 @@ impl Console {
             self.input.clear();
         }
     }
-}
-
-/// Command-palette overlay state: a fuzzy/substring filter over the action list.
-#[derive(Default)]
-pub struct PaletteState {
-    pub query: String,
-    pub selected: usize,
 }
 
 /// The column the key browser is ordered by.

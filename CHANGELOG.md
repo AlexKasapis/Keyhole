@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Command palette (`:`). Every action it launched is reachable directly by its
+  own key binding; the per-screen footer and the help overlay (`?`) list them.
+
 ## [0.1.0]
 
 Initial release.

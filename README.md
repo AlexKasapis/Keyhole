@@ -63,7 +63,8 @@ brokers that support it.
 
 ### Interface & polish
 
-- **Command palette** — fuzzy/substring launcher for every action.
+- **Single-key actions** — every action has a direct key binding, surfaced in
+  the per-screen footer and the help overlay (`?`).
 - **Help overlay**, sidebar connection/keyspace tree, and **mouse** support
   (scroll wheel).
 - **Theming** — `dark`/`light` base plus per-style colour overrides in config;
@@ -129,7 +130,8 @@ just run            # cargo run
 ```
 
 Press `Esc` to go back (Browser → Connections → quit), or `Ctrl-C` to quit
-outright from anywhere. Open the command palette to reach any action.
+outright from anywhere. The footer lists the keys for the current screen, and
+`?` opens a full help overlay.
 Logs are written to `~/.local/share/keyhole/logs/`.
 
 ## Development

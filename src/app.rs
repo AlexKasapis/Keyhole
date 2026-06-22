@@ -6,8 +6,8 @@ mod action;
 mod state;
 
 pub use state::{
-    ConnForm, Connection, Console, ConsoleEntry, InputMode, PaletteState, RecordState,
-    RecordingFile, ScanStep, Screen, Status, SubState, Subscription, ViewRow,
+    ConnForm, Connection, Console, ConsoleEntry, InputMode, RecordState, RecordingFile, ScanStep,
+    Screen, Status, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -89,7 +89,6 @@ pub struct App {
     pub(crate) filter: String,
     pub(crate) subscribe_buf: String,
     pub(crate) form: Option<ConnForm>,
-    pub(crate) palette: Option<PaletteState>,
     pub(crate) status: Option<Status>,
     pub(crate) show_help: bool,
     pub(crate) recordings: Vec<RecordingFile>,
@@ -147,7 +146,6 @@ impl App {
             filter: String::new(),
             subscribe_buf: String::new(),
             form: None,
-            palette: None,
             status: None,
             show_help: false,
             recordings: Vec::new(),
@@ -183,18 +181,6 @@ impl App {
     /// True if a profile of this name currently has an open connection.
     pub fn is_connected(&self, name: &str) -> bool {
         self.connections.iter().any(|c| c.name == name)
-    }
-
-    /// Labels of the palette items matching the current query (for rendering).
-    /// Empty when the palette is closed.
-    pub(crate) fn palette_labels(&self) -> Vec<&'static str> {
-        match &self.palette {
-            Some(p) => action::palette_matches(&p.query)
-                .iter()
-                .map(|item| item.label)
-                .collect(),
-            None => Vec::new(),
-        }
     }
 
     // -- event handling ------------------------------------------------------
@@ -503,7 +489,6 @@ impl App {
             InputMode::Form => self.handle_form_key(key),
             InputMode::Subscribe => self.handle_subscribe_key(key),
             InputMode::Command => self.handle_command_key(key),
-            InputMode::Palette => self.handle_palette_key(key),
         }
     }
 
@@ -603,7 +588,6 @@ impl App {
                     self.enter_command_mode();
                 }
             }
-            Action::OpenPalette => self.open_palette(),
             Action::TailKey => self.tail_selected_key(),
             Action::PrevTab => {
                 if self.screen == Screen::Realtime {
@@ -1416,63 +1400,6 @@ impl App {
             conn.console.pending = Some(command.clone());
             conn.console.scroll = 0;
             conn.handle.send(ConnCommand::Exec { command });
-        }
-    }
-
-    // -- command palette -----------------------------------------------------
-
-    fn open_palette(&mut self) {
-        self.palette = Some(PaletteState::default());
-        self.mode = InputMode::Palette;
-    }
-
-    fn close_palette(&mut self) {
-        self.palette = None;
-        self.mode = InputMode::Normal;
-    }
-
-    fn handle_palette_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.close_palette(),
-            KeyCode::Enter => self.submit_palette(),
-            KeyCode::Up => self.palette_nav(-1),
-            KeyCode::Down => self.palette_nav(1),
-            KeyCode::Char(c) => {
-                if let Some(p) = &mut self.palette {
-                    p.query.push(c);
-                    p.selected = 0;
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(p) = &mut self.palette {
-                    p.query.pop();
-                    p.selected = 0;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn palette_nav(&mut self, delta: i32) {
-        if let Some(p) = &mut self.palette {
-            let len = action::palette_matches(&p.query).len();
-            if len == 0 {
-                p.selected = 0;
-                return;
-            }
-            p.selected = (p.selected as i32 + delta).rem_euclid(len as i32) as usize;
-        }
-    }
-
-    fn submit_palette(&mut self) {
-        let action = self.palette.as_ref().and_then(|p| {
-            action::palette_matches(&p.query)
-                .get(p.selected)
-                .map(|item| item.action)
-        });
-        self.close_palette();
-        if let Some(action) = action {
-            self.apply(action);
         }
     }
 
@@ -3455,51 +3382,6 @@ mod tests {
         assert_eq!(app.connections[0].console.scroll, 0);
     }
 
-    // -- command palette -----------------------------------------------------
-
-    #[test]
-    fn palette_opens_filters_and_dispatches() {
-        let (mut app, _rx) = test_app();
-        app.apply(Action::OpenPalette);
-        assert_eq!(app.mode, InputMode::Palette);
-        assert!(app.palette.is_some());
-        // Filter down to "Quit" and run it.
-        for c in "quit".chars() {
-            app.handle_key(ch(c));
-        }
-        assert_eq!(app.palette.as_ref().unwrap().query, "quit");
-        app.handle_key(key(KeyCode::Enter));
-        assert!(app.palette.is_none(), "palette closes after dispatch");
-        assert_eq!(app.mode, InputMode::Normal);
-        assert!(!app.running, "selecting Quit dispatched the action");
-    }
-
-    #[test]
-    fn palette_escape_closes_without_acting() {
-        let (mut app, _rx) = test_app();
-        app.apply(Action::OpenPalette);
-        app.handle_key(key(KeyCode::Esc));
-        assert!(app.palette.is_none());
-        assert_eq!(app.mode, InputMode::Normal);
-        assert!(app.running);
-    }
-
-    #[test]
-    fn palette_nav_wraps_within_matches() {
-        let (mut app, _rx) = test_app();
-        app.apply(Action::OpenPalette);
-        // Narrow to the "Go to:" entries so the count is predictable.
-        for c in "go to".chars() {
-            app.handle_key(ch(c));
-        }
-        let count = app.palette_labels().len();
-        assert!(count >= 2); // Realtime/Recordings "Go to:" entries (Connections/Browser use Enter/Esc)
-        app.handle_key(key(KeyCode::Up)); // wrap to the last
-        assert_eq!(app.palette.as_ref().unwrap().selected, count - 1);
-        app.handle_key(key(KeyCode::Down)); // back to the first
-        assert_eq!(app.palette.as_ref().unwrap().selected, 0);
-    }
-
     // -- mouse ---------------------------------------------------------------
 
     #[test]
@@ -3515,7 +3397,7 @@ mod tests {
     #[test]
     fn mouse_scroll_ignored_during_text_entry() {
         let (mut app, _rx) = build_app(config_with(&["a", "b"]), unique_config_path(), None);
-        app.mode = InputMode::Palette;
+        app.mode = InputMode::Filter;
         app.handle_mouse(MouseEventKind::ScrollDown);
         assert_eq!(
             app.profile_state.selected(),

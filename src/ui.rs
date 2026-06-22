@@ -37,9 +37,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     if app.form.is_some() {
         views::conn_form(frame, app, &theme, full);
     }
-    if app.palette.is_some() {
-        views::palette(frame, app, &theme, full);
-    }
     if app.show_help {
         views::help(frame, &theme, full);
     }
@@ -124,15 +121,6 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
-        InputMode::Palette => {
-            let query = app.palette.as_ref().map(|p| p.query.as_str()).unwrap_or("");
-            let line = Line::from(vec![
-                Span::styled(" palette ", theme.accent),
-                Span::raw(format!("{query}▏")),
-                Span::styled("   ↑↓ select · Enter run · Esc cancel", theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
-        }
         InputMode::Normal => match &app.status {
             // A status message shares the row: hints left, status right.
             Some(status) => {
@@ -174,7 +162,8 @@ fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
         Screen::Connections => vec![
             ("nav", "↑↓ move"),
             ("conn", "Enter connect · a add"),
-            ("app", ": palette · ? help · Esc Esc quit"),
+            ("go", "R recordings"),
+            ("app", "? help · Esc Esc quit"),
         ],
         // Keys are always grouped by prefix, so the footer always offers the
         // collapse/expand controls — there is no grouping toggle.
@@ -182,18 +171,21 @@ fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
             ("nav", "↑↓ keys · [ ] db"),
             ("groups", "⏎/Space collapse · z all"),
             ("view", "/ filter · o sort · O dir"),
-            ("data", "i cmd · t tail"),
-            ("app", ": palette · ? help · Esc back"),
+            ("data", "i cmd · t tail · r refresh"),
+            ("go", "c conns · w realtime · R recordings"),
+            ("app", "? help · Esc back"),
         ],
         Screen::Realtime => vec![
             ("nav", "↑↓ scroll · Tab tab · G follow"),
             ("tails", "s sub · m monitor · r rec · x stop"),
-            ("app", ": palette · ? help · Esc back"),
+            ("go", "c conns · b browser · R recordings"),
+            ("app", "? help · Esc back"),
         ],
         Screen::Recordings => vec![
             ("nav", "↑↓ move"),
-            ("rec", "r rescan · w watch · b browser"),
-            ("app", ": palette · ? help · Esc back"),
+            ("rec", "r rescan"),
+            ("go", "c conns · b browser · w realtime"),
+            ("app", "? help · Esc back"),
         ],
     }
 }
@@ -322,6 +314,54 @@ mod tests {
             assert!(
                 text.contains(key),
                 "{screen:?} footer should still list {key:?}: {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn footer_has_no_palette_hint_and_offers_navigation() {
+        // The command palette was removed, so no screen's footer may advertise
+        // it; every screen instead reaches its actions directly by key. The
+        // cross-screen jumps the palette used to provide now live in a "go"
+        // group, and the "app" group always offers help.
+        let expected_go = [
+            (Screen::Connections, vec!["recordings"]),
+            (Screen::Browser, vec!["conns", "realtime", "recordings"]),
+            (Screen::Realtime, vec!["conns", "browser", "recordings"]),
+            (Screen::Recordings, vec!["conns", "browser", "realtime"]),
+        ];
+        for (screen, targets) in expected_go {
+            let (mut app, _rx) = test_app();
+            app.screen = screen;
+            let sections = hint_sections(&app);
+
+            for (label, keys) in &sections {
+                assert!(
+                    !label.contains("palette") && !keys.contains("palette"),
+                    "{screen:?} footer still mentions the palette: {label} {keys}"
+                );
+            }
+
+            let go = sections
+                .iter()
+                .find(|(label, _)| *label == "go")
+                .map(|(_, keys)| *keys)
+                .unwrap_or_else(|| panic!("{screen:?} footer has no 'go' navigation group"));
+            for target in targets {
+                assert!(
+                    go.contains(target),
+                    "{screen:?} 'go' group should offer {target:?}: {go:?}"
+                );
+            }
+
+            let app_keys = sections
+                .iter()
+                .find(|(label, _)| *label == "app")
+                .map(|(_, keys)| *keys)
+                .unwrap_or_else(|| panic!("{screen:?} footer has no 'app' group"));
+            assert!(
+                app_keys.contains("? help"),
+                "{screen:?} 'app' group should offer help: {app_keys:?}"
             );
         }
     }
@@ -843,16 +883,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn palette_overlay_renders_filtered_items() {
-        let (mut app, _rx) = test_app();
-        app.palette = Some(crate::app::PaletteState::default());
-        app.mode = InputMode::Palette;
-        let text = screen_text(&mut app);
-        assert!(text.contains("Command palette"));
-        assert!(text.contains("Quit"), "palette lists actions");
-    }
-
     // -- snapshot tests ------------------------------------------------------
     //
     // These capture the rendered frame (text layout, styles excluded) for the
@@ -960,15 +990,6 @@ mod tests {
         insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 32));
     }
 
-    #[test]
-    fn snapshot_command_palette() {
-        let (mut app, _rx) = test_app();
-        pin_clock(&mut app);
-        app.palette = Some(crate::app::PaletteState::default());
-        app.mode = InputMode::Palette;
-        insta::assert_snapshot!("command_palette", render_lines(&mut app, 90, 24));
-    }
-
     #[tokio::test]
     async fn snapshot_browser_with_console() {
         // The read-only console is now an always-visible band pinned to the
@@ -1049,5 +1070,36 @@ mod tests {
         app.connections[0].subs.push(sub);
         app.connections[0].active_sub = Some(0);
         insta::assert_snapshot!("realtime_keyspace_notice", render_lines(&mut app, 90, 18));
+    }
+
+    #[tokio::test]
+    async fn snapshot_realtime_tail_recording() {
+        // A live tail mid-scrollback with recording on: exercises the redesigned
+        // status row, where the state + event tally sit flush left and the REC /
+        // paused indicators are pinned to the right edge.
+        let (mut app, _rx) = app_with_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Realtime;
+        let mut sub = Subscription::new(1, SubSpec::Channel("orders".into()), 100);
+        sub.state = SubState::Active;
+        for i in 0..6 {
+            sub.push(BrokerEvent {
+                ts: time::macros::datetime!(2026 - 06 - 19 12:34:56 UTC),
+                source: "orders".into(),
+                payload: Payload::Utf8(format!("event {i}")),
+                meta: Vec::new(),
+            });
+        }
+        // Scrolled up into history with recording active → paused + REC both show.
+        sub.follow = false;
+        sub.offset = 2;
+        sub.recording = RecordState::On {
+            records: 6,
+            bytes: 4096,
+            path: std::path::PathBuf::from("/tmp/orders.jsonl"),
+        };
+        app.connections[0].subs.push(sub);
+        app.connections[0].active_sub = Some(0);
+        insta::assert_snapshot!("realtime_tail_recording", render_lines(&mut app, 90, 14));
     }
 }

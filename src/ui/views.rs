@@ -5,8 +5,8 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, Paragraph, Row, Table, TableState,
-    Tabs, Wrap,
+    Block, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Row, Table,
+    TableState, Tabs, Wrap,
 };
 use ratatui::Frame;
 use time::OffsetDateTime;
@@ -125,7 +125,6 @@ fn connection_info(conn: &Connection) -> String {
     }
 }
 
-/// Browser screen: key table + value pane for the active connection.
 /// The scroll offset for a viewport that shows `viewport` rows out of `total`,
 /// given the previous offset and the selected row. The window stays put unless
 /// the selection would fall outside it (then it scrolls the minimum needed to
@@ -145,6 +144,7 @@ fn visible_offset(prev: usize, selected: Option<usize>, viewport: usize, total: 
     off.min(max_offset)
 }
 
+/// Browser screen: key table + value pane for the active connection.
 pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // The console band shows a typing cursor only in command mode; capture the
     // mode before the `&mut` borrow of the active connection below.
@@ -184,15 +184,40 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let body_area = chunks[body_idx];
     let console_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
 
-    let scanning = if conn.complete { "" } else { " · scanning…" };
+    // Top info bar, laid out as a balanced toolbar: the browsing context (db,
+    // match pattern, sort) sits flush left, while the key count — the one figure
+    // that grows — is pinned to the right so it always lands in the same place
+    // and fills what was dead space. Labels are dim, values inherit the bar's
+    // foreground, and the db anchor is accented. A single `·` separates fields
+    // for an even rhythm.
     let sort_dir = if conn.sort_desc { "↓" } else { "↑" };
-    let info = Line::from(vec![
-        Span::styled(format!(" db{} ", conn.db), theme.accent),
-        Span::styled(format!(" match={} ", conn.pattern), theme.dim),
-        Span::styled(format!(" {} keys{scanning} ", conn.keys.len()), theme.dim),
-        Span::styled(format!(" sort:{}{sort_dir} ", conn.sort.label()), theme.dim),
+    let left = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("db ", theme.dim),
+        Span::styled(conn.db.to_string(), theme.accent),
+        Span::styled(" · ", theme.dim),
+        Span::styled("match ", theme.dim),
+        Span::raw(conn.pattern.clone()),
+        Span::styled(" · ", theme.dim),
+        Span::styled("sort ", theme.dim),
+        Span::raw(format!("{} {sort_dir}", conn.sort.label())),
     ]);
-    frame.render_widget(Paragraph::new(info).style(theme.status_bar), info_area);
+    let mut right = vec![
+        Span::raw(conn.keys.len().to_string()),
+        Span::styled(" keys", theme.dim),
+    ];
+    if !conn.complete {
+        right.push(Span::styled(" · scanning…", theme.accent));
+    }
+    right.push(Span::raw(" "));
+    let right = Line::from(right);
+    let [info_left, info_right] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(line_width(&right) as u16),
+    ])
+    .areas(info_area);
+    frame.render_widget(Paragraph::new(left).style(theme.status_bar), info_left);
+    frame.render_widget(Paragraph::new(right).style(theme.status_bar), info_right);
 
     if let Some(band_area) = band_area {
         server_stats_band(frame, conn, theme, band_area);
@@ -333,10 +358,13 @@ const CONSOLE_BAND_HEIGHT: u16 = 7;
 /// panel. A compact, full-width strip: a Memory and a Hit-ratio gauge over a
 /// one-line metrics summary (version, uptime, clients, ops/sec, keys-per-DB).
 fn server_stats_band(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
+    // A one-column inner margin keeps the content off the border on both sides,
+    // so the band reads as a panel rather than text crammed against a frame.
     let block = Block::bordered()
         .title(" Server ")
         .title_style(theme.heading)
-        .border_style(theme.border);
+        .border_style(theme.border)
+        .padding(Padding::horizontal(1));
 
     // Stats arrive asynchronously after connect; until the first reply, hold the
     // band's height with a placeholder so the panes below don't jump.
@@ -353,8 +381,14 @@ fn server_stats_band(frame: &mut Frame, conn: &Connection, theme: &Theme, area: 
 
     let [gauges, metrics] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-    let [g_mem, g_hit] =
+    // Split the gauges row in half, but carve a two-column gutter out of the
+    // left half so the Memory meter's value doesn't butt against the Hit meter.
+    let [g_mem_full, g_hit] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(gauges);
+    let g_mem = Rect {
+        width: g_mem_full.width.saturating_sub(2),
+        ..g_mem_full
+    };
 
     // Memory: used / maxmemory when a cap is set, else used / peak, else just used.
     let used = stats.used_memory.unwrap_or(0);
@@ -366,79 +400,107 @@ fn server_stats_band(frame: &mut Frame, conn: &Connection, theme: &Theme, area: 
     } else if let Some(peak) = stats.used_memory_peak.filter(|p| *p > 0) {
         (
             used as f64 / peak as f64,
-            format!("{} (peak {})", human_bytes(used), human_bytes(peak)),
+            format!("{} · peak {}", human_bytes(used), human_bytes(peak)),
         )
     } else {
         (0.0, human_bytes(used))
     };
-    inline_gauge(frame, g_mem, theme, "Mem ", mem_ratio, mem_label);
+    meter(frame, g_mem, theme, "Memory", mem_ratio, &mem_label);
 
     let hit = stats.hit_ratio().unwrap_or(0.0);
-    inline_gauge(
+    meter(
         frame,
         g_hit,
         theme,
-        "Hit ",
+        "Hit",
         hit,
-        format!("{:.1}%", hit * 100.0),
+        &format!("{:.1}%", hit * 100.0),
     );
 
-    // Metrics line: the fields not already shown by the two gauges, joined with
-    // dim separators. Missing fields are simply omitted.
-    let mut parts: Vec<String> = Vec::new();
+    // Metrics line, balanced like the info bar: server health flush left, the
+    // keyspace totals pinned right. Values inherit the foreground while their
+    // units and separators stay dim, so the figures lead.
+    let sep = |spans: &mut Vec<Span<'static>>| {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", theme.dim));
+        }
+    };
+    let mut left: Vec<Span<'static>> = Vec::new();
     if let Some(v) = &stats.redis_version {
-        parts.push(format!("v{v}"));
+        left.push(Span::raw(format!("v{v}")));
     }
     if let Some(up) = stats.uptime_seconds {
-        parts.push(format!("up {}", human_duration(up)));
+        sep(&mut left);
+        left.push(Span::styled("up ", theme.dim));
+        left.push(Span::raw(human_duration(up)));
     }
     if let Some(c) = stats.connected_clients {
-        parts.push(format!("{c} clients"));
+        sep(&mut left);
+        left.push(Span::raw(c.to_string()));
+        left.push(Span::styled(" clients", theme.dim));
     }
     if let Some(ops) = stats.instantaneous_ops_per_sec {
-        parts.push(format!("{ops} ops/s"));
+        sep(&mut left);
+        left.push(Span::raw(ops.to_string()));
+        left.push(Span::styled(" ops/s", theme.dim));
     }
-    let dbs = stats
-        .db_keys
-        .iter()
-        .map(|(db, n)| format!("db{db}={n}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !dbs.is_empty() {
-        parts.push(dbs);
+
+    // Right group: total keys, then the per-DB breakdown (`db0 42 · db1 7`).
+    let mut right: Vec<Span<'static>> = Vec::new();
+    if !stats.db_keys.is_empty() {
+        let total: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
+        right.push(Span::raw(total.to_string()));
+        right.push(Span::styled(" keys", theme.dim));
+        for (db, n) in &stats.db_keys {
+            right.push(Span::styled(" · ", theme.dim));
+            right.push(Span::styled(format!("db{db} "), theme.dim));
+            right.push(Span::raw(n.to_string()));
+        }
     }
-    frame.render_widget(
-        Paragraph::new(Line::styled(parts.join("  ·  "), theme.dim)),
-        metrics,
-    );
+    let right = Line::from(right);
+    let [m_left, m_right] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(line_width(&right) as u16),
+    ])
+    .areas(metrics);
+    frame.render_widget(Paragraph::new(Line::from(left)), m_left);
+    frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), m_right);
 }
 
-/// Render a one-row labelled gauge: a short `prefix` name followed by a filled
-/// bar carrying `label` (the value). Used by the Browser's server-stats band,
-/// where a full bordered [`Gauge`] would be too tall.
-fn inline_gauge(
-    frame: &mut Frame,
-    area: Rect,
-    theme: &Theme,
-    prefix: &str,
-    ratio: f64,
-    label: String,
-) {
-    // `prefix` is short ASCII, so its byte length equals its display width.
-    let [name_area, bar_area] =
-        Layout::horizontal([Constraint::Length(prefix.len() as u16), Constraint::Min(0)])
-            .areas(area);
-    frame.render_widget(
-        Paragraph::new(Line::styled(prefix.to_string(), theme.accent)),
-        name_area,
-    );
-    frame.render_widget(
-        Gauge::default()
-            .gauge_style(theme.gauge)
-            .ratio(gauge_ratio(ratio))
-            .label(label),
-        bar_area,
-    );
+/// A one-line meter, sized to `width` columns: a dim `label`, a bracketed bar
+/// (the filled portion in the gauge style, the remainder a faint track), then
+/// the `value` flush to the right edge. Used by the Browser's server-stats
+/// band, where reading the value beside the bar is far clearer than a
+/// [`ratatui::widgets::Gauge`]'s percentage centred over a partial fill.
+fn meter_line(theme: &Theme, label: &str, ratio: f64, value: &str, width: usize) -> Line<'static> {
+    // Reserve the chrome (label + a space, the two bracket caps, a space, and
+    // the value), then give the rest to the bar. Labels and values here are
+    // ASCII/short, so byte length tracks display width closely enough.
+    let value_w = UnicodeWidthStr::width(value);
+    let chrome = label.len() + 1 + 2 + 1 + value_w;
+    let bar = width.saturating_sub(chrome);
+    let filled = (gauge_ratio(ratio) * bar as f64).round() as usize;
+
+    let mut spans = vec![
+        Span::styled(format!("{label} "), theme.dim),
+        Span::styled("▕", theme.dim),
+    ];
+    if filled > 0 {
+        spans.push(Span::styled("█".repeat(filled), theme.gauge));
+    }
+    if bar > filled {
+        spans.push(Span::styled("░".repeat(bar - filled), theme.dim));
+    }
+    spans.push(Span::styled("▏", theme.dim));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(value.to_string(), theme.accent));
+    Line::from(spans)
+}
+
+/// Render a [`meter_line`] into `area`.
+fn meter(frame: &mut Frame, area: Rect, theme: &Theme, label: &str, ratio: f64, value: &str) {
+    let line = meter_line(theme, label, ratio, value, area.width as usize);
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 /// Realtime screen: live tail tabs + the focused tail's scrollback ring buffer.
@@ -500,11 +562,14 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             Line::from(spans)
         })
         .collect();
+    // `Tabs` already pads each tab with a leading space, so the strip lines up
+    // with the status row's one-column gutter without any extra inset. A dim
+    // divider keeps the separators quiet next to the highlighted active tab.
     let tabs = Tabs::new(titles)
         .select(conn.active_sub.unwrap_or(0))
         .style(theme.dim)
         .highlight_style(theme.selected)
-        .divider("│");
+        .divider(Span::styled("│", theme.dim));
     frame.render_widget(tabs, tabs_area);
 
     let Some(sub) = conn.active_subscription() else {
@@ -525,35 +590,55 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             theme.error,
         ),
     };
-    let mut status = vec![
+    // Status row, balanced like the Browser's info bar: the live state and the
+    // event tally sit flush left, while the recording and pause indicators are
+    // pinned right so they don't shove the tally around as they come and go.
+    let mut left = vec![
         Span::raw(" "),
         state_span,
-        Span::styled(format!("  {} events", sub.received), theme.dim),
+        Span::styled(" · ", theme.dim),
+        Span::raw(sub.received.to_string()),
+        Span::styled(" events", theme.dim),
     ];
     if sub.received as usize > sub.events.len() {
-        status.push(Span::styled(
+        left.push(Span::styled(
             format!(" (last {})", sub.events.len()),
             theme.dim,
         ));
     }
+    let mut right: Vec<Span> = Vec::new();
     if let RecordState::On { records, bytes, .. } = &sub.recording {
-        status.push(Span::styled(
-            format!("  ● REC {records} ({})", human_bytes(*bytes)),
+        right.push(Span::styled(
+            format!("● REC {records} ({})", human_bytes(*bytes)),
             theme.error,
         ));
     }
     if !sub.follow {
-        status.push(Span::styled("  ⏸ paused (G to follow)", theme.accent));
+        if !right.is_empty() {
+            right.push(Span::styled(" · ", theme.dim));
+        }
+        right.push(Span::styled("⏸ paused", theme.accent));
     }
+    if !right.is_empty() {
+        right.push(Span::raw(" "));
+    }
+    let right = Line::from(right);
+    let [st_left, st_right] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(line_width(&right) as u16),
+    ])
+    .areas(status_area);
     frame.render_widget(
-        Paragraph::new(Line::from(status)).style(theme.status_bar),
-        status_area,
+        Paragraph::new(Line::from(left)).style(theme.status_bar),
+        st_left,
     );
+    frame.render_widget(Paragraph::new(right).style(theme.status_bar), st_right);
 
     let block = Block::bordered()
         .title(format!(" {} ", sub.label))
         .title_style(theme.heading)
-        .border_style(theme.border);
+        .border_style(theme.border)
+        .padding(Padding::horizontal(1));
     let inner = block.inner(body_area);
     frame.render_widget(block, body_area);
 
@@ -576,7 +661,7 @@ pub fn realtime(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let len = sub.events.len();
     if len == 0 || height == 0 {
         frame.render_widget(
-            Paragraph::new(Line::styled("  waiting for events…", theme.dim)),
+            Paragraph::new(Line::styled("waiting for events…", theme.dim)),
             events_area,
         );
         return;
@@ -713,57 +798,6 @@ fn console_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &T
     frame.render_widget(Paragraph::new(prompt), prompt_area);
 }
 
-/// The command-palette overlay: a filtered, selectable action list.
-pub fn palette(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(state) = app.palette.as_ref() else {
-        return;
-    };
-    let labels = app.palette_labels();
-    // Grow the overlay with the item count (query row + items + 2 borders) so
-    // no command is clipped, capped to the available height.
-    let height = (labels.len() as u16 + 3).clamp(6, area.height.max(6));
-    let rect = centered(area, 56, height);
-    frame.render_widget(Clear, rect);
-    let block = Block::bordered()
-        .title(" Command palette ")
-        .title_style(theme.heading)
-        .border_style(theme.border_focused);
-    let inner = block.inner(rect);
-    frame.render_widget(block, rect);
-
-    let [query_area, list_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("› ", theme.accent),
-            Span::raw(format!("{}▏", state.query)),
-        ])),
-        query_area,
-    );
-
-    if labels.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Line::styled("  no matching commands", theme.dim)),
-            list_area,
-        );
-        return;
-    }
-    let selected = state.selected.min(labels.len() - 1);
-    let items: Vec<ListItem> = labels
-        .iter()
-        .enumerate()
-        .map(|(i, label)| {
-            if i == selected {
-                ListItem::new(Line::styled(format!("▶ {label}"), theme.selected))
-            } else {
-                ListItem::new(Line::from(format!("  {label}")))
-            }
-        })
-        .collect();
-    frame.render_widget(List::new(items), list_area);
-}
-
 /// The add-connection modal overlay.
 pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let Some(form) = app.form.as_ref() else {
@@ -853,7 +887,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
     let lines = vec![
         Line::styled("Navigation", theme.heading),
         Line::from("  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel scrolls"),
-        Line::from("  Enter connect (Connections)    : command palette"),
+        Line::from("  Enter connect (Connections)   Esc step back / quit"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
         Line::from("  c connections  b browser  w realtime  R recordings"),
@@ -1076,6 +1110,16 @@ fn fmt_datetime(t: OffsetDateTime) -> String {
     )
 }
 
+/// The display width (terminal columns) of a composed line — the sum of its
+/// spans' widths. Used to size the right-pinned segment of a balanced toolbar
+/// so the flexible left segment can take the rest of the row.
+fn line_width(line: &Line) -> usize {
+    line.spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum()
+}
+
 /// Clamp a gauge ratio into `[0, 1]`, mapping non-finite values (NaN/∞) to 0.
 /// `f64::clamp` passes NaN through unchanged, which would trip `Gauge::ratio`'s
 /// internal `0.0..=1.0` assertion and panic the render.
@@ -1141,15 +1185,31 @@ mod tests {
     fn visible_offset_keeps_selection_in_window() {
         // 200 rows, a 10-row viewport. From a settled top window, scrolling the
         // selection down past the bottom edge advances the window by one row…
-        assert_eq!(visible_offset(0, Some(9), 10, 200), 0, "last visible row stays");
-        assert_eq!(visible_offset(0, Some(10), 10, 200), 1, "one past pushes down");
+        assert_eq!(
+            visible_offset(0, Some(9), 10, 200),
+            0,
+            "last visible row stays"
+        );
+        assert_eq!(
+            visible_offset(0, Some(10), 10, 200),
+            1,
+            "one past pushes down"
+        );
         // …and the window otherwise stays put while the selection is inside it.
-        assert_eq!(visible_offset(50, Some(55), 10, 200), 50, "in-window: no move");
+        assert_eq!(
+            visible_offset(50, Some(55), 10, 200),
+            50,
+            "in-window: no move"
+        );
         // Scrolling above the window pulls it straight up to the selection.
         assert_eq!(visible_offset(50, Some(40), 10, 200), 40, "above pulls up");
         // A stale/over-large offset (e.g. after a group collapse shrank the view)
         // is clamped so the last rows can't sit above an empty viewport.
-        assert_eq!(visible_offset(190, None, 10, 30), 20, "clamped to max_offset");
+        assert_eq!(
+            visible_offset(190, None, 10, 30),
+            20,
+            "clamped to max_offset"
+        );
         assert_eq!(visible_offset(0, Some(0), 10, 0), 0, "empty view");
         // A viewport taller than the list pins the window at the top.
         assert_eq!(visible_offset(0, Some(3), 50, 5), 0, "fits entirely");
@@ -1248,6 +1308,60 @@ mod tests {
     /// Flatten a rendered line's spans into a plain string for content assertions.
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn line_width_sums_display_columns_not_bytes() {
+        // Three spans: ASCII, a multi-byte-but-single-column char, and a CJK
+        // (two-column) char. Width is columns, not bytes or chars.
+        let line = Line::from(vec![
+            Span::raw("ab"), // 2 cols
+            Span::raw("é"),  // 1 col, 2 bytes
+            Span::raw("日"), // 2 cols
+        ]);
+        assert_eq!(line_width(&line), 5);
+        assert_eq!(line_width(&Line::from("")), 0);
+    }
+
+    #[test]
+    fn meter_line_fills_proportionally_with_brackets_and_value() {
+        let theme = Theme::dark();
+        // Count the filled cells the meter draws at a given ratio and width.
+        let filled = |ratio: f64, width: usize| -> usize {
+            meter_line(&theme, "Mem", ratio, "50%", width)
+                .spans
+                .iter()
+                .map(|s| s.content.matches('█').count())
+                .sum()
+        };
+        // chrome = "Mem" (3) + space + brackets (2) + space + "50%" (3) = 10,
+        // so a width-30 meter has a 20-cell bar. Half full ⇒ 10 filled cells.
+        assert_eq!(filled(0.5, 30), 10);
+        assert_eq!(filled(0.0, 30), 0, "empty");
+        assert_eq!(filled(1.0, 30), 20, "full bar uses every cell");
+        // Out-of-range / non-finite ratios are clamped, never panicking.
+        assert_eq!(filled(2.0, 30), 20, "over 100% clamps to full");
+        assert_eq!(filled(f64::NAN, 30), 0, "NaN clamps to empty");
+
+        // The composed line carries the label, both bracket caps, and the value.
+        let text = line_text(&meter_line(&theme, "Hit", 0.9, "90.0%", 40));
+        assert!(text.contains("Hit"), "label present: {text:?}");
+        assert!(
+            text.contains('▕') && text.contains('▏'),
+            "bracket caps: {text:?}"
+        );
+        assert!(text.contains("90.0%"), "value present: {text:?}");
+    }
+
+    #[test]
+    fn meter_line_degrades_when_too_narrow_for_a_bar() {
+        let theme = Theme::dark();
+        // Narrower than the chrome ⇒ no bar cells, but it must not panic and
+        // still carries the value.
+        let line = meter_line(&theme, "Memory", 0.5, "1.0 / 4.0 MiB", 4);
+        let text = line_text(&line);
+        assert_eq!(text.matches('█').count(), 0, "no room for a bar");
+        assert!(text.contains("1.0 / 4.0 MiB"));
     }
 
     #[test]

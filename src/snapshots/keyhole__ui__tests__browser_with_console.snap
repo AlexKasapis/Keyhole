@@ -1,11 +1,12 @@
 ---
 source: src/ui.rs
+assertion_line: 1022
 expression: "render_lines(&mut app, 90, 24)"
 ---
  Keyhole   prod (db0)  · browser                                             12:34:56 UTC
- db0  match=*  2 keys  sort:name↑
+ db 0 · match * · sort name ↑                                                      2 keys
 ┌ Server ────────────────────────────────────────────────────────────────────────────────┐
-│Loading server stats…                                                                   │
+│ Loading server stats…                                                                  │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ───────────────────────────────────┐┌ Value ──────────────────────────────────────┐

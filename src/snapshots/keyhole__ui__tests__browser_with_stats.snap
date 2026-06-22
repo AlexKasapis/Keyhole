@@ -1,12 +1,13 @@
 ---
 source: src/ui.rs
+assertion_line: 1058
 expression: "render_lines(&mut app, 90, 20)"
 ---
  Keyhole   prod (db0)  · browser                                             12:34:56 UTC
- db0  match=*  2 keys  sort:name↑
+ db 0 · match * · sort name ↑                                                      2 keys
 ┌ Server ────────────────────────────────────────────────────────────────────────────────┐
-│Mem ██████████ 1.0 MiB / 4.0 MiB            Hit █████████████████90.0% █████████████    │
-│v7.4.0  ·  up 1h 1m 1s  ·  7 clients  ·  120 ops/s  ·  db0=42 db1=7                     │
+│ Memory ▕████░░░░░░░░░░▏ 1.0 MiB / 4.0 MiB  Hit ▕████████████████████████████░░░▏ 90.0% │
+│ v7.4.0 · up 1h 1m 1s · 7 clients · 120 ops/s                  49 keys · db0 42 · db1 7 │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ───────────────────────────────────┐┌ user:1 ─────────────────────────────────────┐
 │  Key            Type   TTL      Size    ││string · Utf8 · showing 5 of 5 bytes         │
