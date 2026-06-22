@@ -7,6 +7,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Quit,
+    /// Global "back" (Esc): step out of the current screen toward Connections,
+    /// and quit from Connections (Browser → Connections → close app). Also
+    /// dismisses the help overlay first when it is showing.
+    Back,
     Up,
     Down,
     PageUp,
@@ -46,8 +50,6 @@ pub enum Action {
     CycleSort,
     /// Flip the key-list sort direction (Browser).
     ToggleSortDir,
-    /// Toggle namespace-prefix grouping (Browser).
-    ToggleGroup,
     /// Collapse/expand the selected group header (Browser).
     ToggleCollapse,
     /// Collapse or expand every group at once (Browser).
@@ -55,7 +57,6 @@ pub enum Action {
     /// Context refresh: browse/stats, toggle recording (Realtime), rescan (Recordings).
     Refresh,
     ToggleHelp,
-    Dismiss,
 }
 
 /// Translate a key event into an [`Action`], if bound.
@@ -64,7 +65,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (ctrl, key.code) {
         (true, Char('c')) => Some(Action::Quit),
-        (false, Char('q')) => Some(Action::Quit),
         (false, Down | Char('j')) => Some(Action::Down),
         (false, Up | Char('k')) => Some(Action::Up),
         (true, Char('d')) => Some(Action::PageDown),
@@ -94,12 +94,11 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('n')) => Some(Action::LoadMore),
         (false, Char('o')) => Some(Action::CycleSort),
         (false, Char('O')) => Some(Action::ToggleSortDir),
-        (false, Char('p')) => Some(Action::ToggleGroup),
         (false, Char('z')) => Some(Action::ToggleAllGroups),
         (false, Char(' ')) => Some(Action::ToggleCollapse),
         (false, Char('r')) => Some(Action::Refresh),
         (false, Char('?')) => Some(Action::ToggleHelp),
-        (false, Esc) => Some(Action::Dismiss),
+        (false, Esc) => Some(Action::Back),
         _ => None,
     }
 }
@@ -122,8 +121,10 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     pal("Keyspace events (current db)", Action::StartKeyspace),
     pal("Browser: cycle sort column", Action::CycleSort),
     pal("Browser: toggle sort direction", Action::ToggleSortDir),
-    pal("Browser: group by prefix (toggle)", Action::ToggleGroup),
-    pal("Browser: collapse/expand all groups", Action::ToggleAllGroups),
+    pal(
+        "Browser: collapse/expand all groups",
+        Action::ToggleAllGroups,
+    ),
     pal("Refresh / toggle recording", Action::Refresh),
     pal("Toggle help", Action::ToggleHelp),
     pal("Quit", Action::Quit),
@@ -158,7 +159,7 @@ mod tests {
 
     #[test]
     fn every_normal_binding_maps() {
-        assert_eq!(plain(Char('q')), Some(Action::Quit));
+        assert_eq!(plain(Esc), Some(Action::Back));
         assert_eq!(ctrl(Char('c')), Some(Action::Quit));
         assert_eq!(plain(Char('j')), Some(Action::Down));
         assert_eq!(plain(Down), Some(Action::Down));
@@ -189,12 +190,10 @@ mod tests {
         assert_eq!(plain(Char('n')), Some(Action::LoadMore));
         assert_eq!(plain(Char('o')), Some(Action::CycleSort));
         assert_eq!(plain(Char('O')), Some(Action::ToggleSortDir));
-        assert_eq!(plain(Char('p')), Some(Action::ToggleGroup));
         assert_eq!(plain(Char('z')), Some(Action::ToggleAllGroups));
         assert_eq!(plain(Char(' ')), Some(Action::ToggleCollapse));
         assert_eq!(plain(Char('r')), Some(Action::Refresh));
         assert_eq!(plain(Char('?')), Some(Action::ToggleHelp));
-        assert_eq!(plain(Esc), Some(Action::Dismiss));
     }
 
     #[test]

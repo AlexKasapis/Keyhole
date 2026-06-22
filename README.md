@@ -88,7 +88,8 @@ docker compose up -d redis
 just run            # cargo run
 ```
 
-Press `q` or `Ctrl-C` to quit. Open the command palette to reach any action.
+Press `Esc` to go back (Browser → Connections → quit), or `Ctrl-C` to quit
+outright from anywhere. Open the command palette to reach any action.
 Logs are written to `~/.local/share/brokertui/logs/`.
 
 ## Development

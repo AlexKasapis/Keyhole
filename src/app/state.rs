@@ -314,18 +314,17 @@ fn entry_cmp(a: &EntryMeta, b: &EntryMeta, sort: SortKey) -> Ordering {
     primary.then_with(|| a.key.cmp(&b.key))
 }
 
-/// Build the ordered (and optionally grouped) list of display rows over `keys`.
+/// Build the ordered, prefix-grouped list of display rows over `keys`.
 ///
-/// Without grouping the result is a flat list of [`ViewRow::Entry`] in sorted
-/// order. With grouping, keys are bucketed by their namespace prefix; each
-/// bucket yields a [`ViewRow::Group`] header followed (unless the prefix is in
-/// `collapsed`) by its entries in sorted order. Groups are always listed
-/// alphabetically by prefix; `desc` reverses only the order of keys, not groups.
+/// Keys are always bucketed by their namespace prefix; each bucket yields a
+/// [`ViewRow::Group`] header followed (unless the prefix is in `collapsed`) by
+/// its entries in sorted order. Groups are always listed alphabetically by
+/// prefix; `desc` reverses only the order of keys within a group, not the
+/// groups themselves.
 pub fn build_view(
     keys: &[EntryMeta],
     sort: SortKey,
     desc: bool,
-    group_by_prefix: bool,
     collapsed: &HashSet<String>,
 ) -> Vec<ViewRow> {
     let order = |a: usize, b: usize| {
@@ -336,12 +335,6 @@ pub fn build_view(
             o
         }
     };
-
-    if !group_by_prefix {
-        let mut idxs: Vec<usize> = (0..keys.len()).collect();
-        idxs.sort_by(|&a, &b| order(a, b));
-        return idxs.into_iter().map(ViewRow::Entry).collect();
-    }
 
     let mut buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, e) in keys.iter().enumerate() {
@@ -383,13 +376,13 @@ pub struct Connection {
     pub sort: SortKey,
     /// Descending order when set (otherwise ascending).
     pub sort_desc: bool,
-    /// Group keys under collapsible namespace-prefix headers when set.
-    pub group_by_prefix: bool,
-    /// Prefixes whose groups are currently collapsed (hidden keys).
+    /// Prefixes whose namespace-prefix groups are currently collapsed (hidden
+    /// keys). Keys are always grouped by prefix; collapsing only hides a group's
+    /// entries, leaving its header.
     pub collapsed: HashSet<String>,
     /// Rendered rows (group headers + keys) derived from `keys`, `sort`,
-    /// `sort_desc`, `group_by_prefix`, and `collapsed`. The table's selected
-    /// index points into this, not into `keys`. Rebuilt via [`Self::rebuild_view`].
+    /// `sort_desc`, and `collapsed`. The table's selected index points into
+    /// this, not into `keys`. Rebuilt via [`Self::rebuild_view`].
     pub view: Vec<ViewRow>,
     pub table: TableState,
     pub value: Option<ValueView>,
@@ -421,7 +414,6 @@ impl Connection {
             complete: false,
             sort: SortKey::Name,
             sort_desc: false,
-            group_by_prefix: false,
             collapsed: HashSet::new(),
             view: Vec::new(),
             table,
@@ -446,27 +438,25 @@ impl Connection {
         }
     }
 
-    /// The namespace prefix of the selected group header, if a group row (not a
-    /// key) is highlighted.
-    pub fn selected_group(&self) -> Option<&str> {
+    /// The prefix of the group the cursor is *in*: the highlighted group
+    /// header's prefix, or — when a key row is highlighted — the prefix of that
+    /// key's group. `None` only when nothing is selected. This is what lets
+    /// collapse/expand act on the current group from anywhere inside it, not
+    /// just from the header row.
+    pub fn cursor_group_prefix(&self) -> Option<String> {
         match self.table.selected().and_then(|i| self.view.get(i)) {
-            Some(ViewRow::Group { prefix, .. }) => Some(prefix.as_str()),
-            _ => None,
+            Some(ViewRow::Group { prefix, .. }) => Some(prefix.clone()),
+            Some(ViewRow::Entry(i)) => self.keys.get(*i).map(|e| key_prefix(&e.key).to_string()),
+            None => None,
         }
     }
 
-    /// Rebuild [`Self::view`] from the current keys, sort, and grouping
-    /// settings, keeping the highlight on the same key/group where possible
-    /// (and clamping it into range when that row no longer exists).
+    /// Rebuild [`Self::view`] from the current keys and sort settings, keeping
+    /// the highlight on the same key/group where possible (and clamping it into
+    /// range when that row no longer exists).
     pub fn rebuild_view(&mut self) {
         let anchor = self.selected_anchor();
-        self.view = build_view(
-            &self.keys,
-            self.sort,
-            self.sort_desc,
-            self.group_by_prefix,
-            &self.collapsed,
-        );
+        self.view = build_view(&self.keys, self.sort, self.sort_desc, &self.collapsed);
         self.restore_selection(anchor);
     }
 
@@ -503,7 +493,8 @@ impl Connection {
                 .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix)),
             SelAnchor::None => None,
         };
-        let idx = found.unwrap_or_else(|| self.table.selected().unwrap_or(0).min(self.view.len() - 1));
+        let idx =
+            found.unwrap_or_else(|| self.table.selected().unwrap_or(0).min(self.view.len() - 1));
         self.table.select(Some(idx));
     }
 
@@ -519,22 +510,29 @@ impl Connection {
         self.rebuild_view();
     }
 
-    /// Toggle namespace-prefix grouping on or off.
-    pub fn toggle_grouping(&mut self) {
-        self.group_by_prefix = !self.group_by_prefix;
-        self.rebuild_view();
-    }
-
-    /// Collapse or expand the selected group header. Returns `true` if a group
-    /// row was selected (and therefore toggled), `false` if a key was selected.
+    /// Collapse or expand the group at the cursor — whether the cursor is on the
+    /// group header itself or on a key within that group. Returns `true` if a
+    /// group was toggled, `false` when there is none to act on (nothing
+    /// selected).
+    ///
+    /// The highlight always lands on the toggled group's header afterwards:
+    /// when collapsing from a key inside the group, that key's row disappears,
+    /// so anchoring to the header keeps the cursor on a visible, sensible row.
     pub fn toggle_selected_group(&mut self) -> bool {
-        let Some(prefix) = self.selected_group().map(str::to_string) else {
+        let Some(prefix) = self.cursor_group_prefix() else {
             return false;
         };
         if !self.collapsed.remove(&prefix) {
-            self.collapsed.insert(prefix);
+            self.collapsed.insert(prefix.clone());
         }
         self.rebuild_view();
+        if let Some(idx) = self
+            .view
+            .iter()
+            .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix))
+        {
+            self.table.select(Some(idx));
+        }
         true
     }
 
@@ -766,9 +764,9 @@ mod tests {
             meta("cherry", ValueType::String, Ttl::NoExpire, None),
         ];
         let empty = HashSet::new();
-        let asc = build_view(&keys, SortKey::Name, false, false, &empty);
+        let asc = build_view(&keys, SortKey::Name, false, &empty);
         assert_eq!(entry_keys(&asc, &keys), ["apple", "banana", "cherry"]);
-        let desc = build_view(&keys, SortKey::Name, true, false, &empty);
+        let desc = build_view(&keys, SortKey::Name, true, &empty);
         assert_eq!(entry_keys(&desc, &keys), ["cherry", "banana", "apple"]);
     }
 
@@ -779,7 +777,7 @@ mod tests {
             meta("a", ValueType::String, Ttl::NoExpire, None),
             meta("b", ValueType::String, Ttl::NoExpire, None),
         ];
-        let view = build_view(&keys, SortKey::Type, false, false, &HashSet::new());
+        let view = build_view(&keys, SortKey::Type, false, &HashSet::new());
         // strings (rank 0) before hash (rank 3); ties broken by name.
         assert_eq!(entry_keys(&view, &keys), ["a", "b", "z"]);
     }
@@ -792,7 +790,7 @@ mod tests {
             meta("later", ValueType::String, Ttl::Seconds(100), None),
             meta("gone", ValueType::String, Ttl::Unknown, None),
         ];
-        let view = build_view(&keys, SortKey::Ttl, false, false, &HashSet::new());
+        let view = build_view(&keys, SortKey::Ttl, false, &HashSet::new());
         assert_eq!(entry_keys(&view, &keys), ["soon", "later", "never", "gone"]);
     }
 
@@ -803,7 +801,7 @@ mod tests {
             meta("small", ValueType::String, Ttl::NoExpire, Some(10)),
             meta("unknown", ValueType::String, Ttl::NoExpire, None),
         ];
-        let view = build_view(&keys, SortKey::Size, false, false, &HashSet::new());
+        let view = build_view(&keys, SortKey::Size, false, &HashSet::new());
         assert_eq!(entry_keys(&view, &keys), ["small", "big", "unknown"]);
     }
 
@@ -815,7 +813,7 @@ mod tests {
             meta("user:1", ValueType::String, Ttl::NoExpire, None),
             meta("loose", ValueType::String, Ttl::NoExpire, None),
         ];
-        let view = build_view(&keys, SortKey::Name, false, true, &HashSet::new());
+        let view = build_view(&keys, SortKey::Name, false, &HashSet::new());
         // Groups are alphabetical by prefix: "" (no prefix) sorts first, then
         // cache, then user. Each header carries its key count.
         assert_eq!(
@@ -827,7 +825,10 @@ mod tests {
             ]
         );
         // Keys within a group are name-sorted (user:1 before user:2).
-        assert_eq!(entry_keys(&view, &keys), ["loose", "cache:x", "user:1", "user:2"]);
+        assert_eq!(
+            entry_keys(&view, &keys),
+            ["loose", "cache:x", "user:1", "user:2"]
+        );
     }
 
     #[test]
@@ -839,7 +840,7 @@ mod tests {
         ];
         let mut collapsed = HashSet::new();
         collapsed.insert("user".to_string());
-        let view = build_view(&keys, SortKey::Name, false, true, &collapsed);
+        let view = build_view(&keys, SortKey::Name, false, &collapsed);
         // Both headers remain; the collapsed group's keys are gone.
         assert_eq!(
             group_headers(&view),

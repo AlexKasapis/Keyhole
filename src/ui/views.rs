@@ -166,13 +166,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 
     let scanning = if conn.complete { "" } else { " · scanning…" };
     let sort_dir = if conn.sort_desc { "↓" } else { "↑" };
-    let grouping = if conn.group_by_prefix { "prefix" } else { "off" };
     let info = Line::from(vec![
         Span::styled(format!(" db{} ", conn.db), theme.accent),
         Span::styled(format!(" match={} ", conn.pattern), theme.dim),
         Span::styled(format!(" {} keys{scanning} ", conn.keys.len()), theme.dim),
         Span::styled(format!(" sort:{}{sort_dir} ", conn.sort.label()), theme.dim),
-        Span::styled(format!(" group:{grouping} "), theme.dim),
     ]);
     frame.render_widget(Paragraph::new(info).style(theme.status_bar), info_area);
 
@@ -186,8 +184,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
 
     // One rendered row per view entry: a styled, key-count-bearing header for a
     // group (with a fold marker), or a key with its type / TTL / size. Keys are
-    // indented under their header when grouping is on.
-    let grouped = conn.group_by_prefix;
+    // always grouped, so each key is indented under its prefix header.
     let rows: Vec<Row> = conn
         .view
         .iter()
@@ -225,13 +222,8 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
                     Some(n) => human_bytes(n),
                     None => "—".to_string(),
                 };
-                let key = if grouped {
-                    format!("  {}", e.key)
-                } else {
-                    e.key.clone()
-                };
                 Row::new(vec![
-                    Cell::from(key),
+                    Cell::from(format!("  {}", e.key)),
                     Cell::from(e.vtype.label().to_string()),
                     Cell::from(ttl),
                     Cell::from(size),
@@ -833,8 +825,10 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  server stats (Redis) appear in a band above the panes"),
         Line::from("  the read-only console (Redis) is a band along the bottom"),
         Line::from("  / filter   [ ] change DB   n load more   r refresh"),
-        Line::from("  o sort column   O direction   p group by prefix"),
-        Line::from("  Enter/Space fold group   z fold/unfold all"),
+        Line::from("  o sort column   O direction"),
+        Line::from("  keys are always grouped by prefix into collapsible sections"),
+        Line::from("  Enter/Space collapse/expand group (from header or key)"),
+        Line::from("  z fold/unfold all groups"),
         Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),
         Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
         Line::from(""),
@@ -848,7 +842,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Ctrl-L clear   writes and admin commands are refused"),
         Line::from(""),
         Line::styled("General", theme.heading),
-        Line::from("  a add connection    ? toggle help    q / Ctrl-c quit"),
+        Line::from("  a add connection   ? toggle help   Esc back   Ctrl-c quit"),
     ];
     frame.render_widget(Paragraph::new(lines).block(block), rect);
 }

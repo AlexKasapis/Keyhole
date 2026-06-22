@@ -3,17 +3,17 @@ source: src/ui.rs
 expression: "render_lines(&mut app, 90, 24)"
 ---
  BrokerTUI   prod (db0)  · browser                                           12:34:56 UTC
- db0  match=*  2 keys  sort:name↑  group:off
+ db0  match=*  2 keys  sort:name↑
 ┌ Server ────────────────────────────────────────────────────────────────────────────────┐
 │Loading server stats…                                                                   │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ───────────────────────────────────┐┌ Value ──────────────────────────────────────┐
 │  Key            Type   TTL      Size    ││loading…                                     │
-│▶ session:abc    hash   2m 0s    128 B   ││                                             │
-│  user:1         string 2m 0s    128 B   ││                                             │
-│                                         ││                                             │
-│                                         ││                                             │
+│▶ ▾ session (1)                          ││                                             │
+│    session:abc  hash   2m 0s    128 B   ││                                             │
+│  ▾ user (1)                             ││                                             │
+│    user:1       string 2m 0s    128 B   ││                                             │
 │                                         ││                                             │
 │                                         ││                                             │
 │                                         ││                                             │
@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ keys · ⏎ fold · [ ] db │ view / filter · o sort · O dir · p group │ data i cmd ·
+  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort · O dir

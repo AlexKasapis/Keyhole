@@ -139,7 +139,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 let [hints_area, status_area] =
                     Layout::horizontal([Constraint::Min(0), Constraint::Length(44)]).areas(area);
                 frame.render_widget(
-                    Paragraph::new(hint_line(app.screen, theme)).style(theme.status_bar),
+                    Paragraph::new(hint_line(app, theme)).style(theme.status_bar),
                     hints_area,
                 );
                 let style = if status.is_error {
@@ -158,7 +158,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             // by an empty reserved status column.
             None => {
                 frame.render_widget(
-                    Paragraph::new(hint_line(app.screen, theme)).style(theme.status_bar),
+                    Paragraph::new(hint_line(app, theme)).style(theme.status_bar),
                     area,
                 );
             }
@@ -166,31 +166,34 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
 }
 
-/// The footer keybinds for a screen, grouped into labelled sections. Each entry
-/// is a `(section label, keys)` pair; the keys within a section keep the `·`
-/// separator. [`hint_line`] turns these into a styled row.
-fn hint_sections(screen: Screen) -> &'static [(&'static str, &'static str)] {
-    match screen {
-        Screen::Connections => &[
+/// The footer keybinds for the active screen, grouped into labelled sections.
+/// Each entry is a `(section label, keys)` pair; the keys within a section keep
+/// the `·` separator. [`hint_line`] turns these into a styled row.
+fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
+    match app.screen {
+        Screen::Connections => vec![
             ("nav", "↑↓ move"),
             ("conn", "Enter connect · a add"),
-            ("app", ": palette · ? help · q quit"),
+            ("app", ": palette · ? help · Esc Esc quit"),
         ],
-        Screen::Browser => &[
-            ("nav", "↑↓ keys · ⏎ fold · [ ] db"),
-            ("view", "/ filter · o sort · O dir · p group"),
+        // Keys are always grouped by prefix, so the footer always offers the
+        // collapse/expand controls — there is no grouping toggle.
+        Screen::Browser => vec![
+            ("nav", "↑↓ keys · [ ] db"),
+            ("groups", "⏎/Space collapse · z all"),
+            ("view", "/ filter · o sort · O dir"),
             ("data", "i cmd · t tail"),
-            ("app", ": palette · ? help"),
+            ("app", ": palette · ? help · Esc back"),
         ],
-        Screen::Realtime => &[
+        Screen::Realtime => vec![
             ("nav", "↑↓ scroll · Tab tab · G follow"),
             ("tails", "s sub · m monitor · r rec · x stop"),
-            ("app", ": palette · ? help"),
+            ("app", ": palette · ? help · Esc back"),
         ],
-        Screen::Recordings => &[
+        Screen::Recordings => vec![
             ("nav", "↑↓ move"),
             ("rec", "r rescan · w watch · b browser"),
-            ("app", ": palette · ? help · q quit"),
+            ("app", ": palette · ? help · Esc back"),
         ],
     }
 }
@@ -198,9 +201,9 @@ fn hint_sections(screen: Screen) -> &'static [(&'static str, &'static str)] {
 /// Render the footer hints as a single line: each section's label in the
 /// heading style (matching the help overlay), its keys in the status-bar
 /// foreground, and a dim vertical rule between sections.
-fn hint_line(screen: Screen, theme: &Theme) -> Line<'static> {
+fn hint_line(app: &App, theme: &Theme) -> Line<'static> {
     let mut spans = Vec::new();
-    for (i, (label, keys)) in hint_sections(screen).iter().enumerate() {
+    for (i, (label, keys)) in hint_sections(app).iter().enumerate() {
         spans.push(if i == 0 {
             Span::raw("  ")
         } else {
@@ -321,6 +324,22 @@ mod tests {
                 "{screen:?} footer should still list {key:?}: {text:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn browser_footer_advertises_collapse_and_has_no_grouping_toggle() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        // Keys are always grouped, so the footer always carries the collapse
+        // controls and never a grouping toggle.
+        let text = render_lines(&mut app, 160, 8);
+        assert!(
+            text.contains("groups"),
+            "browser footer has a groups section"
+        );
+        assert!(text.contains("collapse"), "and advertises collapse/expand");
+        assert!(!text.contains("p group"), "no `p group` toggle");
+        assert!(!text.contains("ungroup"), "no `p ungroup` toggle");
     }
 
     // -- connections screen --------------------------------------------------

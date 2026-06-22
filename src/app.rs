@@ -83,6 +83,9 @@ pub struct App {
     pub(crate) recordings: Vec<RecordingFile>,
     pub(crate) recordings_state: ListState,
     pub(crate) now: OffsetDateTime,
+    /// Set when a quit was requested from the home screen but not yet
+    /// confirmed: closing the app needs a second consecutive Esc.
+    quit_armed: bool,
 }
 
 impl App {
@@ -136,6 +139,7 @@ impl App {
             recordings: Vec::new(),
             recordings_state: ListState::default(),
             now: OffsetDateTime::now_utc(),
+            quit_armed: false,
         }
     }
 
@@ -445,8 +449,32 @@ impl App {
     }
 
     fn apply(&mut self, action: Action) {
+        // Any input other than a repeated Back cancels a pending quit
+        // confirmation (see `Action::Back`).
+        if action != Action::Back {
+            self.quit_armed = false;
+        }
         match action {
             Action::Quit => self.running = false,
+            // Global "back": close the help overlay first if it's open, then
+            // step out of the current screen toward Connections. From
+            // Connections (the home screen) there is nowhere further back, so a
+            // first Esc arms a quit confirmation and a second consecutive Esc
+            // closes the app (Browser → Connections → Esc → Esc → quit).
+            Action::Back => {
+                if self.show_help {
+                    self.show_help = false;
+                    self.quit_armed = false;
+                } else if self.screen != Screen::Connections {
+                    self.screen = Screen::Connections;
+                    self.quit_armed = false;
+                } else if self.quit_armed {
+                    self.running = false;
+                } else {
+                    self.quit_armed = true;
+                    self.set_status("Press Esc again to quit".to_string(), false);
+                }
+            }
             Action::Up => self.nav(-1),
             Action::Down => self.nav(1),
             // In the Browser these page the focused value pane (the key list
@@ -561,21 +589,9 @@ impl App {
                 c.toggle_sort_dir();
                 format!("sort: {} {}", c.sort.label(), sort_arrow(c.sort_desc))
             }),
-            Action::ToggleGroup => self.browser_view(|c| {
-                c.toggle_grouping();
-                if c.group_by_prefix {
-                    "grouping: by prefix".to_string()
-                } else {
-                    "grouping: off".to_string()
-                }
-            }),
             Action::ToggleAllGroups => self.browser_view(|c| {
                 c.toggle_all_groups();
-                if c.group_by_prefix {
-                    "toggled all groups".to_string()
-                } else {
-                    "grouping is off — press p to group".to_string()
-                }
+                "toggled all groups".to_string()
             }),
             Action::ToggleCollapse => self.toggle_selected_group(),
             // `r`: refresh data (Browser — keys and the server-stats band),
@@ -595,7 +611,6 @@ impl App {
                 Screen::Connections => {}
             },
             Action::ToggleHelp => self.show_help = !self.show_help,
-            Action::Dismiss => self.show_help = false,
         }
     }
 
@@ -1622,6 +1637,10 @@ mod tests {
         key(KeyCode::Char(c))
     }
 
+    fn ctrl_ch(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
     fn broker_event(body: &str) -> BrokerEvent {
         BrokerEvent {
             ts: OffsetDateTime::UNIX_EPOCH,
@@ -1907,10 +1926,88 @@ mod tests {
     // -- screen navigation & help --------------------------------------------
 
     #[test]
-    fn quit_stops_the_run_loop() {
+    fn ctrl_c_quits_from_anywhere() {
+        // Ctrl-c is the hard quit (the old `q`); it exits from any screen, even
+        // a deep one where Esc would only step back.
         let (mut app, _rx) = test_app();
-        app.handle_key(ch('q'));
+        app.screen = Screen::Browser;
+        app.handle_key(ctrl_ch('c'));
+        assert!(!app.running, "Ctrl-c is a hard quit from any screen");
+    }
+
+    #[test]
+    fn esc_steps_back_then_quits_from_connections() {
+        // Back (Esc) is global and walks toward Connections, then quits from
+        // there: Browser → Connections → close app. Other data screens fall
+        // back to Connections the same way.
+        let (mut app, _rx) = test_app();
+
+        app.screen = Screen::Browser;
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.screen,
+            Screen::Connections,
+            "Browser backs out to Connections"
+        );
+        assert!(app.running);
+
+        app.screen = Screen::Realtime;
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.screen,
+            Screen::Connections,
+            "Realtime backs out to Connections"
+        );
+        assert!(app.running);
+
+        app.screen = Screen::Recordings;
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            app.screen,
+            Screen::Connections,
+            "Recordings backs out to Connections"
+        );
+        assert!(app.running);
+
+        // From Connections (home) the first Esc arms a quit confirmation; the
+        // app only closes on a second consecutive Esc.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.running, "first Esc on Connections arms, does not quit");
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.running, "second consecutive Esc on Connections quits");
+    }
+
+    #[test]
+    fn esc_quit_confirmation_resets_on_other_input() {
+        // Arming is only consumed by an immediately following Esc: any other
+        // input disarms, so a stray Esc can't combine with a later one to quit.
+        let (mut app, _rx) = test_app();
+        app.handle_key(key(KeyCode::Esc)); // arm
+        assert!(app.running);
+        app.handle_key(ch('j')); // move selection — disarms
+        app.handle_key(key(KeyCode::Esc)); // re-arms rather than quitting
+        assert!(app.running, "intervening input disarms the quit confirmation");
+        app.handle_key(key(KeyCode::Esc)); // second consecutive Esc now quits
         assert!(!app.running);
+    }
+
+    #[test]
+    fn esc_dismisses_help_before_navigating() {
+        // The help overlay is the top of the back stack: the first Esc closes
+        // it without changing screens.
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Browser;
+        app.show_help = true;
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.show_help, "first back closes the help overlay");
+        assert_eq!(
+            app.screen,
+            Screen::Browser,
+            "help close doesn't change screen"
+        );
+        // With help closed, the next back steps out of the Browser as usual.
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.screen, Screen::Connections);
     }
 
     #[test]
@@ -1920,8 +2017,9 @@ mod tests {
         assert!(app.show_help);
         app.apply(Action::ToggleHelp);
         assert!(!app.show_help);
+        // Back (Esc) closes the overlay when it's open, before any navigation.
         app.show_help = true;
-        app.apply(Action::Dismiss);
+        app.apply(Action::Back);
         assert!(!app.show_help);
     }
 
@@ -1987,9 +2085,12 @@ mod tests {
             stream_entry("k2", ValueType::String),
         ];
         app.connections[0].rebuild_view();
-        app.connections[0].table.select(Some(0));
+        // Keys are always grouped, so row 0 is the "(no prefix)" header and the
+        // keys follow: k0 at row 1, k1 at row 2. From k0, Down lands on k1 and
+        // inspects it.
+        app.connections[0].table.select(Some(1));
         app.apply(Action::Down);
-        assert_eq!(app.connections[0].table.selected(), Some(1));
+        assert_eq!(app.connections[0].table.selected(), Some(2));
         assert_eq!(app.connections[0].value_key.as_deref(), Some("k1"));
     }
 
@@ -2041,27 +2142,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_toggle_group_inserts_headers_and_keeps_selection() {
+    async fn browser_view_is_always_grouped_with_headers() {
         let (mut app, _rx) = browser_with_keys(vec![
             stream_entry("user:1", ValueType::String),
             stream_entry("cache:x", ValueType::String),
             stream_entry("user:2", ValueType::String),
         ])
         .await;
-        // Select user:1 (name-asc order: cache:x, user:1, user:2 → index 1).
-        app.connections[0].table.select(Some(1));
-        assert_eq!(app.connections[0].selected().unwrap().key, "user:1");
-
-        app.apply(Action::ToggleGroup);
-        assert!(app.connections[0].group_by_prefix);
-        // Two group headers now exist in the view.
+        // Keys are always grouped by prefix — there is no ungrouped mode — so two
+        // group headers (cache, user) are present from the start.
         let groups = app.connections[0]
             .view
             .iter()
             .filter(|r| matches!(r, ViewRow::Group { .. }))
             .count();
         assert_eq!(groups, 2);
-        // The highlight followed the same key into its group.
+        // Rows: [cache hdr, cache:x, user hdr, user:1, user:2]. Select user:1.
+        app.connections[0].table.select(Some(3));
+        assert_eq!(app.connections[0].selected().unwrap().key, "user:1");
+        // A re-sort keeps the highlight on the same key (across the rebuild).
+        app.apply(Action::CycleSort);
         assert_eq!(app.connections[0].selected().unwrap().key, "user:1");
     }
 
@@ -2072,10 +2172,12 @@ mod tests {
             stream_entry("user:2", ValueType::String),
         ])
         .await;
-        app.apply(Action::ToggleGroup);
-        // The first row is the "user" group header.
+        // Always grouped: the first row is the "user" group header.
         app.connections[0].table.select(Some(0));
-        assert_eq!(app.connections[0].selected_group(), Some("user"));
+        assert_eq!(
+            app.connections[0].cursor_group_prefix().as_deref(),
+            Some("user")
+        );
 
         app.apply(Action::Enter); // collapse
         assert!(app.connections[0].collapsed.contains("user"));
@@ -2087,13 +2189,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_collapse_works_from_a_key_inside_the_group() {
+        // Folding should act on the group the cursor is in, even when a key —
+        // not the group header — is highlighted. The selection then lands on
+        // the (now folded) header so the cursor stays on a visible row.
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("user:2", ValueType::String),
+            stream_entry("cache:x", ValueType::String),
+        ])
+        .await;
+        // Always grouped — rows: [cache hdr, cache:x, user hdr, user:1, user:2].
+        // Select user:2.
+        app.connections[0].table.select(Some(4));
+        assert_eq!(app.connections[0].selected().unwrap().key, "user:2");
+
+        app.apply(Action::ToggleCollapse); // Space, from inside the group
+        assert!(
+            app.connections[0].collapsed.contains("user"),
+            "the cursor's group folds even from a key row"
+        );
+        // The "user" keys are hidden; "cache:x" remains.
+        assert_eq!(view_keys(&app.connections[0]), ["cache:x"]);
+        // The highlight moved to the folded "user" header (not a stale index).
+        assert_eq!(
+            app.connections[0].cursor_group_prefix().as_deref(),
+            Some("user")
+        );
+
+        app.apply(Action::Enter); // expand again from the header
+        assert!(!app.connections[0].collapsed.contains("user"));
+        assert_eq!(
+            view_keys(&app.connections[0]),
+            ["cache:x", "user:1", "user:2"]
+        );
+    }
+
+    #[tokio::test]
     async fn browser_selecting_group_header_requests_no_value() {
         let (mut app, _rx) = browser_with_keys(vec![
             stream_entry("user:1", ValueType::String),
             stream_entry("user:2", ValueType::String),
         ])
         .await;
-        app.apply(Action::ToggleGroup);
+        // Always grouped: row 0 is the "user" group header.
         app.connections[0].table.select(Some(0)); // the group header
         let id = app.active_id().unwrap();
         app.request_selected_value(id);
@@ -2109,7 +2248,7 @@ mod tests {
             stream_entry("cache:x", ValueType::String),
         ])
         .await;
-        app.apply(Action::ToggleGroup);
+        // Always grouped, so groups exist from the start.
         app.apply(Action::ToggleAllGroups); // collapse all
         assert!(view_keys(&app.connections[0]).is_empty());
         app.apply(Action::ToggleAllGroups); // expand all
@@ -2123,13 +2262,16 @@ mod tests {
             stream_entry("b", ValueType::String),
         ])
         .await;
-        app.connections[0].table.select(Some(0)); // "a" in name-asc order
+        // Always grouped: "a" and "b" share the empty prefix, so row 0 is the
+        // "(no prefix)" header and "a" (name-asc) is row 1.
+        app.connections[0].table.select(Some(1));
         assert_eq!(app.connections[0].selected().unwrap().key, "a");
-        // Sorting by type reorders to [b, a]; the highlight follows "a".
+        // Sorting by type reorders the group's keys to [b, a]; the highlight
+        // follows "a", which is now the second key (row 2, after the header).
         app.apply(Action::CycleSort);
         assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
         assert_eq!(app.connections[0].selected().unwrap().key, "a");
-        assert_eq!(app.connections[0].table.selected(), Some(1));
+        assert_eq!(app.connections[0].table.selected(), Some(2));
     }
 
     // -- change_db -----------------------------------------------------------
@@ -2488,7 +2630,8 @@ mod tests {
         connect(&mut app, 1, "prod", 16).await;
         app.connections[0].keys = vec![stream_entry("orders", ValueType::Stream)];
         app.connections[0].rebuild_view();
-        app.connections[0].table.select(Some(0));
+        // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
+        app.connections[0].table.select(Some(1));
         app.tail_selected_key();
         assert_eq!(app.screen, Screen::Realtime);
         assert_eq!(app.active_conn().unwrap().subs.len(), 1);
@@ -2501,7 +2644,8 @@ mod tests {
         connect(&mut app, 1, "prod", 16).await;
         app.connections[0].keys = vec![stream_entry("greeting", ValueType::String)];
         app.connections[0].rebuild_view();
-        app.connections[0].table.select(Some(0));
+        // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
+        app.connections[0].table.select(Some(1));
         app.tail_selected_key();
         assert!(app.active_conn().unwrap().subs.is_empty());
         assert!(app
@@ -2708,8 +2852,9 @@ mod tests {
     #[test]
     fn key_release_events_are_ignored() {
         let (mut app, _rx) = test_app();
+        // Esc on Connections quits (back) on *press*; a release must be ignored.
         let release = KeyEvent {
-            code: KeyCode::Char('q'),
+            code: KeyCode::Esc,
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Release,
             state: KeyEventState::NONE,
