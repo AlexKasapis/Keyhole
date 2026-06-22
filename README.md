@@ -103,13 +103,28 @@ cargo install keyhole --no-default-features
 
 ### Prebuilt binaries
 
-Download a tarball for your platform from the [Releases page] _(coming soon)_,
-or use the install script _(coming soon)_:
+Download a tarball for your platform from the [Releases page], or use the
+install script, which detects your OS/arch, verifies the SHA-256 checksum, and
+installs `keyhole` (and its man page) into `~/.local/bin`:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh | sh
 ```
+
+Two flavors are published per architecture (x86_64 and aarch64). The default is
+the full **glibc** build (keyring + AMQP + RabbitMQ). For a dependency-free
+**static** binary (Redis only, env-var secrets — ideal for headless/minimal
+hosts), select the `musl` flavor:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh \
+  | KEYHOLE_INSTALL_FLAVOR=musl sh
+```
+
+> The first tagged release is still in progress — these links go live once
+> `v0.1.0` is published. Track the [Releases page] for status.
 
 ### Distro & package managers _(coming soon)_
 

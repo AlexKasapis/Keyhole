@@ -1,0 +1,34 @@
+# Configuration for cargo-release (https://github.com/crate-ci/cargo-release).
+#
+#   just release            # preview (cargo-release is dry-run by default)
+#   just release patch -x   # actually bump, changelog, commit, tag, push
+#
+# `cargo release <level> -x` bumps the version, rewrites CHANGELOG.md (below),
+# commits, creates the `vX.Y.Z` tag, and pushes it. The tag push triggers
+# .github/workflows/release.yml, which builds and publishes the GitHub Release.
+#
+# Publishing to crates.io is intentionally left OFF here (`publish = false`):
+# it's the separate, irreversible Tier-1a step (`cargo publish`), kept out of
+# the tag→GitHub-Release flow so a release never accidentally pushes a crate.
+# Flip `publish` to true to fold crates.io publishing into the same command.
+
+allow-branch = ["main"]
+publish = false
+tag-name = "v{{version}}"
+tag-message = "Keyhole {{version}}"
+pre-release-commit-message = "Release {{version}}"
+
+# Move the "Unreleased" heading down to a dated, versioned section.
+[[pre-release-replacements]]
+file = "CHANGELOG.md"
+search = "## \\[Unreleased\\]"
+replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}"
+exactly = 1
+
+# Re-point the bottom-of-file compare links: "Unreleased" now compares against
+# the new tag, and a fresh link is added for the released version.
+[[pre-release-replacements]]
+file = "CHANGELOG.md"
+search = "\\[Unreleased\\]: https://github.com/AlexKasapis/Keyhole/compare/v[0-9.]+\\.\\.\\.HEAD"
+replace = "[Unreleased]: https://github.com/AlexKasapis/Keyhole/compare/v{{version}}...HEAD\n[{{version}}]: https://github.com/AlexKasapis/Keyhole/compare/v{{prev_version}}...v{{version}}"
+exactly = 1

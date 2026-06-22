@@ -52,3 +52,19 @@ build-release:
 build-musl:
     rustup target add x86_64-unknown-linux-musl
     cargo build --release --target x86_64-unknown-linux-musl --no-default-features
+
+# Cut a release via cargo-release: bump version, rewrite CHANGELOG.md, commit,
+# tag `vX.Y.Z`, and push (the tag triggers .github/workflows/release.yml).
+# cargo-release is dry-run by default — append `-x` to actually execute:
+#   just release patch        # preview a patch bump
+#   just release minor -x      # bump minor, tag, and push for real
+# Requires `cargo install cargo-release`. See release.toml for the config.
+release *ARGS:
+    cargo release {{ARGS}}
+
+# Lint the release plumbing the way CI does: shellcheck the installer + its
+# tests, run the installer test suite, and (if installed) actionlint the workflows.
+release-lint:
+    ./scripts/test_install.sh
+    shellcheck scripts/install.sh scripts/test_install.sh
+    command -v actionlint >/dev/null && actionlint || echo "actionlint not installed; skipping workflow lint"

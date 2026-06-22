@@ -1,0 +1,138 @@
+# Release automation: on a `vX.Y.Z` tag push, cut a GitHub Release with notes
+# pulled from CHANGELOG.md and upload, for every supported Linux target:
+#   * a `.tar.gz` (binary + man page + completions + LICENSEs + README/CHANGELOG)
+#   * a `.sha256` checksum next to it
+#   * the `keyhole-installer.sh` curl|sh installer (once, shared by all targets)
+#
+# Feature policy (see the README "Build variants" table): the glibc (`gnu`)
+# targets carry the full default feature set (keyring + AMQP + RabbitMQ); the
+# static `musl` targets are `--no-default-features` (Redis only, no D-Bus / TLS),
+# which is why this matrix sets features per-target rather than globally.
+#
+# ci.yml stays the test/lint gate; this workflow only runs on release tags.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.*"
+
+# Don't let two pushes of the same tag race on the release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Create the GitHub Release (notes from CHANGELOG.md) and attach the
+  # version-independent installer script. Fast, so it gates the rest.
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          # Extracts the section matching the tag's version as the release body.
+          changelog: CHANGELOG.md
+          # Prerelease tags (e.g. v0.1.0-rc.1) won't have a CHANGELOG stanza yet;
+          # still cut the release so the artifact pipeline can be smoke-tested.
+          allow-missing-changelog: true
+          title: "Keyhole $version"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload installer script
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp scripts/install.sh keyhole-installer.sh
+          gh release upload "${GITHUB_REF_NAME}" keyhole-installer.sh --clobber
+
+  # Generate the man page + shell completions once from a host build (they are
+  # target-independent), and share them with every packaging job. Built with
+  # --no-default-features purely for speed — `keyhole gen` introspects the clap
+  # definition, which is identical regardless of the broker feature flags.
+  assets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (headless feature set, for `gen` only)
+        run: cargo build --release --no-default-features
+
+      - name: Generate man page and completions
+        run: |
+          mkdir -p dist-assets
+          ./target/release/keyhole gen man --out dist-assets
+          ./target/release/keyhole gen completions bash --out dist-assets
+          ./target/release/keyhole gen completions zsh  --out dist-assets
+          ./target/release/keyhole gen completions fish --out dist-assets
+          ls -l dist-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packaging-assets
+          path: dist-assets/
+          if-no-files-found: error
+
+  # Cross-compile and upload one tarball + checksum per target.
+  upload-binaries:
+    needs: [create-release, assets]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # glibc — full default features (keyring + amqp + rabbitmq).
+          - target: x86_64-unknown-linux-gnu
+            no_default_features: false
+          - target: aarch64-unknown-linux-gnu
+            no_default_features: false
+          # musl — static, dependency-free, Redis-only (no keyring/amqp/rabbitmq).
+          - target: x86_64-unknown-linux-musl
+            no_default_features: true
+          - target: aarch64-unknown-linux-musl
+            no_default_features: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Download generated man page + completions
+        uses: actions/download-artifact@v4
+        with:
+          name: packaging-assets
+          path: dist-assets
+
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: keyhole
+          target: ${{ matrix.target }}
+          no-default-features: ${{ matrix.no_default_features }}
+          # cross-compilation handled by `cross` automatically; pin a reproducible build.
+          locked: true
+          checksum: sha256
+          leading-dir: true
+          # Bundle docs/licenses alongside the binary (glob/dir not supported —
+          # list each file; folded into a whitespace-separated list). Reused by
+          # the .deb/.rpm/AUR/Homebrew packaging in later tiers.
+          include: >-
+            dist-assets/keyhole.1
+            dist-assets/keyhole.bash
+            dist-assets/_keyhole
+            dist-assets/keyhole.fish
+            LICENSE-MIT
+            LICENSE-APACHE
+            README.md
+            CHANGELOG.md
+          ref: ${{ github.ref }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

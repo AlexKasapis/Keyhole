@@ -105,3 +105,35 @@ jobs:
 
       - name: Build static musl binary
         run: cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+
+  # Guard the release plumbing (installer script + workflows) on every push,
+  # so breakage is caught here rather than when a real `vX.Y.Z` tag is pushed.
+  release-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Installer test suite
+        # Target detection + full download/verify/install flow (no network).
+        run: ./scripts/test_install.sh
+
+      - name: ShellCheck the install scripts
+        # shellcheck is preinstalled on GitHub's ubuntu-latest runners.
+        run: shellcheck scripts/install.sh scripts/test_install.sh
+
+      - name: actionlint (workflow lint)
+        run: |
+          bash <(curl --proto '=https' --tlsv1.2 -fsSL \
+            https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  # Keep the crates.io publish (Tier 1a) green: a from-scratch package + build
+  # of exactly what `cargo publish` would upload.
+  publish-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo publish --dry-run
+        run: cargo publish --dry-run
