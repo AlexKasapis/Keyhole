@@ -7,13 +7,13 @@ mod state;
 
 pub use state::{
     ConnForm, Connection, Console, ConsoleEntry, InputMode, PaletteState, RecordState,
-    RecordingFile, Screen, Status, SubState, Subscription,
+    RecordingFile, Screen, Status, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseEventKind};
-use ratatui::widgets::ListState;
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use ratatui::widgets::{ListState, TableState};
 use time::OffsetDateTime;
 use tokio::sync::mpsc::Sender;
 use tokio_util::sync::CancellationToken;
@@ -42,6 +42,9 @@ const VALUE_LIMIT: usize = 200;
 const LOAD_MORE_MARGIN: usize = 5;
 /// Lines the Browser value pane scrolls per PageUp/PageDown.
 const VALUE_SCROLL_STEP: i32 = 10;
+/// Lines the Browser console band scrolls per PageUp/PageDown while focused —
+/// roughly one band's worth of output rows (see `CONSOLE_BAND_HEIGHT` in `ui`).
+const CONSOLE_SCROLL_STEP: i32 = 4;
 
 /// The whole application as seen by the render loop.
 pub struct App {
@@ -66,7 +69,7 @@ pub struct App {
     // UI state (read by `crate::ui`).
     pub(crate) theme: Theme,
     pub(crate) profiles: Vec<ConnectionConfig>,
-    pub(crate) profile_state: ListState,
+    pub(crate) profile_state: TableState,
     pub(crate) connections: Vec<Connection>,
     pub(crate) active: Option<usize>,
     pub(crate) screen: Screen,
@@ -98,7 +101,7 @@ impl App {
         let scan_count = config.settings.scan_count;
         let tail_scrollback = config.settings.tail_scrollback;
         let theme = Theme::resolve(&config.theme);
-        let mut profile_state = ListState::default();
+        let mut profile_state = TableState::default();
         if !profiles.is_empty() {
             profile_state.select(Some(0));
         }
@@ -283,7 +286,11 @@ impl App {
             conn.keys.extend(page.entries);
             conn.next_cursor = page.next_cursor;
             conn.complete = page.next_cursor == 0;
-            if conn.table.selected().is_none() && !conn.keys.is_empty() {
+            // Fold the new keys into the sorted/grouped view, keeping the
+            // highlight on whatever key/group was selected (or selecting the
+            // first row when nothing was).
+            conn.rebuild_view();
+            if conn.table.selected().is_none() && !conn.view.is_empty() {
                 conn.table.select(Some(0));
             }
         }
@@ -461,11 +468,12 @@ impl App {
             }
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
-            Action::Enter => {
-                if self.screen == Screen::Connections {
-                    self.connect_selected_profile();
-                }
-            }
+            Action::Enter => match self.screen {
+                Screen::Connections => self.connect_selected_profile(),
+                // On a group header, fold/unfold it; on a key, no-op.
+                Screen::Browser => self.toggle_selected_group(),
+                _ => {}
+            },
             Action::AddConnection => {
                 self.form = Some(ConnForm::new());
                 self.mode = InputMode::Form;
@@ -485,13 +493,6 @@ impl App {
                 self.screen = Screen::Recordings;
                 self.scan_recordings();
             }
-            Action::GotoConsole => match self.active_conn().map(|c| c.caps.can_console) {
-                Some(true) => self.screen = Screen::Console,
-                Some(false) => {
-                    self.set_status("this broker has no command console".to_string(), true)
-                }
-                None => self.set_status("connect first to use the console".to_string(), true),
-            },
             Action::StartFilter => {
                 if self.screen == Screen::Browser && self.active.is_some() {
                     self.filter.clear();
@@ -504,8 +505,12 @@ impl App {
                 let db = self.active_conn().map(|c| c.db).unwrap_or(0);
                 self.start_special_tail(SubSpec::Keyspace { db });
             }
+            // `i` focuses the Browser's console band to type a command (only on
+            // the Browser, and only for brokers that have a console).
             Action::ConsoleEdit => {
-                if self.screen == Screen::Console && self.active.is_some() {
+                let has_console =
+                    self.active_conn().map(|c| c.caps.can_console).unwrap_or(false);
+                if self.screen == Screen::Browser && has_console {
                     self.enter_command_mode();
                 }
             }
@@ -544,6 +549,33 @@ impl App {
                     }
                 }
             }
+            // Browser key-list ordering and grouping. Each mutates the active
+            // connection's view and reports the new state in the status bar.
+            Action::CycleSort => self.browser_view(|c| {
+                c.cycle_sort();
+                format!("sort: {} {}", c.sort.label(), sort_arrow(c.sort_desc))
+            }),
+            Action::ToggleSortDir => self.browser_view(|c| {
+                c.toggle_sort_dir();
+                format!("sort: {} {}", c.sort.label(), sort_arrow(c.sort_desc))
+            }),
+            Action::ToggleGroup => self.browser_view(|c| {
+                c.toggle_grouping();
+                if c.group_by_prefix {
+                    "grouping: by prefix".to_string()
+                } else {
+                    "grouping: off".to_string()
+                }
+            }),
+            Action::ToggleAllGroups => self.browser_view(|c| {
+                c.toggle_all_groups();
+                if c.group_by_prefix {
+                    "toggled all groups".to_string()
+                } else {
+                    "grouping is off — press p to group".to_string()
+                }
+            }),
+            Action::ToggleCollapse => self.toggle_selected_group(),
             // `r`: refresh data (Browser — keys and the server-stats band),
             // toggle recording (Realtime), rescan files (Recordings).
             Action::Refresh => match self.screen {
@@ -558,7 +590,6 @@ impl App {
                     self.scan_recordings();
                     self.set_status("recordings refreshed".to_string(), false);
                 }
-                Screen::Console => self.clear_console(),
                 Screen::Connections => {}
             },
             Action::ToggleHelp => self.show_help = !self.show_help,
@@ -653,7 +684,9 @@ impl App {
             Screen::Browser => {
                 if let Some(idx) = self.active {
                     let conn = &mut self.connections[idx];
-                    let next = move_selection(conn.table.selected(), conn.keys.len(), delta);
+                    // Selection moves through rendered rows (group headers +
+                    // keys), so it ranges over the view, not the raw key list.
+                    let next = move_selection(conn.table.selected(), conn.view.len(), delta);
                     conn.table.select(next);
                 }
                 if let Some(id) = self.active_id() {
@@ -667,7 +700,6 @@ impl App {
                 let next = move_selection(self.recordings_state.selected(), len, delta);
                 self.recordings_state.select(next);
             }
-            Screen::Console => self.scroll_console(delta),
         }
     }
 
@@ -683,7 +715,7 @@ impl App {
             Screen::Browser => {
                 if let Some(idx) = self.active {
                     let conn = &mut self.connections[idx];
-                    let len = conn.keys.len();
+                    let len = conn.view.len();
                     if len > 0 {
                         conn.table.select(Some(if top { 0 } else { len - 1 }));
                     }
@@ -710,13 +742,6 @@ impl App {
                 if len > 0 {
                     self.recordings_state
                         .select(Some(if top { 0 } else { len - 1 }));
-                }
-            }
-            Screen::Console => {
-                if let Some(conn) = self.active_conn_mut() {
-                    // Top: scroll fully up (render clamps the large offset);
-                    // bottom: follow the newest output.
-                    conn.console.scroll = if top { u16::MAX } else { 0 };
                 }
             }
         }
@@ -747,6 +772,34 @@ impl App {
         let id = conn.id;
         self.set_status(format!("Switched to db{new_db}"), false);
         self.start_browse(id, true);
+    }
+
+    /// Apply a view-setting mutation to the active connection while on the
+    /// Browser, surfacing the status string `f` returns. No-op off the Browser
+    /// or without an active connection.
+    fn browser_view<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut Connection) -> String,
+    {
+        if self.screen != Screen::Browser {
+            return;
+        }
+        let Some(conn) = self.active_conn_mut() else {
+            return;
+        };
+        let msg = f(conn);
+        self.set_status(msg, false);
+    }
+
+    /// Fold or unfold the group header under the cursor (Browser only). A no-op
+    /// when a key row — not a group header — is selected.
+    fn toggle_selected_group(&mut self) {
+        if self.screen != Screen::Browser {
+            return;
+        }
+        if let Some(conn) = self.active_conn_mut() {
+            conn.toggle_selected_group();
+        }
     }
 
     // -- connection lifecycle ------------------------------------------------
@@ -968,7 +1021,9 @@ impl App {
                 conn.keys.clear();
                 conn.next_cursor = 0;
                 conn.complete = false;
-                conn.table.select(Some(0));
+                // Rebuild the (now empty) view; sort/group/collapse preferences
+                // persist across a rescan, the selection resets to none.
+                conn.rebuild_view();
                 conn.value = None;
                 conn.value_key = None;
                 conn.value_scroll = 0;
@@ -1009,7 +1064,10 @@ impl App {
 
     fn maybe_load_more(&mut self, id: ConnId) {
         let should = self.conn_by_id(id).is_some_and(|c| {
-            !c.complete && c.table.selected().unwrap_or(0) + LOAD_MORE_MARGIN >= c.keys.len()
+            // The selection ranges over view rows, so the "near the end" check
+            // compares against the view length (which equals the key count when
+            // ungrouped, and is shorter when groups are collapsed).
+            !c.complete && c.table.selected().unwrap_or(0) + LOAD_MORE_MARGIN >= c.view.len()
         });
         if should {
             self.start_browse(id, false);
@@ -1256,6 +1314,7 @@ impl App {
     }
 
     fn handle_command_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => self.mode = InputMode::Normal,
             KeyCode::Enter => self.submit_command(),
@@ -1269,6 +1328,11 @@ impl App {
                     console.recall_next();
                 }
             }
+            // ↑↓ recall history, so the output band scrolls with PageUp/PageDown.
+            KeyCode::PageUp => self.scroll_console(-CONSOLE_SCROLL_STEP),
+            KeyCode::PageDown => self.scroll_console(CONSOLE_SCROLL_STEP),
+            // Ctrl-L clears the console (the standalone screen's `r`, now gone).
+            KeyCode::Char('l') if ctrl => self.clear_console(),
             KeyCode::Char(c) => {
                 if let Some(console) = self.active_console_mut() {
                     console.input.push(c);
@@ -1467,6 +1531,15 @@ fn move_selection(current: Option<usize>, len: usize, delta: i32) -> Option<usiz
     Some((cur + delta).clamp(0, len as i32 - 1) as usize)
 }
 
+/// Direction arrow + word for a status message describing the sort order.
+fn sort_arrow(desc: bool) -> &'static str {
+    if desc {
+        "↓ desc"
+    } else {
+        "↑ asc"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,6 +1634,7 @@ mod tests {
             key: name.into(),
             vtype,
             ttl: Ttl::NoExpire,
+            size: None,
         }
     }
 
@@ -1910,10 +1984,150 @@ mod tests {
             stream_entry("k1", ValueType::String),
             stream_entry("k2", ValueType::String),
         ];
+        app.connections[0].rebuild_view();
         app.connections[0].table.select(Some(0));
         app.apply(Action::Down);
         assert_eq!(app.connections[0].table.selected(), Some(1));
         assert_eq!(app.connections[0].value_key.as_deref(), Some("k1"));
+    }
+
+    /// The key names of the Entry rows in a connection's current view order.
+    fn view_keys(conn: &Connection) -> Vec<String> {
+        conn.view
+            .iter()
+            .filter_map(|r| match r {
+                ViewRow::Entry(i) => Some(conn.keys[*i].key.clone()),
+                ViewRow::Group { .. } => None,
+            })
+            .collect()
+    }
+
+    async fn browser_with_keys(keys: Vec<EntryMeta>) -> (App, Receiver<AppEvent>) {
+        let (mut app, rx) = test_app();
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Browser;
+        app.connections[0].keys = keys;
+        app.connections[0].rebuild_view();
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn browser_cycle_sort_changes_order() {
+        // Default name-asc order is a, b. Sorting by type puts the string (b)
+        // ahead of the hash (a), so the column choice — not the name — drives it.
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("a", ValueType::Hash),
+            stream_entry("b", ValueType::String),
+        ])
+        .await;
+        assert_eq!(view_keys(&app.connections[0]), ["a", "b"]);
+        app.apply(Action::CycleSort);
+        assert_eq!(app.connections[0].sort.label(), "type");
+        assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
+    }
+
+    #[tokio::test]
+    async fn browser_toggle_sort_direction_reverses_order() {
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("a", ValueType::String),
+            stream_entry("b", ValueType::String),
+        ])
+        .await;
+        app.apply(Action::ToggleSortDir);
+        assert!(app.connections[0].sort_desc);
+        assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
+    }
+
+    #[tokio::test]
+    async fn browser_toggle_group_inserts_headers_and_keeps_selection() {
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("cache:x", ValueType::String),
+            stream_entry("user:2", ValueType::String),
+        ])
+        .await;
+        // Select user:1 (name-asc order: cache:x, user:1, user:2 → index 1).
+        app.connections[0].table.select(Some(1));
+        assert_eq!(app.connections[0].selected().unwrap().key, "user:1");
+
+        app.apply(Action::ToggleGroup);
+        assert!(app.connections[0].group_by_prefix);
+        // Two group headers now exist in the view.
+        let groups = app.connections[0]
+            .view
+            .iter()
+            .filter(|r| matches!(r, ViewRow::Group { .. }))
+            .count();
+        assert_eq!(groups, 2);
+        // The highlight followed the same key into its group.
+        assert_eq!(app.connections[0].selected().unwrap().key, "user:1");
+    }
+
+    #[tokio::test]
+    async fn browser_enter_collapses_and_expands_selected_group() {
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("user:2", ValueType::String),
+        ])
+        .await;
+        app.apply(Action::ToggleGroup);
+        // The first row is the "user" group header.
+        app.connections[0].table.select(Some(0));
+        assert_eq!(app.connections[0].selected_group(), Some("user"));
+
+        app.apply(Action::Enter); // collapse
+        assert!(app.connections[0].collapsed.contains("user"));
+        assert!(view_keys(&app.connections[0]).is_empty(), "keys hidden");
+
+        app.apply(Action::Enter); // expand
+        assert!(!app.connections[0].collapsed.contains("user"));
+        assert_eq!(view_keys(&app.connections[0]), ["user:1", "user:2"]);
+    }
+
+    #[tokio::test]
+    async fn browser_selecting_group_header_requests_no_value() {
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("user:2", ValueType::String),
+        ])
+        .await;
+        app.apply(Action::ToggleGroup);
+        app.connections[0].table.select(Some(0)); // the group header
+        let id = app.active_id().unwrap();
+        app.request_selected_value(id);
+        // A group row is not a key, so nothing is inspected.
+        assert!(app.connections[0].selected().is_none());
+        assert!(app.connections[0].value_key.is_none());
+    }
+
+    #[tokio::test]
+    async fn browser_toggle_all_groups_folds_and_unfolds() {
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("cache:x", ValueType::String),
+        ])
+        .await;
+        app.apply(Action::ToggleGroup);
+        app.apply(Action::ToggleAllGroups); // collapse all
+        assert!(view_keys(&app.connections[0]).is_empty());
+        app.apply(Action::ToggleAllGroups); // expand all
+        assert_eq!(view_keys(&app.connections[0]).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn browser_resort_keeps_highlight_on_same_key() {
+        let (mut app, _rx) = browser_with_keys(vec![
+            stream_entry("a", ValueType::Hash),
+            stream_entry("b", ValueType::String),
+        ])
+        .await;
+        app.connections[0].table.select(Some(0)); // "a" in name-asc order
+        assert_eq!(app.connections[0].selected().unwrap().key, "a");
+        // Sorting by type reorders to [b, a]; the highlight follows "a".
+        app.apply(Action::CycleSort);
+        assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
+        assert_eq!(app.connections[0].selected().unwrap().key, "a");
+        assert_eq!(app.connections[0].table.selected(), Some(1));
     }
 
     // -- change_db -----------------------------------------------------------
@@ -2271,6 +2485,7 @@ mod tests {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.connections[0].keys = vec![stream_entry("orders", ValueType::Stream)];
+        app.connections[0].rebuild_view();
         app.connections[0].table.select(Some(0));
         app.tail_selected_key();
         assert_eq!(app.screen, Screen::Realtime);
@@ -2283,6 +2498,7 @@ mod tests {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
         app.connections[0].keys = vec![stream_entry("greeting", ValueType::String)];
+        app.connections[0].rebuild_view();
         app.connections[0].table.select(Some(0));
         app.tail_selected_key();
         assert!(app.active_conn().unwrap().subs.is_empty());
@@ -2615,19 +2831,16 @@ mod tests {
     async fn amqp_capabilities_gate_redis_only_screens() {
         let (mut app, _rx) = test_app();
         connect_amqp(&mut app, 1, "mq").await;
-        for (action, needle) in [
-            (Action::GotoBrowser, "no key browser"),
-            (Action::GotoConsole, "no command console"),
-        ] {
-            app.screen = Screen::Realtime;
-            app.apply(action);
-            assert_eq!(app.screen, Screen::Realtime, "{action:?} must be blocked");
-            assert!(
-                app.status.as_ref().unwrap().message.contains(needle),
-                "expected '{needle}' for {action:?}, got {:?}",
-                app.status.as_ref().unwrap().message
-            );
-        }
+        // The Browser (and the console band it now carries) is Redis-only.
+        app.screen = Screen::Realtime;
+        app.apply(Action::GotoBrowser);
+        assert_eq!(app.screen, Screen::Realtime, "GotoBrowser must be blocked");
+        assert!(app
+            .status
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("no key browser"));
     }
 
     #[tokio::test]
@@ -2665,25 +2878,45 @@ mod tests {
     // -- console -------------------------------------------------------------
 
     #[tokio::test]
-    async fn goto_console_requires_connection() {
+    async fn console_edit_requires_browser_with_console() {
+        // The console is a band in the Browser, entered with `i` (ConsoleEdit).
         let (mut app, _rx) = test_app();
-        app.apply(Action::GotoConsole);
-        assert_ne!(
-            app.screen,
-            Screen::Console,
-            "no console without a connection"
-        );
-        assert!(app.status.as_ref().unwrap().is_error);
+        // No connection: `i` is inert.
+        app.screen = Screen::Browser;
+        app.apply(Action::ConsoleEdit);
+        assert_eq!(app.mode, InputMode::Normal, "no connection → no command mode");
+
         connect(&mut app, 1, "prod", 16).await;
-        app.apply(Action::GotoConsole);
-        assert_eq!(app.screen, Screen::Console);
+        // Console-capable, but not on the Browser screen: still inert.
+        app.screen = Screen::Realtime;
+        app.apply(Action::ConsoleEdit);
+        assert_eq!(
+            app.mode,
+            InputMode::Normal,
+            "the console band only lives in the Browser"
+        );
+        // On the Browser with a console-capable broker: enters command mode.
+        app.screen = Screen::Browser;
+        app.apply(Action::ConsoleEdit);
+        assert_eq!(app.mode, InputMode::Command);
+    }
+
+    #[tokio::test]
+    async fn console_edit_inert_without_console_capability() {
+        // A broker with no console (AMQP), even forced onto a Browser screen,
+        // must not enter command mode — the capability gate, not just the screen.
+        let (mut app, _rx) = test_app();
+        connect_amqp(&mut app, 1, "mq").await;
+        app.screen = Screen::Browser;
+        app.apply(Action::ConsoleEdit);
+        assert_eq!(app.mode, InputMode::Normal);
     }
 
     #[tokio::test]
     async fn console_edit_and_submit_records_command() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.screen = Screen::Console;
+        app.screen = Screen::Browser;
         app.apply(Action::ConsoleEdit);
         assert_eq!(app.mode, InputMode::Command);
         for c in "GET k".chars() {
@@ -2731,7 +2964,7 @@ mod tests {
     async fn console_empty_submit_is_ignored() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.screen = Screen::Console;
+        app.screen = Screen::Browser;
         app.apply(Action::ConsoleEdit);
         app.handle_key(key(KeyCode::Enter)); // empty
         assert!(app.connections[0].console.history.is_empty());
@@ -2742,33 +2975,38 @@ mod tests {
     async fn clear_console_empties_output() {
         let (mut app, _rx) = test_app();
         let id = connect(&mut app, 1, "prod", 16).await;
-        app.screen = Screen::Console;
         app.handle_event(AppEvent::CommandResult {
             id,
             command: "PING".into(),
             result: Ok("PONG".into()),
         });
         assert_eq!(app.connections[0].console.entries.len(), 1);
-        app.apply(Action::Refresh); // on Console, refresh == clear
+        // Ctrl-L clears the console while it is focused (command mode).
+        app.screen = Screen::Browser;
+        app.apply(Action::ConsoleEdit);
+        app.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
         assert!(app.connections[0].console.entries.is_empty());
     }
 
     #[tokio::test]
-    async fn console_scroll_via_nav_and_edges() {
+    async fn console_scroll_via_pageup_pagedown() {
         let (mut app, _rx) = test_app();
         connect(&mut app, 1, "prod", 16).await;
-        app.screen = Screen::Console;
-        app.nav(-1); // up == scroll back
-        assert_eq!(app.connections[0].console.scroll, 1);
-        app.nav(1); // down
+        // The console band scrolls with PageUp/PageDown while focused (command
+        // mode), since ↑↓ are taken by command history recall.
+        app.screen = Screen::Browser;
+        app.apply(Action::ConsoleEdit);
+        app.handle_key(key(KeyCode::PageUp)); // scroll back a page
+        assert_eq!(
+            app.connections[0].console.scroll,
+            CONSOLE_SCROLL_STEP as u16
+        );
+        app.handle_key(key(KeyCode::PageDown)); // toward the newest output
         assert_eq!(app.connections[0].console.scroll, 0);
-        app.nav(1); // clamped at the bottom
-        assert_eq!(app.connections[0].console.scroll, 0);
-        app.nav_edge(true); // top -> max offset sentinel
-        assert_eq!(app.connections[0].console.scroll, u16::MAX);
-        app.nav_edge(false); // bottom -> follow
+        app.handle_key(key(KeyCode::PageDown)); // clamped at the bottom
         assert_eq!(app.connections[0].console.scroll, 0);
     }
+
 
     // -- command palette -----------------------------------------------------
 
@@ -2808,7 +3046,7 @@ mod tests {
             app.handle_key(ch(c));
         }
         let count = app.palette_labels().len();
-        assert!(count >= 5);
+        assert!(count >= 4); // 4 "Go to:" entries (Command console was removed)
         app.handle_key(key(KeyCode::Up)); // wrap to the last
         assert_eq!(app.palette.as_ref().unwrap().selected, count - 1);
         app.handle_key(key(KeyCode::Down)); // back to the first

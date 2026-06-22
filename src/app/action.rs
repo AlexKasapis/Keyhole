@@ -21,8 +21,6 @@ pub enum Action {
     GotoBrowser,
     GotoRealtime,
     GotoRecordings,
-    /// Open the read-only command console.
-    GotoConsole,
     StartFilter,
     /// Open the subscribe prompt.
     Subscribe,
@@ -30,7 +28,7 @@ pub enum Action {
     StartMonitor,
     /// Start a keyspace-notification tail on the active connection's db.
     StartKeyspace,
-    /// Begin typing a command (Console screen).
+    /// Begin typing a command in the Browser's console band.
     ConsoleEdit,
     /// Open the command palette overlay.
     OpenPalette,
@@ -44,6 +42,16 @@ pub enum Action {
     DbPrev,
     DbNext,
     LoadMore,
+    /// Cycle the key-list sort column (Browser).
+    CycleSort,
+    /// Flip the key-list sort direction (Browser).
+    ToggleSortDir,
+    /// Toggle namespace-prefix grouping (Browser).
+    ToggleGroup,
+    /// Collapse/expand the selected group header (Browser).
+    ToggleCollapse,
+    /// Collapse or expand every group at once (Browser).
+    ToggleAllGroups,
     /// Context refresh: browse/stats, toggle recording (Realtime), rescan (Recordings).
     Refresh,
     ToggleHelp,
@@ -71,7 +79,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('b')) => Some(Action::GotoBrowser),
         (false, Char('w')) => Some(Action::GotoRealtime),
         (false, Char('R')) => Some(Action::GotoRecordings),
-        (false, Char('e')) => Some(Action::GotoConsole),
         (false, Char('s')) => Some(Action::Subscribe),
         (false, Char('m')) => Some(Action::StartMonitor),
         (false, Char('K')) => Some(Action::StartKeyspace),
@@ -85,6 +92,11 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('[')) => Some(Action::DbPrev),
         (false, Char(']')) => Some(Action::DbNext),
         (false, Char('n')) => Some(Action::LoadMore),
+        (false, Char('o')) => Some(Action::CycleSort),
+        (false, Char('O')) => Some(Action::ToggleSortDir),
+        (false, Char('p')) => Some(Action::ToggleGroup),
+        (false, Char('z')) => Some(Action::ToggleAllGroups),
+        (false, Char(' ')) => Some(Action::ToggleCollapse),
         (false, Char('r')) => Some(Action::Refresh),
         (false, Char('?')) => Some(Action::ToggleHelp),
         (false, Esc) => Some(Action::Dismiss),
@@ -104,11 +116,14 @@ pub const PALETTE_ITEMS: &[PaletteItem] = &[
     pal("Go to: Browser", Action::GotoBrowser),
     pal("Go to: Realtime tails", Action::GotoRealtime),
     pal("Go to: Recordings", Action::GotoRecordings),
-    pal("Go to: Command console", Action::GotoConsole),
     pal("Add connection", Action::AddConnection),
     pal("Subscribe (pub/sub or stream)…", Action::Subscribe),
     pal("Monitor commands (MONITOR)", Action::StartMonitor),
     pal("Keyspace events (current db)", Action::StartKeyspace),
+    pal("Browser: cycle sort column", Action::CycleSort),
+    pal("Browser: toggle sort direction", Action::ToggleSortDir),
+    pal("Browser: group by prefix (toggle)", Action::ToggleGroup),
+    pal("Browser: collapse/expand all groups", Action::ToggleAllGroups),
     pal("Refresh / toggle recording", Action::Refresh),
     pal("Toggle help", Action::ToggleHelp),
     pal("Quit", Action::Quit),
@@ -159,7 +174,6 @@ mod tests {
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
         assert_eq!(plain(Char('w')), Some(Action::GotoRealtime));
         assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
-        assert_eq!(plain(Char('e')), Some(Action::GotoConsole));
         assert_eq!(plain(Char('s')), Some(Action::Subscribe));
         assert_eq!(plain(Char('m')), Some(Action::StartMonitor));
         assert_eq!(plain(Char('K')), Some(Action::StartKeyspace));
@@ -173,6 +187,11 @@ mod tests {
         assert_eq!(plain(Char('[')), Some(Action::DbPrev));
         assert_eq!(plain(Char(']')), Some(Action::DbNext));
         assert_eq!(plain(Char('n')), Some(Action::LoadMore));
+        assert_eq!(plain(Char('o')), Some(Action::CycleSort));
+        assert_eq!(plain(Char('O')), Some(Action::ToggleSortDir));
+        assert_eq!(plain(Char('p')), Some(Action::ToggleGroup));
+        assert_eq!(plain(Char('z')), Some(Action::ToggleAllGroups));
+        assert_eq!(plain(Char(' ')), Some(Action::ToggleCollapse));
         assert_eq!(plain(Char('r')), Some(Action::Refresh));
         assert_eq!(plain(Char('?')), Some(Action::ToggleHelp));
         assert_eq!(plain(Esc), Some(Action::Dismiss));
@@ -195,10 +214,13 @@ mod tests {
 
     #[test]
     fn unbound_keys_return_none() {
-        assert_eq!(plain(Char('z')), None);
+        assert_eq!(plain(Char('y')), None);
         assert_eq!(ctrl(Char('q')), None, "Ctrl-q is not a binding");
         assert_eq!(ctrl(Char('a')), None);
         assert_eq!(plain(F(1)), None);
+        // `e` opened the standalone Console screen, which is gone: the console is
+        // now an always-visible band in the Browser, entered with `i`.
+        assert_eq!(plain(Char('e')), None, "'e' is unbound: no Console screen");
     }
 
     #[test]
@@ -210,8 +232,8 @@ mod tests {
         assert_eq!(monitor.len(), 1);
         assert_eq!(monitor[0].action, Action::StartMonitor);
         assert!(
-            palette_matches("GO TO").len() >= 5,
-            "all the Go to: entries"
+            palette_matches("GO TO").len() >= 4,
+            "all the Go to: entries (Command console was removed)"
         );
         assert!(palette_matches("zzzz").is_empty(), "no matches");
     }

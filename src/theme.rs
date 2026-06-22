@@ -44,7 +44,12 @@ impl Theme {
                 .add_modifier(Modifier::BOLD),
             heading: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(Color::DarkGray),
-            selected: Style::new().add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),
+            // A background highlight (not reverse video) so per-span foreground
+            // colours — e.g. a connected row's green status dot — survive on the
+            // selected row and read the same whether selected or not.
+            selected: Style::new()
+                .bg(Color::Indexed(238))
+                .add_modifier(Modifier::BOLD),
             header: Style::new()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED)),
@@ -67,7 +72,11 @@ impl Theme {
                 .add_modifier(Modifier::BOLD),
             heading: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(Color::Indexed(245)),
-            selected: Style::new().add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),
+            // Background highlight (see the dark palette) so foreground colours
+            // survive on the selected row.
+            selected: Style::new()
+                .bg(Color::Indexed(252))
+                .add_modifier(Modifier::BOLD),
             header: Style::new()
                 .fg(Color::Blue)
                 .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED)),
@@ -180,6 +189,27 @@ mod tests {
         let t = Theme::from_config(&cfg, true);
         assert_eq!(t.accent.fg, None, "NO_COLOR drops all foreground colours");
         assert!(t.selected.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn coloured_selection_uses_background_not_reverse() {
+        // With colour available the selection is a background highlight, so a
+        // row's per-span foreground colours (e.g. the green status dot) are not
+        // inverted when the row is selected — it looks the same either way.
+        for t in [Theme::dark(), Theme::light()] {
+            assert!(t.selected.bg.is_some(), "selection sets a background");
+            assert!(
+                !t.selected.add_modifier.contains(Modifier::REVERSED),
+                "selection must not reverse foreground/background"
+            );
+            assert!(t.selected.add_modifier.contains(Modifier::BOLD));
+        }
+        // The colourless palette has no background to use, so it keeps reverse
+        // video as the only available affordance.
+        assert!(Theme::plain()
+            .selected
+            .add_modifier
+            .contains(Modifier::REVERSED));
     }
 
     #[test]

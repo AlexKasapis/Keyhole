@@ -1,3 +1,4 @@
 - Each new change should be accompanied with adequate and proper testing coverage.
 - All the codebase must be adequately and properly covered by tests.
 - If something is ambiguous, ask questions.
+- Ignore other work being simultaneously done in the repo. Do not change it, do not stash it.

@@ -143,6 +143,15 @@ impl BrokerConnection for RedisConnection {
             }
             let ttls: Vec<i64> = ttl_pipe.query_async(&mut conn).await?;
 
+            // `MEMORY USAGE` (Redis ≥ 4.0) returns the key's approximate footprint
+            // in bytes, or nil for a missing key. Older servers reject the command;
+            // a failed pipeline leaves every size `None` rather than failing browse.
+            let mut mem_pipe = redis::pipe();
+            for key in &keys {
+                mem_pipe.cmd("MEMORY").arg("USAGE").arg(key);
+            }
+            let sizes: Vec<Option<u64>> = mem_pipe.query_async(&mut conn).await.unwrap_or_default();
+
             for (i, key) in keys.into_iter().enumerate() {
                 let vtype = types
                     .get(i)
@@ -152,7 +161,13 @@ impl BrokerConnection for RedisConnection {
                     .get(i)
                     .map(|t| Ttl::from_redis(*t))
                     .unwrap_or(Ttl::Unknown);
-                entries.push(EntryMeta { key, vtype, ttl });
+                let size = sizes.get(i).copied().flatten();
+                entries.push(EntryMeta {
+                    key,
+                    vtype,
+                    ttl,
+                    size,
+                });
             }
         }
 
@@ -489,7 +504,7 @@ mod integration_tests {
 
         let mut conn = connected().await;
         let mut cursor = 0u64;
-        let mut found: Vec<(String, ValueType)> = Vec::new();
+        let mut found: Vec<(String, ValueType, Option<u64>)> = Vec::new();
         loop {
             let page = conn
                 .browse(BrowseReq {
@@ -500,7 +515,7 @@ mod integration_tests {
                 })
                 .await
                 .expect("browse");
-            found.extend(page.entries.into_iter().map(|e| (e.key, e.vtype)));
+            found.extend(page.entries.into_iter().map(|e| (e.key, e.vtype, e.size)));
             cursor = page.next_cursor;
             if cursor == 0 {
                 break;
@@ -508,11 +523,16 @@ mod integration_tests {
         }
 
         for key in ["it:browse:a", "it:browse:b", "it:browse:c"] {
-            assert!(found.iter().any(|(k, _)| k == key), "MATCH missed {key}");
+            assert!(found.iter().any(|(k, ..)| k == key), "MATCH missed {key}");
         }
         // MATCH must not leak keys outside the namespace, and type metadata is set.
-        assert!(found.iter().all(|(k, _)| k.starts_with("it:browse:")));
-        assert!(found.iter().all(|(_, t)| *t == ValueType::String));
+        assert!(found.iter().all(|(k, ..)| k.starts_with("it:browse:")));
+        assert!(found.iter().all(|(_, t, _)| *t == ValueType::String));
+        // MEMORY USAGE reports a footprint for every live key.
+        assert!(
+            found.iter().all(|(_, _, size)| size.is_some_and(|n| n > 0)),
+            "every key should report a non-zero memory size"
+        );
     }
 
     #[tokio::test]

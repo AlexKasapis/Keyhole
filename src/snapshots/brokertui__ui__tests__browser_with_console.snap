@@ -1,25 +1,29 @@
 ---
 source: src/ui.rs
-assertion_line: 960
-expression: "render_lines(&mut app, 90, 20)"
+assertion_line: 924
+expression: "render_lines(&mut app, 90, 24)"
 ---
  BrokerTUI   prod (db0)  · browser                                           12:34:56 UTC
  db0  match=*  2 keys  sort:name↑  group:off
 ┌ Server ────────────────────────────────────────────────────────────────────────────────┐
-│Mem ██████████ 1.0 MiB / 4.0 MiB            Hit █████████████████90.0% █████████████    │
-│v7.4.0  ·  up 1h 1m 1s  ·  7 clients  ·  120 ops/s  ·  db0=42 db1=7                     │
+│Loading server stats…                                                                   │
+│                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-┌ Keys ───────────────────────────────────┐┌ user:1 ─────────────────────────────────────┐
-│  Key            Type   TTL      Size    ││string · Utf8 · showing 5 of 5 bytes         │
+┌ Keys ───────────────────────────────────┐┌ Value ──────────────────────────────────────┐
+│  Key            Type   TTL      Size    ││loading…                                     │
 │▶ session:abc    hash   2m 0s    128 B   ││                                             │
-│  user:1         string 2m 0s    128 B   ││alice                                        │
+│  user:1         string 2m 0s    128 B   ││                                             │
+│                                         ││                                             │
+│                                         ││                                             │
+│                                         ││                                             │
+│                                         ││                                             │
 │                                         ││                                             │
 └─────────────────────────────────────────┘└─────────────────────────────────────────────┘
 ┌ Console — prod (read-only) ────────────────────────────────────────────────────────────┐
-│Read-only command console.                                                              │
 │                                                                                        │
-│Press 'i', type a command, Enter to run. Writes and admin commands are refused.         │
-│Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1               │
+│❯ SET k v                                                                               │
+│`SET` is not on the read-only allowlist                                                 │
+│                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
   ↑↓ keys · / filter · o sort · O dir · p group · ⏎ fold · [ ] db · i cmd · t tail · : pal

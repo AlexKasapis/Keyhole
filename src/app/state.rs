@@ -1,6 +1,7 @@
 //! UI-facing application state types owned by [`crate::app::App`].
 
-use std::collections::VecDeque;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::path::PathBuf;
 
 use ratatui::widgets::TableState;
@@ -8,7 +9,8 @@ use time::OffsetDateTime;
 
 use crate::broker::actor::ConnHandle;
 use crate::broker::{
-    BrokerEvent, BrokerKind, Capabilities, ConnId, EntryMeta, ServerStats, SubSpec, ValueView,
+    BrokerEvent, BrokerKind, Capabilities, ConnId, EntryMeta, ServerStats, SubSpec, Ttl, ValueType,
+    ValueView,
 };
 
 /// Which top-level screen is showing.
@@ -17,14 +19,14 @@ pub enum Screen {
     Connections,
     /// Key browser + value inspector for the active connection. For brokers with
     /// server statistics (Redis) it also carries a compact stats band up top —
-    /// the former standalone Dashboard, now merged into this main panel.
+    /// the former standalone Dashboard, now merged into this main panel. Brokers
+    /// with a read-only command console (Redis) also carry an always-visible
+    /// console band pinned to the bottom — the former standalone Console screen.
     Browser,
     /// Live tails (pub/sub, streams, keyspace, MONITOR) for the active connection.
     Realtime,
     /// On-disk recordings.
     Recordings,
-    /// Read-only command console for the active connection.
-    Console,
 }
 
 /// Keyboard input mode (text-entry modes capture raw keys).
@@ -210,6 +212,163 @@ pub struct PaletteState {
     pub selected: usize,
 }
 
+/// The column the key browser is ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+    /// Lexicographic by key name.
+    Name,
+    /// By value type.
+    Type,
+    /// By time-to-live.
+    Ttl,
+    /// By approximate memory footprint.
+    Size,
+}
+
+impl SortKey {
+    /// The next sort key in the cycle (Name → Type → Ttl → Size → Name).
+    pub fn next(self) -> Self {
+        match self {
+            SortKey::Name => SortKey::Type,
+            SortKey::Type => SortKey::Ttl,
+            SortKey::Ttl => SortKey::Size,
+            SortKey::Size => SortKey::Name,
+        }
+    }
+
+    /// Short label for the info bar.
+    pub fn label(self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Type => "type",
+            SortKey::Ttl => "ttl",
+            SortKey::Size => "size",
+        }
+    }
+}
+
+/// A single rendered row of the key browser: either a collapsible namespace
+/// group header (when grouping is on) or a key identified by its index into
+/// [`Connection::keys`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewRow {
+    /// A namespace-prefix group header and the number of keys it holds.
+    Group { prefix: String, count: usize },
+    /// A key entry; the index points into [`Connection::keys`].
+    Entry(usize),
+}
+
+/// Separator that delimits Redis key namespaces (`user:1000:name` → `user`).
+pub const PREFIX_SEPARATOR: char = ':';
+
+/// The grouping prefix of a key: everything before the first
+/// [`PREFIX_SEPARATOR`], or `""` when the key has no separator (such keys
+/// collect into a single "no prefix" group).
+fn key_prefix(key: &str) -> &str {
+    match key.split_once(PREFIX_SEPARATOR) {
+        Some((head, _)) => head,
+        None => "",
+    }
+}
+
+/// Stable display order of value types (used when sorting by type).
+fn type_rank(t: ValueType) -> u8 {
+    match t {
+        ValueType::String => 0,
+        ValueType::List => 1,
+        ValueType::Set => 2,
+        ValueType::Hash => 3,
+        ValueType::ZSet => 4,
+        ValueType::Stream => 5,
+        ValueType::None => 6,
+        ValueType::Unknown => 7,
+    }
+}
+
+/// Ascending TTL rank: soonest expiry first, then no-expire, then unknown.
+fn ttl_rank(t: Ttl) -> (u8, i64) {
+    match t {
+        Ttl::Seconds(s) => (0, s),
+        Ttl::NoExpire => (1, 0),
+        Ttl::Unknown => (2, 0),
+    }
+}
+
+/// Ascending size rank: smallest first, with unknown sizes sorted last.
+fn size_rank(s: Option<u64>) -> (u8, u64) {
+    match s {
+        Some(n) => (0, n),
+        None => (1, 0),
+    }
+}
+
+/// Ascending comparison of two entries by `sort`, with the key name as a
+/// stable tiebreak so equal-ranked rows keep a deterministic order.
+fn entry_cmp(a: &EntryMeta, b: &EntryMeta, sort: SortKey) -> Ordering {
+    let primary = match sort {
+        SortKey::Name => Ordering::Equal,
+        SortKey::Type => type_rank(a.vtype).cmp(&type_rank(b.vtype)),
+        SortKey::Ttl => ttl_rank(a.ttl).cmp(&ttl_rank(b.ttl)),
+        SortKey::Size => size_rank(a.size).cmp(&size_rank(b.size)),
+    };
+    primary.then_with(|| a.key.cmp(&b.key))
+}
+
+/// Build the ordered (and optionally grouped) list of display rows over `keys`.
+///
+/// Without grouping the result is a flat list of [`ViewRow::Entry`] in sorted
+/// order. With grouping, keys are bucketed by their namespace prefix; each
+/// bucket yields a [`ViewRow::Group`] header followed (unless the prefix is in
+/// `collapsed`) by its entries in sorted order. Groups are always listed
+/// alphabetically by prefix; `desc` reverses only the order of keys, not groups.
+pub fn build_view(
+    keys: &[EntryMeta],
+    sort: SortKey,
+    desc: bool,
+    group_by_prefix: bool,
+    collapsed: &HashSet<String>,
+) -> Vec<ViewRow> {
+    let order = |a: usize, b: usize| {
+        let o = entry_cmp(&keys[a], &keys[b], sort);
+        if desc {
+            o.reverse()
+        } else {
+            o
+        }
+    };
+
+    if !group_by_prefix {
+        let mut idxs: Vec<usize> = (0..keys.len()).collect();
+        idxs.sort_by(|&a, &b| order(a, b));
+        return idxs.into_iter().map(ViewRow::Entry).collect();
+    }
+
+    let mut buckets: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, e) in keys.iter().enumerate() {
+        buckets.entry(key_prefix(&e.key)).or_default().push(i);
+    }
+    let mut rows = Vec::new();
+    for (prefix, mut members) in buckets {
+        members.sort_by(|&a, &b| order(a, b));
+        rows.push(ViewRow::Group {
+            prefix: prefix.to_string(),
+            count: members.len(),
+        });
+        if !collapsed.contains(prefix) {
+            rows.extend(members.into_iter().map(ViewRow::Entry));
+        }
+    }
+    rows
+}
+
+/// Identity of the selected row, captured before a [`Connection::rebuild_view`]
+/// so the highlight can follow the same key/group across a re-sort or regroup.
+enum SelAnchor {
+    Entry(String),
+    Group(String),
+    None,
+}
+
 /// An open connection plus its per-connection browse/inspect/dashboard state.
 pub struct Connection {
     pub id: ConnId,
@@ -220,6 +379,18 @@ pub struct Connection {
     pub keys: Vec<EntryMeta>,
     pub next_cursor: u64,
     pub complete: bool,
+    /// Column the key list is ordered by.
+    pub sort: SortKey,
+    /// Descending order when set (otherwise ascending).
+    pub sort_desc: bool,
+    /// Group keys under collapsible namespace-prefix headers when set.
+    pub group_by_prefix: bool,
+    /// Prefixes whose groups are currently collapsed (hidden keys).
+    pub collapsed: HashSet<String>,
+    /// Rendered rows (group headers + keys) derived from `keys`, `sort`,
+    /// `sort_desc`, `group_by_prefix`, and `collapsed`. The table's selected
+    /// index points into this, not into `keys`. Rebuilt via [`Self::rebuild_view`].
+    pub view: Vec<ViewRow>,
     pub table: TableState,
     pub value: Option<ValueView>,
     pub value_key: Option<String>,
@@ -248,6 +419,11 @@ impl Connection {
             keys: Vec::new(),
             next_cursor: 0,
             complete: false,
+            sort: SortKey::Name,
+            sort_desc: false,
+            group_by_prefix: false,
+            collapsed: HashSet::new(),
+            view: Vec::new(),
             table,
             value: None,
             value_key: None,
@@ -261,9 +437,130 @@ impl Connection {
         }
     }
 
-    /// The currently highlighted key, if any.
+    /// The currently highlighted key, if a key row (not a group header) is
+    /// selected.
     pub fn selected(&self) -> Option<&EntryMeta> {
-        self.table.selected().and_then(|i| self.keys.get(i))
+        match self.table.selected().and_then(|i| self.view.get(i)) {
+            Some(ViewRow::Entry(i)) => self.keys.get(*i),
+            _ => None,
+        }
+    }
+
+    /// The namespace prefix of the selected group header, if a group row (not a
+    /// key) is highlighted.
+    pub fn selected_group(&self) -> Option<&str> {
+        match self.table.selected().and_then(|i| self.view.get(i)) {
+            Some(ViewRow::Group { prefix, .. }) => Some(prefix.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Rebuild [`Self::view`] from the current keys, sort, and grouping
+    /// settings, keeping the highlight on the same key/group where possible
+    /// (and clamping it into range when that row no longer exists).
+    pub fn rebuild_view(&mut self) {
+        let anchor = self.selected_anchor();
+        self.view = build_view(
+            &self.keys,
+            self.sort,
+            self.sort_desc,
+            self.group_by_prefix,
+            &self.collapsed,
+        );
+        self.restore_selection(anchor);
+    }
+
+    /// Capture the identity of the currently selected row so it can be re-found
+    /// after the view is rebuilt.
+    fn selected_anchor(&self) -> SelAnchor {
+        match self.table.selected().and_then(|i| self.view.get(i)) {
+            Some(ViewRow::Entry(i)) => self
+                .keys
+                .get(*i)
+                .map(|e| SelAnchor::Entry(e.key.clone()))
+                .unwrap_or(SelAnchor::None),
+            Some(ViewRow::Group { prefix, .. }) => SelAnchor::Group(prefix.clone()),
+            None => SelAnchor::None,
+        }
+    }
+
+    /// Re-select the row matching `anchor` in the freshly built view, falling
+    /// back to the clamped previous index, or `None` when the view is empty.
+    fn restore_selection(&mut self, anchor: SelAnchor) {
+        if self.view.is_empty() {
+            self.table.select(None);
+            return;
+        }
+        let keys = &self.keys;
+        let found = match anchor {
+            SelAnchor::Entry(key) => self.view.iter().position(|r| match r {
+                ViewRow::Entry(i) => keys[*i].key == key,
+                ViewRow::Group { .. } => false,
+            }),
+            SelAnchor::Group(prefix) => self
+                .view
+                .iter()
+                .position(|r| matches!(r, ViewRow::Group { prefix: p, .. } if *p == prefix)),
+            SelAnchor::None => None,
+        };
+        let idx = found.unwrap_or_else(|| self.table.selected().unwrap_or(0).min(self.view.len() - 1));
+        self.table.select(Some(idx));
+    }
+
+    /// Advance the sort key to the next column and re-sort.
+    pub fn cycle_sort(&mut self) {
+        self.sort = self.sort.next();
+        self.rebuild_view();
+    }
+
+    /// Flip between ascending and descending order and re-sort.
+    pub fn toggle_sort_dir(&mut self) {
+        self.sort_desc = !self.sort_desc;
+        self.rebuild_view();
+    }
+
+    /// Toggle namespace-prefix grouping on or off.
+    pub fn toggle_grouping(&mut self) {
+        self.group_by_prefix = !self.group_by_prefix;
+        self.rebuild_view();
+    }
+
+    /// Collapse or expand the selected group header. Returns `true` if a group
+    /// row was selected (and therefore toggled), `false` if a key was selected.
+    pub fn toggle_selected_group(&mut self) -> bool {
+        let Some(prefix) = self.selected_group().map(str::to_string) else {
+            return false;
+        };
+        if !self.collapsed.remove(&prefix) {
+            self.collapsed.insert(prefix);
+        }
+        self.rebuild_view();
+        true
+    }
+
+    /// Collapse every group when any is currently expanded, otherwise expand
+    /// them all. No-op when grouping is off.
+    pub fn toggle_all_groups(&mut self) {
+        let prefixes: Vec<String> = self
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                ViewRow::Group { prefix, .. } => Some(prefix.clone()),
+                ViewRow::Entry(_) => None,
+            })
+            .collect();
+        if prefixes.is_empty() {
+            return;
+        }
+        let any_expanded = prefixes.iter().any(|p| !self.collapsed.contains(p));
+        if any_expanded {
+            self.collapsed.extend(prefixes);
+        } else {
+            for p in &prefixes {
+                self.collapsed.remove(p);
+            }
+        }
+        self.rebuild_view();
     }
 
     /// The focused tail, if any.
@@ -430,6 +727,125 @@ mod tests {
             payload: Payload::Utf8(tag.to_string()),
             meta: Vec::new(),
         }
+    }
+
+    fn meta(key: &str, vtype: ValueType, ttl: Ttl, size: Option<u64>) -> EntryMeta {
+        EntryMeta {
+            key: key.to_string(),
+            vtype,
+            ttl,
+            size,
+        }
+    }
+
+    /// The key names of the [`ViewRow::Entry`] rows, in view order.
+    fn entry_keys(view: &[ViewRow], keys: &[EntryMeta]) -> Vec<String> {
+        view.iter()
+            .filter_map(|r| match r {
+                ViewRow::Entry(i) => Some(keys[*i].key.clone()),
+                ViewRow::Group { .. } => None,
+            })
+            .collect()
+    }
+
+    /// The `(prefix, count)` of each [`ViewRow::Group`] header, in view order.
+    fn group_headers(view: &[ViewRow]) -> Vec<(String, usize)> {
+        view.iter()
+            .filter_map(|r| match r {
+                ViewRow::Group { prefix, count } => Some((prefix.clone(), *count)),
+                ViewRow::Entry(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn build_view_sorts_by_name_both_directions() {
+        let keys = vec![
+            meta("banana", ValueType::String, Ttl::NoExpire, None),
+            meta("apple", ValueType::String, Ttl::NoExpire, None),
+            meta("cherry", ValueType::String, Ttl::NoExpire, None),
+        ];
+        let empty = HashSet::new();
+        let asc = build_view(&keys, SortKey::Name, false, false, &empty);
+        assert_eq!(entry_keys(&asc, &keys), ["apple", "banana", "cherry"]);
+        let desc = build_view(&keys, SortKey::Name, true, false, &empty);
+        assert_eq!(entry_keys(&desc, &keys), ["cherry", "banana", "apple"]);
+    }
+
+    #[test]
+    fn build_view_sorts_by_type_then_name() {
+        let keys = vec![
+            meta("z", ValueType::Hash, Ttl::NoExpire, None),
+            meta("a", ValueType::String, Ttl::NoExpire, None),
+            meta("b", ValueType::String, Ttl::NoExpire, None),
+        ];
+        let view = build_view(&keys, SortKey::Type, false, false, &HashSet::new());
+        // strings (rank 0) before hash (rank 3); ties broken by name.
+        assert_eq!(entry_keys(&view, &keys), ["a", "b", "z"]);
+    }
+
+    #[test]
+    fn build_view_sorts_by_ttl_soonest_first_then_no_expire_then_unknown() {
+        let keys = vec![
+            meta("never", ValueType::String, Ttl::NoExpire, None),
+            meta("soon", ValueType::String, Ttl::Seconds(10), None),
+            meta("later", ValueType::String, Ttl::Seconds(100), None),
+            meta("gone", ValueType::String, Ttl::Unknown, None),
+        ];
+        let view = build_view(&keys, SortKey::Ttl, false, false, &HashSet::new());
+        assert_eq!(entry_keys(&view, &keys), ["soon", "later", "never", "gone"]);
+    }
+
+    #[test]
+    fn build_view_sorts_by_size_smallest_first_unknown_last() {
+        let keys = vec![
+            meta("big", ValueType::String, Ttl::NoExpire, Some(1000)),
+            meta("small", ValueType::String, Ttl::NoExpire, Some(10)),
+            meta("unknown", ValueType::String, Ttl::NoExpire, None),
+        ];
+        let view = build_view(&keys, SortKey::Size, false, false, &HashSet::new());
+        assert_eq!(entry_keys(&view, &keys), ["small", "big", "unknown"]);
+    }
+
+    #[test]
+    fn build_view_groups_by_prefix_with_headers_and_no_prefix_bucket() {
+        let keys = vec![
+            meta("user:2", ValueType::String, Ttl::NoExpire, None),
+            meta("cache:x", ValueType::String, Ttl::NoExpire, None),
+            meta("user:1", ValueType::String, Ttl::NoExpire, None),
+            meta("loose", ValueType::String, Ttl::NoExpire, None),
+        ];
+        let view = build_view(&keys, SortKey::Name, false, true, &HashSet::new());
+        // Groups are alphabetical by prefix: "" (no prefix) sorts first, then
+        // cache, then user. Each header carries its key count.
+        assert_eq!(
+            group_headers(&view),
+            [
+                ("".to_string(), 1),
+                ("cache".to_string(), 1),
+                ("user".to_string(), 2),
+            ]
+        );
+        // Keys within a group are name-sorted (user:1 before user:2).
+        assert_eq!(entry_keys(&view, &keys), ["loose", "cache:x", "user:1", "user:2"]);
+    }
+
+    #[test]
+    fn build_view_collapsed_group_keeps_header_but_hides_entries() {
+        let keys = vec![
+            meta("user:1", ValueType::String, Ttl::NoExpire, None),
+            meta("user:2", ValueType::String, Ttl::NoExpire, None),
+            meta("cache:x", ValueType::String, Ttl::NoExpire, None),
+        ];
+        let mut collapsed = HashSet::new();
+        collapsed.insert("user".to_string());
+        let view = build_view(&keys, SortKey::Name, false, true, &collapsed);
+        // Both headers remain; the collapsed group's keys are gone.
+        assert_eq!(
+            group_headers(&view),
+            [("cache".to_string(), 1), ("user".to_string(), 2)]
+        );
+        assert_eq!(entry_keys(&view, &keys), ["cache:x"]);
     }
 
     #[test]

@@ -269,12 +269,15 @@ pub struct BrowseReq {
     pub page_size: usize,
 }
 
-/// One listed entry with its type and TTL.
+/// One listed entry with its type, TTL, and (when available) memory footprint.
 #[derive(Debug, Clone)]
 pub struct EntryMeta {
     pub key: String,
     pub vtype: ValueType,
     pub ttl: Ttl,
+    /// Approximate memory used by the key in bytes (`MEMORY USAGE`); `None` when
+    /// the server did not report it (missing key, command unavailable, etc.).
+    pub size: Option<u64>,
 }
 
 /// A page of browse results.

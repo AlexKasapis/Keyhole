@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 883
 expression: "render_lines(&mut app, 90, 32)"
 ---
  BrokerTUI   no connection  · connections                                    12:34:56 UTC
@@ -9,11 +10,14 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │  Enter connect (Connections)    : command palette              │           │
 │           │                                                                │           │
 │           │Screens                                                         │           │
-│           │  c connections  b browser  w realtime  R recordings  e console │           │
+│           │  c connections  b browser  w realtime  R recordings            │           │
 │           │                                                                │           │
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │
+│           │  the read-only console (Redis) is a band along the bottom      │           │
 │           │  / filter   [ ] change DB   n load more   r refresh            │           │
+│           │  o sort column   O direction   p group by prefix               │           │
+│           │  Enter/Space fold group   z fold/unfold all                    │           │
 │           │  PgUp/PgDn (or Ctrl-u/d) scroll the value pane                 │           │
 │           │  t tail selected stream    s subscribe (pub/sub or stream)     │           │
 │           │                                                                │           │
@@ -22,15 +26,12 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │  ↑↓ scroll   G follow newest   r toggle recording              │           │
 │           │  spec: pubsub:ch · psub:ch.* · stream:key · keyspace[:N] · moni│           │
 │           │                                                                │           │
-│           │Console (read-only)                                             │           │
-│           │  i type a command   Enter run   ↑↓ history / scroll   r clear  │           │
-│           │  writes and admin commands are refused                         │           │
+│           │Console (read-only, Browser band)                               │           │
+│           │  i type a command   Enter run   ↑↓ history   PgUp/PgDn scroll  │           │
+│           │  Ctrl-L clear   writes and admin commands are refused          │           │
 │           │                                                                │           │
 │           │General                                                         │           │
 │           │  a add connection    ? toggle help    q / Ctrl-c quit          │           │
-│           │                                                                │           │
-│           │                                                                │           │
-│           │                                                                │           │
 │           │                                                                │           │
 └───────────└────────────────────────────────────────────────────────────────┘───────────┘
   ↑↓ move · Enter connect · a add · : palette · ? help · q quit

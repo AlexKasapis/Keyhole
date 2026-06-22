@@ -86,6 +86,16 @@ impl ConnectionConfig {
         }
     }
 
+    /// The configured login username, if any — shown as a `user@` prefix on the
+    /// endpoint in the connections list.
+    pub fn username(&self) -> Option<&str> {
+        match self {
+            ConnectionConfig::Redis(p) => p.username.as_deref(),
+            ConnectionConfig::Amqp(p) => p.username.as_deref(),
+            ConnectionConfig::Rabbitmq(p) => p.username.as_deref(),
+        }
+    }
+
     /// A `host:port[/db|/vhost][ tls]` summary for the connections list.
     pub fn endpoint(&self) -> String {
         match self {
@@ -523,6 +533,33 @@ mod tests {
         // Absent [theme] yields an all-None default.
         let minimal: Config = toml::from_str("").unwrap();
         assert!(minimal.theme.base.is_none());
+    }
+
+    #[test]
+    fn username_accessor_reads_each_variant() {
+        let text = r#"
+            [[connection]]
+            type = "redis"
+            name = "r"
+            username = "default"
+
+            [[connection]]
+            type = "amqp"
+            name = "a"
+
+            [[connection]]
+            type = "rabbitmq"
+            name = "rmq"
+            username = "app"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.connections[0].username(), Some("default"));
+        assert_eq!(
+            cfg.connections[1].username(),
+            None,
+            "no username configured"
+        );
+        assert_eq!(cfg.connections[2].username(), Some("app"));
     }
 
     #[test]

@@ -2,13 +2,16 @@
 //! current [`App`] state into the given area.
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph, Row, Table, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, Cell, Clear, Gauge, HighlightSpacing, List, ListItem, Paragraph, Row, Table, Tabs, Wrap,
+};
 use ratatui::Frame;
 use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, ConnForm, Connection, RecordState, SubState};
+use crate::app::{App, ConnForm, Connection, InputMode, RecordState, SubState, ViewRow};
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
 
@@ -32,32 +35,100 @@ pub fn connections(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
         return;
     }
 
-    let items: Vec<ListItem> = app
-        .profiles
-        .iter()
-        .map(|p| {
-            let dot = if app.is_connected(p.name()) {
-                "●"
-            } else {
-                "○"
-            };
-            ListItem::new(Line::from(vec![
-                Span::raw(format!("{dot} {}  ", p.name())),
-                Span::styled(format!("[{}] ", p.kind_label()), theme.dim),
-                Span::raw(p.endpoint()),
-            ]))
-        })
-        .collect();
+    // One row per saved profile, laid out in columns. The status dot is green
+    // when the profile has an open connection (the same green as the status
+    // bar's "Connected to …"), and a dim hollow circle otherwise. The INFO
+    // column stays terse: a live connection surfaces a little broker state,
+    // everything else just reads "offline".
+    let mut rows: Vec<Row> = Vec::with_capacity(app.profiles.len());
+    for p in &app.profiles {
+        let conn = app.connections.iter().find(|c| c.name == p.name());
+        let (dot, dot_style) = if app.is_connected(p.name()) {
+            ("●", theme.success)
+        } else {
+            ("○", theme.dim)
+        };
+        let endpoint = match p.username() {
+            Some(user) => format!("{user}@{}", p.endpoint()),
+            None => p.endpoint(),
+        };
+        let (info, info_style) = match conn {
+            Some(c) => (connection_info(c), Style::default()),
+            None => ("offline".to_string(), theme.dim),
+        };
+        rows.push(Row::new(vec![
+            Cell::from(Span::styled(dot, dot_style)),
+            Cell::from(Span::raw(p.name().to_string())),
+            Cell::from(Span::styled(p.kind_label(), theme.dim)),
+            Cell::from(Span::styled(endpoint, theme.dim)),
+            Cell::from(Span::styled(info, info_style)),
+        ]));
+    }
 
-    let list = List::new(items)
+    // Fixed widths for the leading columns so the flexible INFO column absorbs
+    // the remaining width (and shows the full live summary on wide terminals);
+    // names/endpoints longer than their column are truncated by the table.
+    let widths = [
+        Constraint::Length(1),  // status dot
+        Constraint::Length(18), // name
+        Constraint::Length(8),  // kind
+        Constraint::Length(26), // endpoint
+        Constraint::Min(16),    // info
+    ];
+    let table = Table::new(rows, widths)
+        .header(Row::new(["", "NAME", "KIND", "ENDPOINT", "INFO"]).style(theme.header))
+        .column_spacing(2)
         .block(block)
-        .highlight_style(theme.selected)
-        .highlight_symbol("▶ ");
-    frame.render_stateful_widget(list, area, &mut app.profile_state);
+        .row_highlight_style(theme.selected)
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+    frame.render_stateful_widget(table, area, &mut app.profile_state);
+}
+
+/// A terse one-line summary of a live connection for the Connections list's
+/// INFO column. Redis exposes server statistics (version, key count, clients,
+/// throughput, memory); the AMQP brokers have no such endpoint, so they report
+/// liveness plus how many tails are open. Kept short so the row stays readable.
+fn connection_info(conn: &Connection) -> String {
+    match conn.caps.kind {
+        BrokerKind::Redis => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(stats) = &conn.stats {
+                if let Some(version) = &stats.redis_version {
+                    parts.push(format!("v{version}"));
+                }
+                let keys: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
+                parts.push(format!("{keys} keys"));
+                if let Some(clients) = stats.connected_clients {
+                    parts.push(format!("{clients} clients"));
+                }
+                if let Some(ops) = stats.instantaneous_ops_per_sec {
+                    parts.push(format!("{ops} ops/s"));
+                }
+                if let Some(mem) = stats.used_memory {
+                    parts.push(human_bytes(mem));
+                }
+            }
+            // Connected but stats not yet fetched (or unavailable).
+            if parts.is_empty() {
+                "live".to_string()
+            } else {
+                parts.join(" · ")
+            }
+        }
+        BrokerKind::Amqp | BrokerKind::Rabbitmq => match conn.subs.len() {
+            0 => "live".to_string(),
+            1 => "live · 1 tail".to_string(),
+            n => format!("live · {n} tails"),
+        },
+    }
 }
 
 /// Browser screen: key table + value pane for the active connection.
 pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    // The console band shows a typing cursor only in command mode; capture the
+    // mode before the `&mut` borrow of the active connection below.
+    let mode = app.mode;
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
             .style(theme.dim)
@@ -66,27 +137,42 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         return;
     };
 
-    // Brokers that expose server statistics (Redis) carry a compact stats band
-    // — the former standalone Dashboard — between the info bar and the panes.
-    let (info_area, band_area, body_area) = if conn.caps.can_dashboard {
-        let [info, band, body] = Layout::vertical([
-            Constraint::Length(1),
-            Constraint::Length(SERVER_BAND_HEIGHT),
-            Constraint::Min(0),
-        ])
-        .areas(area);
-        (info, Some(band), body)
-    } else {
-        let [info, body] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        (info, None, body)
-    };
+    // The view (sorted/grouped rows) is a cache derived from `keys`; if keys
+    // were populated without a rebuild (it is always built on a SCAN page in
+    // normal use), bring it up to date before rendering.
+    if conn.view.is_empty() && !conn.keys.is_empty() {
+        conn.rebuild_view();
+    }
+
+    // The Browser stacks, top to bottom: a one-line info bar; an optional
+    // server-stats band (Redis — the former standalone Dashboard); the keys +
+    // value panes; and an optional, always-visible read-only command console
+    // pinned to the bottom (Redis — the former standalone Console screen).
+    let mut rows = vec![Constraint::Length(1)];
+    if conn.caps.can_dashboard {
+        rows.push(Constraint::Length(SERVER_BAND_HEIGHT));
+    }
+    rows.push(Constraint::Min(0));
+    if conn.caps.can_console {
+        rows.push(Constraint::Length(CONSOLE_BAND_HEIGHT));
+    }
+    let chunks = Layout::vertical(rows).split(area);
+    let info_area = chunks[0];
+    let band_area = conn.caps.can_dashboard.then(|| chunks[1]);
+    // Body sits after the info bar and the optional stats band.
+    let body_idx = if conn.caps.can_dashboard { 2 } else { 1 };
+    let body_area = chunks[body_idx];
+    let console_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
 
     let scanning = if conn.complete { "" } else { " · scanning…" };
+    let sort_dir = if conn.sort_desc { "↓" } else { "↑" };
+    let grouping = if conn.group_by_prefix { "prefix" } else { "off" };
     let info = Line::from(vec![
         Span::styled(format!(" db{} ", conn.db), theme.accent),
         Span::styled(format!(" match={} ", conn.pattern), theme.dim),
         Span::styled(format!(" {} keys{scanning} ", conn.keys.len()), theme.dim),
+        Span::styled(format!(" sort:{}{sort_dir} ", conn.sort.label()), theme.dim),
+        Span::styled(format!(" group:{grouping} "), theme.dim),
     ]);
     frame.render_widget(Paragraph::new(info).style(theme.status_bar), info_area);
 
@@ -98,25 +184,69 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)])
             .areas(body_area);
 
+    // One rendered row per view entry: a styled, key-count-bearing header for a
+    // group (with a fold marker), or a key with its type / TTL / size. Keys are
+    // indented under their header when grouping is on.
+    let grouped = conn.group_by_prefix;
     let rows: Vec<Row> = conn
-        .keys
+        .view
         .iter()
-        .map(|e| {
-            let ttl = match e.ttl {
-                Ttl::NoExpire => "—".to_string(),
-                Ttl::Seconds(s) => human_duration(s.max(0) as u64),
-                Ttl::Unknown => "?".to_string(),
-            };
-            Row::new([e.key.clone(), e.vtype.label().to_string(), ttl])
+        .filter_map(|vr| match vr {
+            ViewRow::Group { prefix, count } => {
+                let marker = if conn.collapsed.contains(prefix) {
+                    "▸"
+                } else {
+                    "▾"
+                };
+                let name = if prefix.is_empty() {
+                    "(no prefix)"
+                } else {
+                    prefix.as_str()
+                };
+                Some(
+                    Row::new(vec![
+                        Cell::from(format!("{marker} {name} ({count})")),
+                        Cell::from(""),
+                        Cell::from(""),
+                        Cell::from(""),
+                    ])
+                    .style(theme.heading),
+                )
+            }
+            // `get` rather than indexing: a stale view (keys mutated without a
+            // rebuild) must skip the row, never panic.
+            ViewRow::Entry(i) => conn.keys.get(*i).map(|e| {
+                let ttl = match e.ttl {
+                    Ttl::NoExpire => "—".to_string(),
+                    Ttl::Seconds(s) => human_duration(s.max(0) as u64),
+                    Ttl::Unknown => "?".to_string(),
+                };
+                let size = match e.size {
+                    Some(n) => human_bytes(n),
+                    None => "—".to_string(),
+                };
+                let key = if grouped {
+                    format!("  {}", e.key)
+                } else {
+                    e.key.clone()
+                };
+                Row::new(vec![
+                    Cell::from(key),
+                    Cell::from(e.vtype.label().to_string()),
+                    Cell::from(ttl),
+                    Cell::from(size),
+                ])
+            }),
         })
         .collect();
     let widths = [
-        Constraint::Percentage(64),
-        Constraint::Length(7),
-        Constraint::Length(10),
+        Constraint::Min(10),
+        Constraint::Length(6),
+        Constraint::Length(8),
+        Constraint::Length(8),
     ];
     let table = Table::new(rows, widths)
-        .header(Row::new(["Key", "Type", "TTL"]).style(theme.header))
+        .header(Row::new(["Key", "Type", "TTL", "Size"]).style(theme.header))
         .block(
             Block::bordered()
                 .title(" Keys ")
@@ -148,11 +278,20 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((conn.value_scroll, 0));
     frame.render_widget(value, value_area);
+
+    if let Some(console_area) = console_area {
+        console_band(frame, conn, mode, theme, console_area);
+    }
 }
 
 /// Total height (rows) reserved for the Browser's server-stats band: a border
 /// (2) wrapping a gauges row (1) and a one-line metrics summary (1).
 const SERVER_BAND_HEIGHT: u16 = 4;
+
+/// Total height (rows) reserved for the Browser's read-only console band: a
+/// border (2) wrapping up to four output rows (the scrollback tail) and the
+/// one-line prompt — compact, but enough to read a short reply at a glance.
+const CONSOLE_BAND_HEIGHT: u16 = 7;
 
 /// The server-stats band shown atop the Browser for brokers that expose server
 /// statistics (Redis) — the former standalone Dashboard, merged into the main
@@ -458,18 +597,12 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
 }
 
-/// Console screen: read-only command output for the active connection, with an
-/// input prompt pinned to the bottom.
-pub fn console(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(conn) = app.active_conn() else {
-        frame.render_widget(
-            Paragraph::new("No active connection. Connect first, then press 'e' for the console.")
-                .style(theme.dim)
-                .block(Block::bordered().border_style(theme.border)),
-            area,
-        );
-        return;
-    };
+/// The Browser's read-only console band: command output for the active
+/// connection with an input prompt pinned to the bottom. Always visible in the
+/// Browser for brokers that support a console (Redis) — the former standalone
+/// Console screen, now a compact band. The no-connection case is handled by the
+/// Browser, so this only runs with a live connection.
+fn console_band(frame: &mut Frame, conn: &Connection, mode: InputMode, theme: &Theme, area: Rect) {
     let console = &conn.console;
 
     let block = Block::bordered()
@@ -532,11 +665,7 @@ pub fn console(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             Span::styled(format!("running {pending}"), theme.dim),
         ])
     } else {
-        let cursor = if app.mode == crate::app::InputMode::Command {
-            "▏"
-        } else {
-            ""
-        };
+        let cursor = if mode == InputMode::Command { "▏" } else { "" };
         Line::from(vec![
             Span::styled("❯ ", theme.accent),
             Span::raw(format!("{}{cursor}", console.input)),
@@ -551,7 +680,10 @@ pub fn palette(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         return;
     };
     let labels = app.palette_labels();
-    let rect = centered(area, 56, 16);
+    // Grow the overlay with the item count (query row + items + 2 borders) so
+    // no command is clipped, capped to the available height.
+    let height = (labels.len() as u16 + 3).clamp(6, area.height.max(6));
+    let rect = centered(area, 56, height);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(" Command palette ")
@@ -691,11 +823,14 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Enter connect (Connections)    : command palette"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
-        Line::from("  c connections  b browser  w realtime  R recordings  e console"),
+        Line::from("  c connections  b browser  w realtime  R recordings"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
+        Line::from("  the read-only console (Redis) is a band along the bottom"),
         Line::from("  / filter   [ ] change DB   n load more   r refresh"),
+        Line::from("  o sort column   O direction   p group by prefix"),
+        Line::from("  Enter/Space fold group   z fold/unfold all"),
         Line::from("  PgUp/PgDn (or Ctrl-u/d) scroll the value pane"),
         Line::from("  t tail selected stream    s subscribe (pub/sub or stream)"),
         Line::from(""),
@@ -704,9 +839,9 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  ↑↓ scroll   G follow newest   r toggle recording"),
         Line::from("  spec: pubsub:ch · psub:ch.* · stream:key · keyspace[:N] · monitor"),
         Line::from(""),
-        Line::styled("Console (read-only)", theme.heading),
-        Line::from("  i type a command   Enter run   ↑↓ history / scroll   r clear"),
-        Line::from("  writes and admin commands are refused"),
+        Line::styled("Console (read-only, Browser band)", theme.heading),
+        Line::from("  i type a command   Enter run   ↑↓ history   PgUp/PgDn scroll"),
+        Line::from("  Ctrl-L clear   writes and admin commands are refused"),
         Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  a add connection    ? toggle help    q / Ctrl-c quit"),

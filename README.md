@@ -36,10 +36,11 @@ brokers that support it.
 
 - **Connections** — manage saved connection profiles, connect/disconnect.
 - **Browser** — navigate the keyspace and inspect values, with a live
-  server-statistics band (from `INFO`) atop the panes (Redis).
+  server-statistics band (from `INFO`) atop the panes and an always-visible,
+  read-only **command console** pinned along the bottom (Redis). Press `i` to
+  type a command; output scrolls with PgUp/PgDn and clears with Ctrl-L.
 - **Realtime** — live tails (see below).
 - **Recordings** — browse on-disk `.jsonl` recordings.
-- **Console** — read-only command console (Redis).
 
 ### Realtime tails & recording
 

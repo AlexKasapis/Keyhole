@@ -744,6 +744,7 @@ mod tests {
                 key: "k".into(),
                 vtype: ValueType::String,
                 ttl: Ttl::NoExpire,
+                size: None,
             }],
             next_cursor: 7,
         });

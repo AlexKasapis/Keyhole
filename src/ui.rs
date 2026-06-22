@@ -30,7 +30,6 @@ pub fn render(frame: &mut Frame, app: &mut App) {
         Screen::Browser => views::browser(frame, app, &theme, body_area),
         Screen::Realtime => views::realtime(frame, app, &theme, body_area),
         Screen::Recordings => views::recordings(frame, app, &theme, body_area),
-        Screen::Console => views::console(frame, app, &theme, body_area),
     }
     render_footer(frame, app, &theme, footer_area);
 
@@ -59,7 +58,6 @@ fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Screen::Browser => "browser",
         Screen::Realtime => "realtime",
         Screen::Recordings => "recordings",
-        Screen::Console => "console",
     };
     let line = Line::from(vec![
         Span::styled(" BrokerTUI ", theme.title),
@@ -120,7 +118,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Span::styled(" cmd ", theme.accent),
                 Span::raw(format!("{input}▏")),
                 Span::styled(
-                    "   ↑↓ history · Enter run (read-only) · Esc done",
+                    "   ↑↓ history · PgUp/PgDn scroll · ^L clear · Enter run · Esc done",
                     theme.dim,
                 ),
             ]);
@@ -172,16 +170,13 @@ fn hints(screen: Screen) -> &'static str {
     match screen {
         Screen::Connections => "  ↑↓ move · Enter connect · a add · : palette · ? help · q quit",
         Screen::Browser => {
-            "  ↑↓ keys · / filter · [ ] db · t tail · s sub · e console · w watch · : palette · ? help"
+            "  ↑↓ keys · / filter · o sort · O dir · p group · ⏎ fold · [ ] db · i cmd · t tail · : palette · ? help"
         }
         Screen::Realtime => {
             "  ↑↓ scroll · Tab tab · s sub · m monitor · r rec · x stop · G follow · : palette · ? help"
         }
         Screen::Recordings => {
             "  ↑↓ move · r rescan · w watch · b browser · : palette · ? help · q quit"
-        }
-        Screen::Console => {
-            "  i type · ↑↓ scroll · r clear · K keyspace · m monitor · b browser · : palette · ? help"
         }
     }
 }
@@ -240,6 +235,7 @@ mod tests {
             key: name.into(),
             vtype,
             ttl: Ttl::Seconds(120),
+            size: Some(128),
         }
     }
 
@@ -398,9 +394,118 @@ mod tests {
             None,
         );
         let text = screen_text(&mut app);
-        assert!(text.contains("[redis]"));
-        assert!(text.contains("[amqp]"));
+        // The connections screen is a column table with a header row …
+        assert!(text.contains("NAME"));
+        assert!(text.contains("KIND"));
+        assert!(text.contains("ENDPOINT"));
+        assert!(text.contains("INFO"));
+        // … and the broker kind is its own (unbracketed) column value.
+        assert!(text.contains("redis"));
+        assert!(text.contains("amqp"));
+        assert!(text.contains("cache"));
         assert!(text.contains("events"));
+        // Neither profile is connected here, so both read "offline".
+        assert!(text.contains("offline"));
+    }
+
+    #[tokio::test]
+    async fn connections_connected_row_shows_live_info() {
+        use crate::config::{Config, ConnectionConfig, RedisProfile};
+        let config = Config {
+            connections: vec![
+                ConnectionConfig::Redis(RedisProfile {
+                    name: "cache".into(),
+                    host: "127.0.0.1".into(),
+                    port: 6379,
+                    db: 0,
+                    username: Some("admin".into()),
+                    password: None,
+                    tls: false,
+                }),
+                ConnectionConfig::Redis(RedisProfile {
+                    name: "spare".into(),
+                    host: "127.0.0.1".into(),
+                    port: 6380,
+                    db: 0,
+                    username: None,
+                    password: None,
+                    tls: false,
+                }),
+            ],
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel(64);
+        let mut app = App::new(
+            config,
+            std::path::PathBuf::from("/tmp/bt.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        // "cache" is connected with server stats; "spare" stays offline.
+        let handle = mock::handle(1, "cache", 16).await;
+        let mut conn = Connection::new(handle);
+        conn.stats = Some(ServerStats {
+            redis_version: Some("7.4.0".into()),
+            connected_clients: Some(7),
+            instantaneous_ops_per_sec: Some(120),
+            used_memory: Some(1024 * 1024),
+            db_keys: vec![(0, 42), (1, 7)],
+            ..Default::default()
+        });
+        app.connections.push(conn);
+
+        // Render wide so the full INFO column fits (it truncates on narrow
+        // terminals, which is fine — the point here is the content it carries).
+        let text = render_lines(&mut app, 140, 10);
+        // The live Redis row surfaces version, key count, clients, ops/s, memory.
+        assert!(text.contains("v7.4.0"), "version in the info column");
+        assert!(text.contains("49 keys"), "summed key count across dbs");
+        assert!(text.contains("7 clients"));
+        assert!(text.contains("120 ops/s"));
+        assert!(text.contains("1.0 MiB"), "human-readable memory");
+        // The username is shown as a user@ prefix on the endpoint.
+        assert!(text.contains("admin@127.0.0.1:6379"));
+        // The unconnected profile still reads "offline".
+        assert!(text.contains("offline"));
+    }
+
+    #[tokio::test]
+    async fn connections_connected_amqp_row_reports_tails() {
+        use crate::config::{AmqpProfile, Config, ConnectionConfig};
+        let config = Config {
+            connections: vec![ConnectionConfig::Amqp(AmqpProfile {
+                name: "rmq".into(),
+                host: "broker".into(),
+                port: 5672,
+                username: None,
+                password: None,
+                tls: false,
+            })],
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel(64);
+        let mut app = App::new(
+            config,
+            std::path::PathBuf::from("/tmp/bt.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        let handle = mock::rabbitmq_handle(1, "rmq").await;
+        let mut conn = Connection::new(handle);
+        conn.subs
+            .push(Subscription::new(1, SubSpec::Channel("c".into()), 10));
+        conn.subs
+            .push(Subscription::new(2, SubSpec::Channel("d".into()), 10));
+        app.connections.push(conn);
+
+        // A broker with no stats endpoint reports liveness and the tail count.
+        assert!(screen_text(&mut app).contains("live · 2 tails"));
     }
 
     // -- connection-bearing screens ------------------------------------------
@@ -616,9 +721,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn console_renders_prompt_and_entries() {
+    async fn browser_console_band_renders_prompt_and_entries() {
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Console;
+        app.screen = Screen::Browser;
+        app.connections[0].keys = vec![entry("mykey", ValueType::String)];
         app.connections[0]
             .console
             .entries
@@ -628,25 +734,36 @@ mod tests {
                 is_error: false,
             });
         let text = screen_text(&mut app);
-        assert!(text.contains("Console"));
+        // The console is now a band inside the Browser: it coexists with keys.
+        assert!(text.contains("mykey"), "the key browser is still shown");
+        assert!(text.contains("Console"), "the console band title renders");
         assert!(text.contains("PING"));
         assert!(text.contains("PONG"));
     }
 
     #[tokio::test]
-    async fn console_empty_state_shows_hint() {
+    async fn browser_console_band_empty_state_shows_hint() {
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Console;
+        app.screen = Screen::Browser;
         let text = screen_text(&mut app);
         assert!(text.contains("Read-only command console"));
         assert!(text.contains("INFO server"), "shows example commands");
     }
 
-    #[test]
-    fn console_without_connection_shows_placeholder() {
+    #[tokio::test]
+    async fn browser_without_console_capability_hides_console_band() {
+        // An AMQP broker has no console, so the Browser (were it reachable) must
+        // not draw a console band. Force the screen to prove the capability gate.
         let (mut app, _rx) = test_app();
-        app.screen = Screen::Console;
-        assert!(screen_text(&mut app).contains("No active connection"));
+        let handle = mock::amqp_handle(1, "mq").await;
+        app.connections.push(Connection::new(handle));
+        app.active = Some(0);
+        app.screen = Screen::Browser;
+        let text = screen_text(&mut app);
+        assert!(
+            !text.contains("read-only"),
+            "no console band for a broker without a console"
+        );
     }
 
     #[test]
@@ -698,6 +815,66 @@ mod tests {
         insta::assert_snapshot!("connections_empty", render_lines(&mut app, 90, 16));
     }
 
+    #[tokio::test]
+    async fn snapshot_connections_populated() {
+        use crate::config::{AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
+        let config = Config {
+            connections: vec![
+                ConnectionConfig::Redis(RedisProfile {
+                    name: "cache".into(),
+                    host: "127.0.0.1".into(),
+                    port: 6379,
+                    db: 0,
+                    username: Some("admin".into()),
+                    password: None,
+                    tls: false,
+                }),
+                ConnectionConfig::Amqp(AmqpProfile {
+                    name: "events".into(),
+                    host: "broker".into(),
+                    port: 5671,
+                    username: None,
+                    password: None,
+                    tls: true,
+                }),
+                ConnectionConfig::Rabbitmq(RabbitmqProfile {
+                    name: "rabbit".into(),
+                    host: "rabbit".into(),
+                    port: 5672,
+                    vhost: "prod".into(),
+                    username: None,
+                    password: None,
+                    tls: false,
+                }),
+            ],
+            ..Default::default()
+        };
+        let (tx, _rx) = mpsc::channel(64);
+        let mut app = App::new(
+            config,
+            std::path::PathBuf::from("/tmp/bt.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        pin_clock(&mut app);
+        // "cache" is live with stats; the AMQP brokers stay offline.
+        let handle = mock::handle(1, "cache", 16).await;
+        let mut conn = Connection::new(handle);
+        conn.stats = Some(ServerStats {
+            redis_version: Some("7.4.0".into()),
+            connected_clients: Some(7),
+            instantaneous_ops_per_sec: Some(120),
+            used_memory: Some(1024 * 1024),
+            db_keys: vec![(0, 42), (1, 7)],
+            ..Default::default()
+        });
+        app.connections.push(conn);
+        insta::assert_snapshot!("connections_populated", render_lines(&mut app, 120, 12));
+    }
+
     #[test]
     fn snapshot_help_overlay() {
         let (mut app, _rx) = test_app();
@@ -716,10 +893,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_console_with_output() {
+    async fn snapshot_browser_with_console() {
+        // The read-only console is now an always-visible band pinned to the
+        // bottom of the Browser (the former standalone Console screen).
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
-        app.screen = Screen::Console;
+        app.screen = Screen::Browser;
+        app.connections[0].keys = vec![
+            entry("user:1", ValueType::String),
+            entry("session:abc", ValueType::Hash),
+        ];
+        app.connections[0].complete = true;
+        app.connections[0].table.select(Some(0));
         app.connections[0]
             .console
             .entries
@@ -736,7 +921,7 @@ mod tests {
                 output: "`SET` is not on the read-only allowlist".into(),
                 is_error: true,
             });
-        insta::assert_snapshot!("console_with_output", render_lines(&mut app, 90, 20));
+        insta::assert_snapshot!("browser_with_console", render_lines(&mut app, 90, 24));
     }
 
     #[tokio::test]
