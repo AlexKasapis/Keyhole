@@ -143,10 +143,19 @@ jobs:
 
       # Install actionlint from a pinned release rather than piping a script off
       # the action's `main` branch (a mutable, unpinned supply-chain input).
+      # taiki-e/install-action no longer bundles an actionlint manifest, so fetch
+      # the release tarball directly and verify its published SHA-256 checksum.
       - name: Install actionlint
-        uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
-        with:
-          tool: actionlint@1.7.7
+        run: |
+          set -euo pipefail
+          version=1.7.7
+          sha256=023070a287cd8cccd71515fedc843f1985bf96c436b7effaecce67290e7e0757
+          tarball="actionlint_${version}_linux_amd64.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${version}/${tarball}"
+          curl -fsSL -o "${RUNNER_TEMP}/${tarball}" "${url}"
+          echo "${sha256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          tar -C "${RUNNER_TEMP}" -xzf "${RUNNER_TEMP}/${tarball}" actionlint
+          echo "${RUNNER_TEMP}" >> "${GITHUB_PATH}"
 
       - name: actionlint (workflow lint)
         run: actionlint -color
