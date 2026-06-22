@@ -17,17 +17,17 @@ run *ARGS:
 fmt:
     cargo fmt --all
 
-# Check formatting without modifying files.
-fmt-check:
-    cargo fmt --all -- --check
-
-# Lint, denying warnings.
+# Lint (check only): rustfmt --check + clippy, denying warnings.
 lint:
-    cargo clippy --all-targets --all-features -- -D warnings
+    ./scripts/lint.sh
+
+# Lint and auto-apply fixes: rustfmt + clippy --fix.
+lint-fix:
+    ./scripts/lint.sh --fix
 
 # Unit + snapshot tests.
 test:
-    cargo test
+    ./scripts/test.sh
 
 # Integration tests against dockerized Redis + ActiveMQ + RabbitMQ.
 test-int:
