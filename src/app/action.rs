@@ -21,7 +21,6 @@ pub enum Action {
     Enter,
     /// Open the add-connection form.
     AddConnection,
-    GotoConnections,
     GotoBrowser,
     GotoRecordings,
     StartFilter,
@@ -72,7 +71,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('G') | End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
         (false, Char('a')) => Some(Action::AddConnection),
-        (false, Char('c')) => Some(Action::GotoConnections),
         (false, Char('b')) => Some(Action::GotoBrowser),
         (false, Char('R')) => Some(Action::GotoRecordings),
         (false, Char('s')) => Some(Action::Subscribe),
@@ -124,7 +122,6 @@ mod tests {
         assert_eq!(plain(End), Some(Action::Bottom));
         assert_eq!(plain(Enter), Some(Action::Enter));
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
-        assert_eq!(plain(Char('c')), Some(Action::GotoConnections));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
         assert_eq!(plain(Char('R')), Some(Action::GotoRecordings));
         assert_eq!(plain(Char('s')), Some(Action::Subscribe));

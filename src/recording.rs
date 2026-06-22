@@ -236,6 +236,89 @@ pub fn export_csv(reader: impl BufRead, mut out: impl Write) -> anyhow::Result<u
     Ok(count)
 }
 
+/// How many records the Recordings side panel reads from the head of a file.
+/// Bounds the work and memory of previewing a large recording.
+pub const PREVIEW_CAP: usize = 1000;
+
+/// One record condensed for the Recordings preview panel: just the fields the
+/// side panel shows, with the payload flattened to a single line.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreviewRecord {
+    pub seq: u64,
+    /// `HH:MM:SS` of the record's timestamp.
+    pub time: String,
+    pub source: String,
+    /// Payload with newlines collapsed to spaces (the view truncates to width).
+    pub payload: String,
+}
+
+/// A bounded, read-only preview of a recording file for the Recordings side
+/// panel: the first [`PREVIEW_CAP`] records plus the metadata the header shows.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RecordingPreview {
+    /// Connection name from the first parsed record, if any.
+    pub connection: Option<String>,
+    /// Source type (`pubsub`, `stream`, …) from the first parsed record, if any.
+    pub source_type: Option<String>,
+    /// The parsed head of the file, capped at [`PREVIEW_CAP`].
+    pub records: Vec<PreviewRecord>,
+    /// True when the file held more records than were read.
+    pub truncated: bool,
+    /// Set when the file could not be read; `records` holds whatever parsed.
+    pub error: Option<String>,
+}
+
+/// Build a [`RecordingPreview`] from a recording's lines. Reads at most
+/// [`PREVIEW_CAP`] records; a malformed line is rendered inline as a marker
+/// rather than aborting, so a partially-written recording still previews.
+pub fn preview(reader: impl BufRead) -> RecordingPreview {
+    let mut preview = RecordingPreview::default();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                preview.error = Some(e.to_string());
+                break;
+            }
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        if preview.records.len() >= PREVIEW_CAP {
+            preview.truncated = true;
+            break;
+        }
+        match serde_json::from_str::<Record>(&line) {
+            Ok(rec) => {
+                if preview.connection.is_none() {
+                    preview.connection = Some(rec.connection);
+                }
+                if preview.source_type.is_none() {
+                    preview.source_type = Some(rec.source_type);
+                }
+                preview.records.push(PreviewRecord {
+                    seq: rec.seq,
+                    time: format!(
+                        "{:02}:{:02}:{:02}",
+                        rec.ts.hour(),
+                        rec.ts.minute(),
+                        rec.ts.second()
+                    ),
+                    source: rec.source,
+                    payload: rec.payload.replace(['\n', '\r'], " "),
+                });
+            }
+            Err(e) => preview.records.push(PreviewRecord {
+                seq: preview.records.len() as u64,
+                time: "--:--:--".to_string(),
+                source: "?".to_string(),
+                payload: format!("<malformed: {e}>"),
+            }),
+        }
+    }
+    preview
+}
+
 /// RFC 4180 CSV escaping: quote fields containing a comma, quote, or newline,
 /// doubling any embedded quotes.
 fn csv_field(s: &str) -> String {
@@ -359,6 +442,84 @@ mod tests {
         let spec = SubSpec::Pattern("a.b*".into());
         let name = recording_filename("prod/eu", &spec, datetime!(2026-06-19 09:08:07 UTC));
         assert_eq!(name, "prod_eu-psubscribe-a_b_-20260619-090807.jsonl");
+    }
+
+    /// A serialized JSONL line for a record at a fixed timestamp.
+    fn rec_line(seq: u64, source: &str, payload: &str) -> String {
+        let rec = Record {
+            seq,
+            ts: datetime!(2026-06-19 09:08:07 UTC),
+            connection: "prod".into(),
+            source: source.into(),
+            source_type: "pubsub".into(),
+            encoding: "utf8".into(),
+            payload: payload.into(),
+            meta: vec![],
+        };
+        serde_json::to_string(&rec).unwrap()
+    }
+
+    #[test]
+    fn preview_reads_records_and_extracts_metadata() {
+        // A blank line in the middle is skipped, not counted.
+        let body = format!(
+            "{}\n\n{}\n",
+            rec_line(0, "news", "hello"),
+            rec_line(1, "news", "line1\nline2"),
+        );
+        let p = preview(Cursor::new(body));
+        assert!(!p.truncated);
+        assert!(p.error.is_none());
+        assert_eq!(p.connection.as_deref(), Some("prod"));
+        assert_eq!(p.source_type.as_deref(), Some("pubsub"));
+        assert_eq!(p.records.len(), 2);
+        assert_eq!(p.records[0].seq, 0);
+        assert_eq!(p.records[0].time, "09:08:07");
+        assert_eq!(p.records[0].source, "news");
+        assert_eq!(p.records[0].payload, "hello");
+        // Newlines in the payload are flattened so each record stays one line.
+        assert_eq!(p.records[1].payload, "line1 line2");
+    }
+
+    #[test]
+    fn preview_caps_records_and_flags_truncation() {
+        let mut body = String::new();
+        for seq in 0..(PREVIEW_CAP as u64 + 5) {
+            body.push_str(&rec_line(seq, "news", "x"));
+            body.push('\n');
+        }
+        let p = preview(Cursor::new(body));
+        assert_eq!(p.records.len(), PREVIEW_CAP, "reads at most the cap");
+        assert!(p.truncated, "flags that more records exist");
+    }
+
+    #[test]
+    fn preview_renders_malformed_lines_inline() {
+        let body = format!(
+            "{}\nnot json\n{}\n",
+            rec_line(0, "a", "x"),
+            rec_line(2, "b", "y")
+        );
+        let p = preview(Cursor::new(body));
+        assert_eq!(
+            p.records.len(),
+            3,
+            "a bad line is kept as a marker, not dropped"
+        );
+        assert!(p.records[1].payload.contains("malformed"));
+        assert!(
+            p.error.is_none(),
+            "one bad line does not fail the whole preview"
+        );
+    }
+
+    #[test]
+    fn preview_of_empty_input_is_empty() {
+        let p = preview(Cursor::new(""));
+        assert!(p.records.is_empty());
+        assert!(!p.truncated);
+        assert!(p.connection.is_none());
+        assert!(p.error.is_none());
     }
 
     #[test]

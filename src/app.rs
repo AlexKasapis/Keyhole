@@ -33,7 +33,7 @@ use crate::broker::{
 };
 use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;
-use crate::recording::RecordingStatus;
+use crate::recording::{self, RecordingPreview, RecordingStatus};
 use crate::theme::Theme;
 
 /// Nominal period of one UI tick, mirroring `crate::TICK_PERIOD`. Used to turn
@@ -98,6 +98,10 @@ pub struct App {
     pub(crate) show_help: bool,
     pub(crate) recordings: Vec<RecordingFile>,
     pub(crate) recordings_state: ListState,
+    /// Cached preview of the selected recording: `(file name, parsed head)`.
+    /// Reloaded only when the selection lands on a different file, so it is
+    /// cheap to refresh after every navigation step.
+    pub(crate) recording_preview: Option<(String, RecordingPreview)>,
     pub(crate) now: OffsetDateTime,
     /// Set when a quit was requested from the home screen but not yet
     /// confirmed: closing the app needs a second consecutive Esc.
@@ -156,6 +160,7 @@ impl App {
             show_help: false,
             recordings: Vec::new(),
             recordings_state: ListState::default(),
+            recording_preview: None,
             now: OffsetDateTime::now_utc(),
             quit_armed: false,
         }
@@ -578,12 +583,18 @@ impl App {
                 self.form = Some(ConnForm::new());
                 self.mode = InputMode::Form;
             }
-            Action::GotoConnections => self.screen = Screen::Connections,
-            Action::GotoBrowser => match self.active_conn().map(|c| c.caps.can_browse) {
-                Some(true) => self.screen = Screen::Browser,
-                Some(false) => self.set_status("this broker has no key browser".to_string(), true),
-                None => {}
-            },
+            // Reachable from Connections; a no-op from the Recordings screen,
+            // which only steps back to Connections.
+            Action::GotoBrowser if self.screen != Screen::Recordings => {
+                match self.active_conn().map(|c| c.caps.can_browse) {
+                    Some(true) => self.screen = Screen::Browser,
+                    Some(false) => {
+                        self.set_status("this broker has no key browser".to_string(), true)
+                    }
+                    None => {}
+                }
+            }
+            Action::GotoBrowser => {}
             Action::GotoRecordings => {
                 self.screen = Screen::Recordings;
                 self.scan_recordings();
@@ -643,10 +654,11 @@ impl App {
                 "toggled all groups".to_string()
             }),
             Action::ToggleCollapse => self.toggle_selected_group(),
-            // `r`: rescan files (Recordings); on the Browser it either toggles
-            // recording for the focused tail (when a tail tab is the active
-            // bottom-panel tab) or refreshes the keys + server-stats band (on the
-            // Console tab, where there is no tail to record).
+            // `r` on the Browser either toggles recording for the focused tail
+            // (when a tail tab is the active bottom-panel tab) or refreshes the
+            // keys + server-stats band (on the Console tab, where there is no
+            // tail to record). It does nothing on the other screens — the
+            // Recordings list (re)scans on entry, not on `r`.
             Action::Refresh => match self.screen {
                 Screen::Browser => {
                     let on_tail = self
@@ -660,11 +672,7 @@ impl App {
                         self.request_stats(id);
                     }
                 }
-                Screen::Recordings => {
-                    self.scan_recordings();
-                    self.set_status("recordings refreshed".to_string(), false);
-                }
-                Screen::Connections => {}
+                Screen::Recordings | Screen::Connections => {}
             },
             Action::ToggleHelp => self.show_help = !self.show_help,
         }
@@ -772,6 +780,7 @@ impl App {
                 let len = self.recordings.len();
                 let next = move_selection(self.recordings_state.selected(), len, delta);
                 self.recordings_state.select(next);
+                self.load_recording_preview();
             }
         }
     }
@@ -803,6 +812,7 @@ impl App {
                     self.recordings_state
                         .select(Some(if top { 0 } else { len - 1 }));
                 }
+                self.load_recording_preview();
             }
         }
     }
@@ -1462,6 +1472,40 @@ impl App {
             len => Some(self.recordings_state.selected().unwrap_or(0).min(len - 1)),
         };
         self.recordings_state.select(sel);
+        self.load_recording_preview();
+    }
+
+    /// (Re)load the preview of the currently-selected recording into
+    /// [`Self::recording_preview`]. A no-op when the cached preview is already
+    /// for the selected file, so it is cheap to call after every selection
+    /// change; an actual reload reads at most [`recording::PREVIEW_CAP`]
+    /// records from the head of the file.
+    fn load_recording_preview(&mut self) {
+        let name = self
+            .recordings_state
+            .selected()
+            .and_then(|i| self.recordings.get(i))
+            .map(|f| f.name.clone());
+        let Some(name) = name else {
+            self.recording_preview = None;
+            return;
+        };
+        if self
+            .recording_preview
+            .as_ref()
+            .is_some_and(|(cached, _)| cached == &name)
+        {
+            return;
+        }
+        let path = self.recordings_dir.join(&name);
+        let preview = match std::fs::File::open(&path) {
+            Ok(file) => recording::preview(std::io::BufReader::new(file)),
+            Err(e) => RecordingPreview {
+                error: Some(e.to_string()),
+                ..Default::default()
+            },
+        };
+        self.recording_preview = Some((name, preview));
     }
 
     // -- helpers -------------------------------------------------------------
@@ -2353,7 +2397,8 @@ mod tests {
         connect(&mut app, 1, "prod", 16).await;
         app.apply(Action::GotoRecordings);
         assert_eq!(app.screen, Screen::Recordings);
-        app.apply(Action::GotoConnections);
+        // From any screen, Esc (Back) returns to Connections.
+        app.apply(Action::Back);
         assert_eq!(app.screen, Screen::Connections);
         app.apply(Action::GotoBrowser);
         assert_eq!(app.screen, Screen::Browser);
@@ -3225,6 +3270,147 @@ mod tests {
         app.scan_recordings();
         assert!(app.recordings.is_empty());
         assert_eq!(app.recordings_state.selected(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A valid recording line for a record at a fixed timestamp.
+    fn recording_line(seq: u64, connection: &str, source: &str, payload: &str) -> String {
+        format!(
+            r#"{{"seq":{seq},"ts":"2026-06-19T09:08:07Z","connection":"{connection}","source":"{source}","source_type":"pubsub","encoding":"utf8","payload":"{payload}","meta":[]}}"#
+        )
+    }
+
+    #[test]
+    fn refresh_does_not_rescan_the_recordings_list() {
+        let dir = std::env::temp_dir().join(format!("keyhole-rec-refresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.jsonl"),
+            format!("{}\n", recording_line(0, "c", "s", "x")),
+        )
+        .unwrap();
+
+        let (mut app, _rx) = test_app();
+        app.recordings_dir = dir.clone();
+        // Entering the screen scans the directory.
+        app.apply(Action::GotoRecordings);
+        assert_eq!(app.recordings.len(), 1);
+
+        // A new file appears, then `r` is pressed. Rescan was removed on this
+        // screen, so the list must not pick the new file up.
+        std::fs::write(
+            dir.join("b.jsonl"),
+            format!("{}\n", recording_line(0, "c", "s", "y")),
+        )
+        .unwrap();
+        app.apply(Action::Refresh);
+        assert_eq!(
+            app.recordings.len(),
+            1,
+            "`r` no longer rescans the recordings list"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn goto_browser_is_blocked_from_the_recordings_screen() {
+        let (mut app, _rx) = test_app();
+        // A Redis connection can browse, so only the screen guard keeps `b` from
+        // leaving the Recordings screen.
+        connect(&mut app, 1, "prod", 16).await;
+        app.screen = Screen::Recordings;
+        app.apply(Action::GotoBrowser);
+        assert_eq!(
+            app.screen,
+            Screen::Recordings,
+            "`b` does not leave the Recordings screen"
+        );
+    }
+
+    #[test]
+    fn recordings_preview_loads_for_the_selected_file() {
+        let dir = std::env::temp_dir().join(format!("keyhole-rec-preview-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("only.jsonl"),
+            format!(
+                "{}\n{}\n",
+                recording_line(0, "prod", "news", "hello"),
+                recording_line(1, "prod", "news", "world"),
+            ),
+        )
+        .unwrap();
+
+        let (mut app, _rx) = test_app();
+        app.recordings_dir = dir.clone();
+        app.apply(Action::GotoRecordings);
+
+        let (name, preview) = app
+            .recording_preview
+            .as_ref()
+            .expect("preview loads on entering the screen");
+        assert_eq!(name, &app.recordings[0].name);
+        assert_eq!(preview.connection.as_deref(), Some("prod"));
+        assert_eq!(preview.source_type.as_deref(), Some("pubsub"));
+        assert_eq!(preview.records.len(), 2);
+        assert_eq!(preview.records[0].payload, "hello");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recordings_preview_follows_the_selection() {
+        let dir = std::env::temp_dir().join(format!("keyhole-rec-nav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("a.jsonl"),
+            format!("{}\n", recording_line(0, "a", "s", "p")),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("b.jsonl"),
+            format!("{}\n", recording_line(0, "b", "s", "p")),
+        )
+        .unwrap();
+
+        let (mut app, _rx) = test_app();
+        app.recordings_dir = dir.clone();
+        app.apply(Action::GotoRecordings);
+        assert_eq!(app.recordings.len(), 2);
+        assert_eq!(
+            app.recording_preview.as_ref().unwrap().0,
+            app.recordings[0].name
+        );
+
+        // Moving the highlight reloads the preview for the newly-selected file.
+        app.apply(Action::Down);
+        assert_eq!(
+            app.recording_preview.as_ref().unwrap().0,
+            app.recordings[1].name,
+            "the preview tracks the selected recording"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recordings_preview_is_cleared_when_there_are_no_recordings() {
+        let dir = std::env::temp_dir().join(format!("keyhole-rec-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (mut app, _rx) = test_app();
+        app.recordings_dir = dir.clone();
+        app.apply(Action::GotoRecordings);
+        assert!(
+            app.recording_preview.is_none(),
+            "no recordings -> no preview"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -196,15 +196,10 @@ fn hint_sections(app: &App) -> Vec<(&'static str, &'static str)> {
             ("groups", "⏎/Space collapse · z all"),
             ("view", "/ filter · o sort · O dir · r refresh"),
             ("panel", "Tab tabs · i cmd · s/m/K/t tail · x stop · r rec"),
-            ("go", "c conns · R recordings"),
+            ("go", "R recordings"),
             ("app", "? help · Esc back"),
         ],
-        Screen::Recordings => vec![
-            ("nav", "↑↓ move"),
-            ("rec", "r rescan"),
-            ("go", "c conns · b browser"),
-            ("app", "? help · Esc back"),
-        ],
+        Screen::Recordings => vec![("nav", "↑↓ move"), ("app", "? help · Esc back")],
     }
 }
 
@@ -365,9 +360,13 @@ mod tests {
         // Each screen's hint row is split into labelled sections; rendered wide
         // so nothing clips. The section labels and a key from each must appear.
         let cases = [
-            (Screen::Connections, ["nav", "conn", "app"], "Enter connect"),
-            (Screen::Browser, ["nav", "view", "panel"], "/ filter"),
-            (Screen::Recordings, ["nav", "rec", "app"], "r rescan"),
+            (
+                Screen::Connections,
+                vec!["nav", "conn", "app"],
+                "Enter connect",
+            ),
+            (Screen::Browser, vec!["nav", "view", "panel"], "/ filter"),
+            (Screen::Recordings, vec!["nav", "app"], "Esc back"),
         ];
         for (screen, labels, key) in cases {
             let (mut app, _rx) = test_app();
@@ -389,15 +388,9 @@ mod tests {
     #[test]
     fn footer_has_no_palette_hint_and_offers_navigation() {
         // The command palette was removed, so no screen's footer may advertise
-        // it; every screen instead reaches its actions directly by key. The
-        // cross-screen jumps the palette used to provide now live in a "go"
-        // group, and the "app" group always offers help.
-        let expected_go = [
-            (Screen::Connections, vec!["recordings"]),
-            (Screen::Browser, vec!["conns", "recordings"]),
-            (Screen::Recordings, vec!["conns", "browser"]),
-        ];
-        for (screen, targets) in expected_go {
+        // it; every screen instead reaches its actions directly by key, and the
+        // "app" group always offers help.
+        for screen in [Screen::Connections, Screen::Browser, Screen::Recordings] {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             let sections = hint_sections(&app);
@@ -406,18 +399,6 @@ mod tests {
                 assert!(
                     !label.contains("palette") && !keys.contains("palette"),
                     "{screen:?} footer still mentions the palette: {label} {keys}"
-                );
-            }
-
-            let go = sections
-                .iter()
-                .find(|(label, _)| *label == "go")
-                .map(|(_, keys)| *keys)
-                .unwrap_or_else(|| panic!("{screen:?} footer has no 'go' navigation group"));
-            for target in targets {
-                assert!(
-                    go.contains(target),
-                    "{screen:?} 'go' group should offer {target:?}: {go:?}"
                 );
             }
 
@@ -431,6 +412,42 @@ mod tests {
                 "{screen:?} 'app' group should offer help: {app_keys:?}"
             );
         }
+
+        // The cross-screen jumps the palette used to provide now live in a "go"
+        // group on the screens that still navigate onward. The Recordings screen
+        // only steps back (Esc), so it offers neither a "go" group nor a rescan.
+        let expected_go = [
+            (Screen::Connections, vec!["recordings"]),
+            (Screen::Browser, vec!["recordings"]),
+        ];
+        for (screen, targets) in expected_go {
+            let (mut app, _rx) = test_app();
+            app.screen = screen;
+            let sections = hint_sections(&app);
+            let go = sections
+                .iter()
+                .find(|(label, _)| *label == "go")
+                .map(|(_, keys)| *keys)
+                .unwrap_or_else(|| panic!("{screen:?} footer has no 'go' navigation group"));
+            for target in targets {
+                assert!(
+                    go.contains(target),
+                    "{screen:?} 'go' group should offer {target:?}: {go:?}"
+                );
+            }
+        }
+
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Recordings;
+        let recordings = hint_sections(&app);
+        assert!(
+            !recordings.iter().any(|(label, _)| *label == "go"),
+            "Recordings footer must not offer a 'go' group: {recordings:?}"
+        );
+        assert!(
+            !recordings.iter().any(|(_, keys)| keys.contains("rescan")),
+            "Recordings footer must not advertise a rescan: {recordings:?}"
+        );
     }
 
     #[tokio::test]
@@ -972,6 +989,42 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn recordings_screen_renders_list_and_preview_panes() {
+        use crate::recording::{PreviewRecord, RecordingPreview};
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Recordings;
+        app.recordings = vec![crate::app::RecordingFile {
+            name: "prod-pubsub-news-20260619-090807.jsonl".into(),
+            size: 2048,
+            modified: None,
+        }];
+        app.recordings_state.select(Some(0));
+        app.recording_preview = Some((
+            "prod-pubsub-news-20260619-090807.jsonl".into(),
+            RecordingPreview {
+                connection: Some("prod".into()),
+                source_type: Some("pubsub".into()),
+                records: vec![PreviewRecord {
+                    seq: 0,
+                    time: "09:08:07".into(),
+                    source: "news".into(),
+                    payload: "hello world".into(),
+                }],
+                truncated: false,
+                error: None,
+            },
+        ));
+        let text = render_lines(&mut app, 120, 16);
+        assert!(text.contains("Recordings"), "the list pane is titled");
+        assert!(text.contains("Preview"), "the preview pane is titled");
+        assert!(text.contains("pubsub"), "the preview shows the source type");
+        assert!(
+            text.contains("hello world"),
+            "the preview shows the record payload: {text:?}"
+        );
     }
 
     /// A fixed instant so the header clock is stable in snapshots.

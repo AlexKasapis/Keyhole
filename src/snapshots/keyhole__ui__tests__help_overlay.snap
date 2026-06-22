@@ -8,7 +8,7 @@ expression: "render_lines(&mut app, 90, 32)"
 │           │  Enter connect (Connections)   Esc step back / quit            │           │
 │           │                                                                │           │
 │           │Screens                                                         │           │
-│           │  c connections  b browser  R recordings                        │           │
+│           │  b browser  R recordings                                       │           │
 │           │                                                                │           │
 │           │Browser                                                         │           │
 │           │  server stats (Redis) appear in a band above the panes         │           │

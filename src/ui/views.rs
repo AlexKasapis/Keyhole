@@ -667,25 +667,44 @@ fn tail_content(frame: &mut Frame, sub: &Subscription, theme: &Theme, area: Rect
     frame.render_widget(Paragraph::new(lines), events_area);
 }
 
-/// Recordings screen: JSONL files in the recordings directory.
+/// Recordings screen: a list of the JSONL files in the recordings directory on
+/// the left, and a read-only preview of the selected recording on the right.
 pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    let block = Block::bordered()
-        .title(" Recordings ")
-        .title_style(theme.heading)
-        .border_style(theme.border);
     if app.recordings.is_empty() {
+        let block = Block::bordered()
+            .title(" Recordings ")
+            .title_style(theme.heading)
+            .border_style(theme.border);
         let body = Paragraph::new(vec![
             Line::from(""),
             Line::styled("No recordings found.", theme.dim),
             Line::from(""),
             Line::from("Start a tail with 's', then 'r' to record — files land in the"),
-            Line::from("recordings directory. Press 'r' here to rescan."),
+            Line::from("recordings directory."),
         ])
         .alignment(Alignment::Center)
         .block(block);
         frame.render_widget(body, area);
         return;
     }
+    let [list_area, preview_area] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+    recordings_list(frame, app, theme, list_area);
+    recording_preview(frame, app, theme, preview_area);
+}
+
+/// The left pane: one row per recording. The name column flexes to the pane
+/// width; the size and modified-time columns are fixed-width tails.
+fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let block = Block::bordered()
+        .title(" Recordings ")
+        .title_style(theme.heading)
+        .border_style(theme.border);
+    // Inner width minus the borders (2) and the highlight symbol (2).
+    let inner_w = area.width.saturating_sub(4) as usize;
+    const SIZE_COL: usize = 12; // right-aligned size + two trailing spaces
+    const DATE_COL: usize = 16; // "YYYY-MM-DD HH:MM"
+    let name_w = inner_w.saturating_sub(SIZE_COL + DATE_COL).max(8);
     let items: Vec<ListItem> = app
         .recordings
         .iter()
@@ -695,7 +714,7 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
                 .map(fmt_datetime)
                 .unwrap_or_else(|| "?".to_string());
             ListItem::new(Line::from(vec![
-                Span::raw(pad_end(&truncate(&f.name, 46), 46)),
+                Span::raw(pad_end(&truncate(&f.name, name_w), name_w)),
                 Span::styled(format!("{:>10}  ", human_bytes(f.size)), theme.dim),
                 Span::styled(when, theme.dim),
             ]))
@@ -706,6 +725,93 @@ pub fn recordings(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .highlight_style(theme.selected)
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
+}
+
+/// The right pane: a metadata header plus the head of the selected recording's
+/// records (bounded by [`crate::recording::PREVIEW_CAP`]). Lines past the pane
+/// height are clipped — this is a preview, not a full scrollable viewer.
+fn recording_preview(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let block = Block::bordered()
+        .title(" Preview ")
+        .title_style(theme.heading)
+        .border_style(theme.border);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some((name, preview)) = &app.recording_preview else {
+        frame.render_widget(
+            Paragraph::new(Line::styled("Select a recording to preview it.", theme.dim))
+                .alignment(Alignment::Center),
+            inner,
+        );
+        return;
+    };
+
+    let width = inner.width as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::styled(truncate(name, width), theme.heading));
+    // Source type / connection, taken from the first record.
+    let mut meta = String::new();
+    if let Some(source_type) = &preview.source_type {
+        meta.push_str(source_type);
+    }
+    if let Some(connection) = &preview.connection {
+        if !meta.is_empty() {
+            meta.push_str(" · ");
+        }
+        meta.push_str(connection);
+    }
+    if !meta.is_empty() {
+        lines.push(Line::styled(meta, theme.dim));
+    }
+    // Record count · size · modified time.
+    if let Some(file) = app.recordings.iter().find(|f| &f.name == name) {
+        let n = preview.records.len();
+        let count = match (preview.truncated, n) {
+            (true, _) => format!("{n}+ records"),
+            (false, 1) => "1 record".to_string(),
+            (false, _) => format!("{n} records"),
+        };
+        let when = file
+            .modified
+            .map(fmt_datetime)
+            .unwrap_or_else(|| "?".to_string());
+        lines.push(Line::styled(
+            format!("{count} · {} · {when}", human_bytes(file.size)),
+            theme.dim,
+        ));
+    }
+    lines.push(Line::from(""));
+
+    if let Some(err) = &preview.error {
+        lines.push(Line::styled(format!("error: {err}"), theme.error));
+    } else if preview.records.is_empty() {
+        lines.push(Line::styled("(empty recording)", theme.dim));
+    }
+
+    for rec in &preview.records {
+        let seq = format!("#{:<4} ", rec.seq);
+        let time = format!("{} ", rec.time);
+        let source = format!("{}  ", rec.source);
+        let used = UnicodeWidthStr::width(seq.as_str())
+            + UnicodeWidthStr::width(time.as_str())
+            + UnicodeWidthStr::width(source.as_str());
+        let avail = width.saturating_sub(used).max(1);
+        lines.push(Line::from(vec![
+            Span::styled(seq, theme.dim),
+            Span::styled(time, theme.dim),
+            Span::styled(source, theme.accent),
+            Span::raw(truncate(&rec.payload, avail)),
+        ]));
+    }
+    if preview.truncated {
+        lines.push(Line::styled(
+            format!("… first {} records shown", preview.records.len()),
+            theme.dim,
+        ));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 /// The console tab's content: the read-only command output for the active
@@ -878,7 +984,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Enter connect (Connections)   Esc step back / quit"),
         Line::from(""),
         Line::styled("Screens", theme.heading),
-        Line::from("  c connections  b browser  R recordings"),
+        Line::from("  b browser  R recordings"),
         Line::from(""),
         Line::styled("Browser", theme.heading),
         Line::from("  server stats (Redis) appear in a band above the panes"),
