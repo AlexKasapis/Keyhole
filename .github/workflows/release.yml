@@ -160,7 +160,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Download generated man page + completions
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: packaging-assets
           path: dist-assets
@@ -218,7 +218,7 @@ jobs:
       - name: Download generated man page + completions
         # The same artifact the tarballs bundle; Cargo.toml's package assets read
         # it from ./dist-assets (alongside the binary in ./target/release).
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: packaging-assets
           path: dist-assets
@@ -271,7 +271,7 @@ jobs:
       attestations: write # record build-provenance attestations
     steps:
       - name: Download the SBOM
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: sbom
           path: artifacts
