@@ -2,8 +2,9 @@
 # Tests for the Tier-2 community packaging artifacts: the AUR PKGBUILDs
 # (keyhole + keyhole-bin) and their .SRCINFO, the Homebrew formula, and the Nix
 # flake. Tool-independent by default — it validates structure, version
-# consistency, .SRCINFO sync, and the release-time generator round-trip using
-# only bash + ruby. If makepkg / brew / nix happen to be installed, the relevant
+# consistency, .SRCINFO sync, the release-time generator round-trip, and that
+# release.toml's cargo-release config bumps the packaging versions, using only
+# bash + ruby. If makepkg / brew / nix happen to be installed, the relevant
 # native validators run too; otherwise they are skipped (mirroring how the
 # release-lint job treats actionlint).
 #
@@ -211,6 +212,77 @@ if diff -u "$work/packaging/aur/keyhole-bin/.SRCINFO" <(srcinfo_emit "$gbin") >/
     pass "generated .SRCINFO is consistent"
 else
     bad "generated .SRCINFO inconsistent"
+fi
+
+echo "== release.toml drives the packaging version bump =="
+# `just release` (cargo-release; see release.toml) must bump the packaging
+# versions too, or a release reintroduces the Cargo-vs-packaging drift the
+# consistency check above guards against. cargo-release is not a test
+# dependency, so emulate exactly what it does for the packaging files: apply
+# every [[pre-release-replacements]] whose `file` is under packaging/ to a
+# sentinel version (each `search` is a multi-line regex, the way cargo-release
+# builds it), run the configured srcinfo hook, then assert the tree is fully
+# bumped and internally consistent.
+rel_work=$(mktemp -d "${TMPDIR:-/tmp}/keyhole-rel-test.XXXXXX")
+trap 'rm -rf "$work" "$rel_work"' EXIT
+cp -r "$PKG" "$rel_work/packaging"
+SENT=9.9.9
+
+# The hook that refreshes .SRCINFO after the version bump must be wired up.
+if grep -Eq '^pre-release-hook[[:space:]]*=.*gen_packaging\.sh.* srcinfo' release.toml; then
+    pass "release.toml runs the gen_packaging.sh srcinfo hook"
+else
+    bad "release.toml has no pre-release-hook running gen_packaging.sh srcinfo"
+fi
+
+# Apply the packaging replacements declared in release.toml the way cargo-release
+# would (parse the array-of-tables, multi-line regex, {{version}} -> sentinel).
+if ruby - release.toml "$rel_work/packaging" "$SENT" <<'RUBY' >/dev/null
+toml, dest, ver = ARGV
+# Minimal extractor for the [[pre-release-replacements]] tables — just enough for
+# this file's entries (ruby's stdlib has no TOML parser). Splitting on the header
+# gives the preamble in [0] and one string per table after it.
+blocks = File.read(toml).split(/^\[\[pre-release-replacements\]\][ \t]*$/)[1..] || []
+field = lambda do |b, k|
+  if (m = b.match(/^#{k}[ \t]*=[ \t]*"((?:[^"\\]|\\.)*)"/))   # basic (double-quoted)
+    m[1].gsub(/\\(.)/) { $1 == "n" ? "\n" : $1 }
+  elsif (m = b.match(/^#{k}[ \t]*=[ \t]*'([^']*)'/))          # literal (single-quoted)
+    m[1]
+  end
+end
+pkg = blocks.map { |b| [field.(b, "file"), field.(b, "search"), field.(b, "replace")] }
+         .select { |f, _, _| f.to_s.start_with?("packaging/") }
+want = %w[packaging/aur/keyhole/PKGBUILD packaging/aur/keyhole-bin/PKGBUILD packaging/homebrew/keyhole.rb].sort
+abort "packaging replacements #{pkg.map(&:first).sort} != #{want}" unless pkg.map(&:first).sort == want
+pkg.each do |file, search, replace|
+  path = File.join(dest, file.sub(%r{\Apackaging/}, ""))
+  body = File.read(path)
+  n = body.scan(Regexp.new(search)).length
+  abort "#{file}: search /#{search}/ matched #{n}x (want exactly 1)" unless n == 1
+  File.write(path, body.sub(Regexp.new(search)) { replace.gsub("{{version}}", ver) })
+end
+RUBY
+then
+    pass "release.toml replacements cover all 3 packaging files, each matching once"
+else
+    bad "release.toml packaging replacements are wrong (file missing, or a pattern no longer matches exactly once)"
+fi
+
+# Run the srcinfo hook on the bumped copy, then assert the tree is consistent
+# and fully on the sentinel version (the bump must not need the gen 'release'
+# path — version-only, with the committed checksum placeholders left intact).
+scripts/gen_packaging.sh srcinfo --dir "$rel_work/packaging" >/dev/null 2>&1
+rsrc="$rel_work/packaging/aur/keyhole/PKGBUILD"
+rbin="$rel_work/packaging/aur/keyhole-bin/PKGBUILD"
+rform="$rel_work/packaging/homebrew/keyhole.rb"
+if [ "$(pkgbuild_var "$rsrc" pkgver)" = "$SENT" ] &&
+    [ "$(pkgbuild_var "$rbin" pkgver)" = "$SENT" ] &&
+    grep -q "^  version \"$SENT\"" "$rform" &&
+    diff -u "$rel_work/packaging/aur/keyhole/.SRCINFO" <(srcinfo_emit "$rsrc") >/dev/null 2>&1 &&
+    diff -u "$rel_work/packaging/aur/keyhole-bin/.SRCINFO" <(srcinfo_emit "$rbin") >/dev/null 2>&1; then
+    pass "release.toml bump + srcinfo hook yields a consistent, fully-versioned tree"
+else
+    bad "release.toml bump left the packaging tree inconsistent"
 fi
 
 echo "== optional native validators =="
