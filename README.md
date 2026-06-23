@@ -6,10 +6,10 @@
 
 Redis · AMQP 1.0 · RabbitMQ — one self-contained binary, fully read-only by design.
 
-[![CI](https://github.com/AlexKasapis/Keyhole/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexKasapis/Keyhole/actions/workflows/ci.yml)
-[![Audit](https://github.com/AlexKasapis/Keyhole/actions/workflows/audit.yml/badge.svg)](https://github.com/AlexKasapis/Keyhole/actions/workflows/audit.yml)
 [![Latest release](https://img.shields.io/github/v/release/AlexKasapis/Keyhole?label=release&color=success)](https://github.com/AlexKasapis/Keyhole/releases/latest)
 [![Latest version](https://img.shields.io/github/v/tag/AlexKasapis/Keyhole?label=version&sort=semver)](https://github.com/AlexKasapis/Keyhole/tags)
+[![CI](https://github.com/AlexKasapis/Keyhole/actions/workflows/ci.yml/badge.svg)](https://github.com/AlexKasapis/Keyhole/actions/workflows/ci.yml)
+[![Audit](https://github.com/AlexKasapis/Keyhole/actions/workflows/audit.yml/badge.svg)](https://github.com/AlexKasapis/Keyhole/actions/workflows/audit.yml)
 [![Coverage ≥90%](https://img.shields.io/badge/coverage-%E2%89%A590%25-success.svg)](.github/workflows/ci.yml)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -18,13 +18,11 @@ Redis · AMQP 1.0 · RabbitMQ — one self-contained binary, fully read-only by 
 
 Keyhole connects to **Redis**, **AMQP 1.0** (ActiveMQ / Amazon MQ / RabbitMQ 4.x),
 and **RabbitMQ** (AMQP 0.9.1), lets you browse their data, watch realtime
-activity, and record live streams to disk. Every operation is read-only by
-design.
+activity, and record live streams to disk.
 
 ## Install
 
-One line installs the latest stable release (detects your OS/arch, verifies the
-SHA-256 checksum, and drops `keyhole` into `~/.local/bin`):
+Just run the following in your terminal:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
@@ -35,21 +33,15 @@ Or build it yourself with Cargo:
 
 ```sh
 cargo install keyhole                       # full build: keyring + AMQP + RabbitMQ
-cargo install keyhole --no-default-features # minimal: Redis only, env-var secrets
 ```
 
-Other channels — Nix flake, prebuilt tarballs, `.deb`/`.rpm`, and AUR/Homebrew —
-are covered under [Installation](#installation) below.
+Other channels are covered under [Installation](#installation) below.
 
 ## Quick start
 
 ```sh
 keyhole   # launch the TUI
 ```
-
-Press `?` for the help overlay, `Esc` to step back (Browser → Connections →
-quit), or `Ctrl-C` to quit from anywhere. The footer always lists the keys for
-the current screen.
 
 ## Supported brokers
 
@@ -61,33 +53,12 @@ the current screen.
 | Record → JSONL · export → CSV       | ✅           | ✅                | ✅                    |
 | Availability                        | always built in | `amqp` feature | `rabbitmq` feature |
 
-<sub>AMQP 1.0 covers ActiveMQ / Amazon MQ / RabbitMQ 4.x. The RabbitMQ column is AMQP 0.9.1 (every RabbitMQ version). `amqps://` TLS is supported for both AMQP transports.</sub>
-
 ## Features
 
-- **Connections** — saved connection profiles in TOML
-  (`~/.config/keyhole/config.toml`), edited in-app with comment-preserving
-  writes. Secrets are never stored in plaintext: a password is a *spec* resolved
-  at connect time via env var (`env:VAR`) → OS keyring → interactive prompt.
-  `--connect PROFILE` auto-connects on startup.
-- **Browser** (Redis) — navigate the keyspace and inspect values, with a live
-  server-statistics band and a pinned, read-only command console.
-- **Realtime** — live tails of pub/sub, pattern pub/sub, streams, keyspace
-  events, and `MONITOR` (Redis); topic/queue tails (AMQP 1.0); and exchange taps
-  (RabbitMQ).
-- **Recording** — record any live tail to a lossless JSONL file, toggleable
-  while it runs; export a finished recording to CSV.
-- **Headless mode** — run without a terminal, reusing the same broker +
-  recording stack:
-
-  ```sh
-  keyhole record --connect prod --source stream:events --out ./caps
-  keyhole export caps/events-….jsonl --csv --out events.csv
-  ```
-
-- **Interface** — single-key actions, help overlay (`?`), sidebar tree, mouse
-  scroll, `dark`/`light` theming with per-style overrides (honours `NO_COLOR`),
-  and file-only daily-rolling logs (the TUI owns the terminal).
+- **Connections** — saved connection profiles in TOML (`~/.config/keyhole/config.toml`).
+- **Browser** (Redis) — navigate the keyspace and inspect values, with a live server-statistics band and a pinned, read-only command console.
+- **Realtime** — live tails of pub/sub, pattern pub/sub, streams, keyspace events, and `MONITOR` (Redis); topic/queue tails (AMQP 1.0); and exchange taps (RabbitMQ).
+- **Recording** — record any live tail to a lossless JSONL file; export a finished recording to CSV.
 
 ## Installation
 
