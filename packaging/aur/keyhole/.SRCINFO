@@ -1,6 +1,6 @@
 pkgbase = keyhole
 	pkgdesc = Terminal UI to connect to brokers (Redis, AMQP), browse data, watch realtime activity, and record streams
-	pkgver = 0.1.0
+	pkgver = 0.1.1
 	pkgrel = 1
 	url = https://github.com/AlexKasapis/Keyhole
 	arch = x86_64
@@ -14,7 +14,7 @@ pkgbase = keyhole
 	optdepends = gnome-keyring: OS keyring (Secret Service) backend for stored connection secrets
 	optdepends = dbus: session bus the OS keyring backend talks to
 	options = !lto
-	source = keyhole-0.1.0.tar.gz::https://github.com/AlexKasapis/Keyhole/archive/refs/tags/v0.1.0.tar.gz
+	source = keyhole-0.1.1.tar.gz::https://github.com/AlexKasapis/Keyhole/archive/refs/tags/v0.1.1.tar.gz
 	sha256sums = SKIP
 
 pkgname = keyhole

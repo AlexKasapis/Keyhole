@@ -282,18 +282,24 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          # Pin the cosign 2.x line. cosign 3.x's sign-blob defaults to the new
+          # single-file bundle format and, under its default signing config,
+          # rejects --new-bundle-format=false outright ("must provide
+          # --new-bundle-format or --bundle ... with --signing-config"), so it
+          # cannot emit the detached .sig + .pem sidecars our verifier
+          # (scripts/install.sh) and the README/SECURITY docs consume. On 2.x,
+          # --output-signature/--output-certificate are the documented, default
+          # behaviour, so the sidecars come out as before.
+          cosign-release: "v2.6.3"
 
       - name: Sign artifacts (cosign keyless)
         working-directory: artifacts
         run: |
-          # cosign 3.x flips sign-blob's --new-bundle-format default to true,
-          # which ignores --output-signature/--output-certificate and writes a
-          # single .bundle instead. Our verifier (scripts/install.sh) and the
-          # README/SECURITY docs consume the detached .sig + .pem sidecars, so
-          # opt back out to keep emitting them.
+          # Detached sidecars (.sig + .pem) per artifact — see the cosign 2.x pin
+          # above for why we don't use the new bundle format.
           for f in ./*.tar.gz ./*.deb ./*.rpm SHA256SUMS keyhole.cdx.json; do
             cosign sign-blob --yes \
-              --new-bundle-format=false \
               --output-signature "${f}.sig" \
               --output-certificate "${f}.pem" \
               "$f"

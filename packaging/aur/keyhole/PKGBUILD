@@ -5,7 +5,7 @@
 # is committed as 'SKIP' and filled in at release time by scripts/gen_packaging.sh
 # (which also refreshes .SRCINFO).
 pkgname=keyhole
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Terminal UI to connect to brokers (Redis, AMQP), browse data, watch realtime activity, and record streams"
 arch=('x86_64' 'aarch64')

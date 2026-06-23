@@ -7,16 +7,17 @@
 #
 # The version and the three sha256 values are committed with placeholders and
 # filled in at release time by scripts/gen_packaging.sh — do not hand-edit the
-# lines tagged `# @sha256:...`.
+# lines tagged `# @sha256:...`. The download URLs interpolate `#{version}`, so
+# they track the `version` line above and never need touching at release time.
 class Keyhole < Formula
   desc "Terminal UI to connect to brokers (Redis, AMQP), browse data, and record streams"
   homepage "https://github.com/AlexKasapis/Keyhole"
-  version "0.1.0"
+  version "0.1.1"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     # No prebuilt macOS binary is published; build from the source tag.
-    url "https://github.com/AlexKasapis/Keyhole/archive/refs/tags/v0.1.0.tar.gz"
+    url "https://github.com/AlexKasapis/Keyhole/archive/refs/tags/v#{version}.tar.gz"
     sha256 "0000000000000000000000000000000000000000000000000000000000000000" # @sha256:src
     depends_on "cmake" => :build
     depends_on "rust" => :build
@@ -24,11 +25,11 @@ class Keyhole < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/AlexKasapis/Keyhole/releases/download/v0.1.0/keyhole-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/AlexKasapis/Keyhole/releases/download/v#{version}/keyhole-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # @sha256:linux-x86_64
     end
     on_arm do
-      url "https://github.com/AlexKasapis/Keyhole/releases/download/v0.1.0/keyhole-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/AlexKasapis/Keyhole/releases/download/v#{version}/keyhole-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "0000000000000000000000000000000000000000000000000000000000000000" # @sha256:linux-aarch64
     end
   end
