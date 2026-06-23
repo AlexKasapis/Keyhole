@@ -18,10 +18,7 @@ pub enum SecretSpec {
     Prompt,
 }
 
-/// Service name used for all Keyhole keyring entries. Only referenced by the
-/// keyring backend, so it is gated to avoid a dead-code warning in headless
-/// (`--no-default-features`) builds.
-#[cfg(feature = "keyring")]
+/// Service name used for all Keyhole keyring entries.
 pub const KEYRING_SERVICE: &str = "keyhole";
 
 impl SecretSpec {
@@ -65,13 +62,11 @@ pub fn resolve(spec: &SecretSpec, account_hint: &str) -> anyhow::Result<Option<S
 }
 
 /// Resolve a secret off the async runtime, since [`resolve`] can block (keyring
-/// access touches the OS secret service). Shared by the TUI connect path and the
-/// headless `record` command.
+/// access touches the OS secret service). Used by the TUI connect path.
 pub async fn resolve_async(spec: SecretSpec, account: String) -> anyhow::Result<Option<String>> {
     tokio::task::spawn_blocking(move || resolve(&spec, &account)).await?
 }
 
-#[cfg(feature = "keyring")]
 fn resolve_keyring(account: &str) -> anyhow::Result<Option<String>> {
     let entry = keyring::Entry::new(KEYRING_SERVICE, account)
         .map_err(|e| anyhow::anyhow!("opening keyring entry for `{account}`: {e}"))?;
@@ -82,11 +77,6 @@ fn resolve_keyring(account: &str) -> anyhow::Result<Option<String>> {
             "reading keyring entry for `{account}`: {e}"
         )),
     }
-}
-
-#[cfg(not(feature = "keyring"))]
-fn resolve_keyring(_account: &str) -> anyhow::Result<Option<String>> {
-    anyhow::bail!("keyring support is not compiled in; use `env:VAR` or `prompt`")
 }
 
 #[cfg(test)]

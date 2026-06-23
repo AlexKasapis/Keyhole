@@ -48,11 +48,6 @@ seed:
 build-release:
     cargo build --release
 
-# Static, headless build (env-var secrets only; no keyring backend).
-build-musl:
-    rustup target add x86_64-unknown-linux-musl
-    cargo build --release --target x86_64-unknown-linux-musl --no-default-features
-
 # Build the distro-native packages (.deb + .rpm) locally, the way the release
 # workflow does: a full glibc release build, the generated man page + completions,
 # then cargo-deb / cargo-generate-rpm over Cargo.toml's [package.metadata.*].

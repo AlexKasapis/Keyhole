@@ -51,10 +51,11 @@
           # crates.io registry (no git deps), so no `outputHashes` are needed.
           cargoLock.lockFile = ./Cargo.lock;
 
-          # Default features = the full glibc flavor (keyring + amqp + rabbitmq).
-          # cmake builds the bundled C of aws-lc-sys (rustls' crypto backend
-          # behind the amqp/rabbitmq TLS support); bindgenHook supplies libclang
-          # for its bindings; perl is needed by aws-lc's build scripts. The OS
+          # The build is the full feature set (keyring + amqp + rabbitmq), all
+          # always built in. cmake builds the bundled C of aws-lc-sys (rustls'
+          # crypto backend behind the amqp/rabbitmq TLS support); bindgenHook
+          # supplies libclang for its bindings; perl is needed by aws-lc's build
+          # scripts. The OS
           # keyring backend is pure-Rust zbus (it speaks the Secret Service
           # D-Bus protocol at runtime), so it pulls in no build inputs.
           nativeBuildInputs = with pkgs; [

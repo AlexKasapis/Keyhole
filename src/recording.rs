@@ -7,14 +7,13 @@
 //! target; [`Recorder`] is generic over any [`Write`] so it can be unit tested
 //! against an in-memory buffer.
 //!
-//! [`export_csv`] converts a finished JSONL recording into CSV for spreadsheets.
+//! [`view`] loads a finished JSONL recording for the in-app Recordings viewer.
 
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::broker::{BrokerEvent, SubSpec};
@@ -197,45 +196,6 @@ fn sanitize(s: &str) -> String {
     }
 }
 
-/// Convert a JSONL recording into CSV, writing a header then one row per record.
-/// Returns the number of records exported. Malformed lines abort with an error.
-pub fn export_csv(reader: impl BufRead, mut out: impl Write) -> anyhow::Result<u64> {
-    writeln!(
-        out,
-        "seq,ts,connection,source,source_type,encoding,payload,meta"
-    )?;
-    let mut count = 0u64;
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let rec: Record = serde_json::from_str(&line)
-            .map_err(|e| anyhow::anyhow!("invalid record on line {}: {e}", count + 1))?;
-        let ts = rec.ts.format(&Rfc3339).unwrap_or_default();
-        let meta = rec
-            .meta
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(";");
-        writeln!(
-            out,
-            "{},{},{},{},{},{},{},{}",
-            rec.seq,
-            csv_field(&ts),
-            csv_field(&rec.connection),
-            csv_field(&rec.source),
-            csv_field(&rec.source_type),
-            csv_field(&rec.encoding),
-            csv_field(&rec.payload),
-            csv_field(&meta),
-        )?;
-        count += 1;
-    }
-    Ok(count)
-}
-
 /// One record condensed for the Recordings viewer: just the fields the viewer
 /// shows, with the payload flattened to a single line.
 #[derive(Debug, Clone, PartialEq)]
@@ -312,16 +272,6 @@ pub fn view(reader: impl BufRead) -> RecordingView {
     view
 }
 
-/// RFC 4180 CSV escaping: quote fields containing a comma, quote, or newline,
-/// doubling any embedded quotes.
-fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,41 +343,6 @@ mod tests {
         assert_eq!(back.source_type, "stream");
         assert_eq!(back.encoding, "json");
         assert_eq!(back.payload, r#"{"a":1}"#);
-    }
-
-    #[test]
-    fn export_csv_writes_header_and_escapes() {
-        // payload contains a comma and quotes -> must be quoted/escaped.
-        let jsonl = concat!(
-            r#"{"seq":0,"ts":"2026-06-19T12:00:00Z","connection":"local","source":"news","source_type":"pubsub","encoding":"utf8","payload":"a,\"b\"","meta":[["id","1-0"]]}"#,
-            "\n",
-            "\n", // blank line is skipped
-            r#"{"seq":1,"ts":"2026-06-19T12:00:01Z","connection":"local","source":"news","source_type":"pubsub","encoding":"utf8","payload":"plain","meta":[]}"#,
-            "\n",
-        );
-        let mut out = Vec::new();
-        let n = export_csv(Cursor::new(jsonl), &mut out).unwrap();
-        assert_eq!(n, 2);
-        let csv = String::from_utf8(out).unwrap();
-        let lines: Vec<&str> = csv.lines().collect();
-        assert_eq!(
-            lines[0],
-            "seq,ts,connection,source,source_type,encoding,payload,meta"
-        );
-        assert_eq!(
-            lines[1],
-            r#"0,2026-06-19T12:00:00Z,local,news,pubsub,utf8,"a,""b""",id=1-0"#
-        );
-        assert_eq!(
-            lines[2],
-            "1,2026-06-19T12:00:01Z,local,news,pubsub,utf8,plain,"
-        );
-    }
-
-    #[test]
-    fn export_csv_rejects_malformed() {
-        let mut out = Vec::new();
-        assert!(export_csv(Cursor::new("not json\n"), &mut out).is_err());
     }
 
     #[test]

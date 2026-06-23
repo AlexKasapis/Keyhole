@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests for scripts/install.sh — the prebuilt-binary installer.
 #
-# Covers target-triple detection (every supported os/arch/flavor + rejections)
+# Covers target-triple detection (every supported os/arch + rejections)
 # and the full download → checksum-verify → install flow against a locally
 # staged fake release (no network), including the corrupted-checksum abort and
 # the cosign signature paths (valid / invalid / unsigned), driven by a stub
@@ -30,14 +30,14 @@ bad() {
 }
 
 expect_target() {
-    # $1=os $2=arch $3=flavor $4=expected-triple
+    # $1=os $2=arch $3=expected-triple
     local got
-    got=$(KEYHOLE_UNAME_S="$1" KEYHOLE_UNAME_M="$2" KEYHOLE_INSTALL_FLAVOR="$3" \
+    got=$(KEYHOLE_UNAME_S="$1" KEYHOLE_UNAME_M="$2" \
         sh "$INSTALLER" --print-target 2>/dev/null || true)
-    if [ "$got" = "$4" ]; then
-        pass "$1/$2/$3 -> $4"
+    if [ "$got" = "$3" ]; then
+        pass "$1/$2 -> $3"
     else
-        bad "$1/$2/$3: expected '$4', got '$got'"
+        bad "$1/$2: expected '$3', got '$got'"
     fi
 }
 
@@ -53,25 +53,15 @@ expect_reject() {
 }
 
 echo "== target detection =="
-expect_target Linux x86_64 gnu x86_64-unknown-linux-gnu
-expect_target Linux x86_64 musl x86_64-unknown-linux-musl
-expect_target Linux aarch64 gnu aarch64-unknown-linux-gnu
-expect_target Linux aarch64 musl aarch64-unknown-linux-musl
-expect_target Linux arm64 gnu aarch64-unknown-linux-gnu
-expect_target Linux amd64 musl x86_64-unknown-linux-musl
-# Flavor defaults to gnu when unset.
-default_flavor=$(KEYHOLE_UNAME_S=Linux KEYHOLE_UNAME_M=x86_64 sh "$INSTALLER" --print-target 2>/dev/null || true)
-if [ "$default_flavor" = "x86_64-unknown-linux-gnu" ]; then
-    pass "flavor defaults to gnu"
-else
-    bad "flavor default: got '$default_flavor'"
-fi
+expect_target Linux x86_64 x86_64-unknown-linux-gnu
+expect_target Linux aarch64 aarch64-unknown-linux-gnu
+expect_target Linux arm64 aarch64-unknown-linux-gnu
+expect_target Linux amd64 x86_64-unknown-linux-gnu
 
 echo "== rejections =="
 expect_reject "macOS" KEYHOLE_UNAME_S=Darwin KEYHOLE_UNAME_M=x86_64
 expect_reject "unknown OS" KEYHOLE_UNAME_S=Plan9 KEYHOLE_UNAME_M=x86_64
 expect_reject "unknown arch" KEYHOLE_UNAME_S=Linux KEYHOLE_UNAME_M=riscv64
-expect_reject "unknown flavor" KEYHOLE_UNAME_S=Linux KEYHOLE_UNAME_M=x86_64 KEYHOLE_INSTALL_FLAVOR=static
 
 echo "== end-to-end install against a staged local release =="
 work=$(mktemp -d "${TMPDIR:-/tmp}/keyhole-install-test.XXXXXX")

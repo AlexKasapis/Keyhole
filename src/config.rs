@@ -126,6 +126,10 @@ impl ConnectionConfig {
     }
 
     /// The broker kind this profile connects to.
+    ///
+    /// Exercised only by tests now that the headless `record` command (its sole
+    /// caller) is gone; retained for the pending TUI realtime rework.
+    #[allow(dead_code)]
     pub fn broker_kind(&self) -> crate::broker::BrokerKind {
         use crate::broker::BrokerKind;
         match self {
@@ -136,8 +140,8 @@ impl ConnectionConfig {
     }
 
     /// The `(secret spec, keyring account)` pair for resolving this connection's
-    /// password. The account is the profile name. Shared by the TUI and the
-    /// headless recorder so the per-variant match lives in exactly one place.
+    /// password. The account is the profile name. The per-variant match lives
+    /// in exactly one place.
     pub fn secret_account(&self) -> (SecretSpec, String) {
         match self {
             ConnectionConfig::Redis(p) => (p.password_spec(), p.name.clone()),

@@ -50,15 +50,16 @@ keyhole   # launch the TUI
 | Keyspace browser + value inspector  | ✅           | —                 | —                     |
 | Read-only command console           | ✅           | —                 | —                     |
 | Realtime tails                      | ✅           | ✅                | ✅                    |
-| Record → JSONL · export → CSV       | ✅           | ✅                | ✅                    |
-| Availability                        | always built in | `amqp` feature | `rabbitmq` feature |
+| Record live tail → JSONL            | ✅           | ✅                | ✅                    |
+
+All three brokers are always built in.
 
 ## Features
 
 - **Connections** — saved connection profiles in TOML (`~/.config/keyhole/config.toml`).
 - **Browser** (Redis) — navigate the keyspace and inspect values, with a live server-statistics band and a pinned, read-only command console.
 - **Realtime** — live tails of pub/sub, pattern pub/sub, streams, keyspace events, and `MONITOR` (Redis); topic/queue tails (AMQP 1.0); and exchange taps (RabbitMQ).
-- **Recording** — record any live tail to a lossless JSONL file; export a finished recording to CSV.
+- **Recording** — record any live tail to a lossless JSONL file, browsable in the in-app recordings viewer.
 
 ## Installation
 
@@ -66,16 +67,8 @@ Keyhole is a single self-contained binary. Pick the channel that fits your setup
 
 ### Prebuilt binaries
 
-The [install script](#install) above is the quickest route. Two flavors are
-published per architecture (x86_64 and aarch64): the default full **glibc** build
-(keyring + AMQP + RabbitMQ), and a dependency-free static **musl** build (Redis
-only, env-var secrets) for headless/minimal hosts:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh \
-  | KEYHOLE_INSTALL_FLAVOR=musl sh
-```
+The [install script](#install) above is the quickest route. A **glibc** binary
+(keyring + AMQP + RabbitMQ) is published per architecture (x86_64 and aarch64).
 
 You can also grab a tarball directly from the [Releases page].
 
@@ -150,27 +143,6 @@ just test-int       # integration tests against dockerized Redis + ActiveMQ + Ra
 ```
 
 Logs are written to `~/.local/share/keyhole/logs/`.
-
-<details>
-<summary><strong>Build variants &amp; feature flags</strong></summary>
-
-<br>
-
-```sh
-just build-release  # optimized binary (default features: keyring + amqp + rabbitmq)
-just build-musl     # static, headless binary (env-var secrets only)
-```
-
-| Feature    | Default | What it adds                                               |
-|------------|:-------:|------------------------------------------------------------|
-| `keyring`  |   on    | OS keyring backend for secret resolution                   |
-| `amqp`     |   on    | AMQP 1.0 broker support (`fe2o3-amqp` + rustls for `amqps`) |
-| `rabbitmq` |   on    | RabbitMQ / AMQP 0.9.1 support (`lapin` + rustls for `amqps`)|
-
-Disable them all with `--no-default-features` for a minimal, statically-linkable
-build (Redis is always included).
-
-</details>
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full contributor workflow and
 [`CHANGELOG.md`](CHANGELOG.md) for release notes.

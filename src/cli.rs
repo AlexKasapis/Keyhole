@@ -1,6 +1,5 @@
-//! Command-line interface. With no subcommand the TUI launches; the `record`
-//! and `export` subcommands run headlessly (no terminal), reusing the broker and
-//! recording stack minus `ui/`.
+//! Command-line interface. With no subcommand the TUI launches. The only
+//! subcommand is the hidden `gen` packaging helper (man page + completions).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -25,38 +24,15 @@ pub struct Cli {
     #[arg(long, default_value = "info", value_name = "FILTER")]
     pub log_level: String,
 
-    /// Headless subcommand; omit to launch the TUI.
+    /// Subcommand; omit to launch the TUI.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
 
-/// Headless subcommands.
+/// CLI subcommands. The only one is the hidden `gen` packaging helper; with no
+/// subcommand the interactive TUI launches.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Record a live source to a JSONL file until interrupted (Ctrl-C).
-    Record {
-        /// Connection profile name (from the config file).
-        #[arg(long, value_name = "PROFILE")]
-        connect: String,
-        /// Source spec: `pubsub:ch`, `psub:ch.*`, or `stream:key`.
-        #[arg(long, value_name = "SPEC")]
-        source: String,
-        /// Output directory (defaults to the data recordings directory).
-        #[arg(long, value_name = "DIR")]
-        out: Option<PathBuf>,
-    },
-    /// Export a JSONL recording to CSV (stdout by default).
-    Export {
-        /// The `.jsonl` recording to read.
-        #[arg(value_name = "FILE")]
-        file: PathBuf,
-        /// Emit CSV (the only supported format today).
-        #[arg(long)]
-        csv: bool,
-        /// Write to this file instead of stdout.
-        #[arg(long, value_name = "FILE")]
-        out: Option<PathBuf>,
-    },
     /// Generate packaging assets (man page, shell completions) and exit.
     ///
     /// Hidden from `--help`: this is a maintainer/packaging helper, not an
@@ -183,86 +159,6 @@ mod tests {
         assert_eq!(cli.connect.as_deref(), Some("prod"));
         assert_eq!(cli.log_level, "keyhole=debug");
         assert!(cli.command.is_none());
-    }
-
-    #[test]
-    fn record_subcommand_parses_with_optional_out() {
-        let cli = Cli::try_parse_from([
-            "keyhole",
-            "record",
-            "--connect",
-            "p",
-            "--source",
-            "pubsub:n",
-        ])
-        .unwrap();
-        match cli.command {
-            Some(Command::Record {
-                connect,
-                source,
-                out,
-            }) => {
-                assert_eq!(connect, "p");
-                assert_eq!(source, "pubsub:n");
-                assert!(out.is_none());
-            }
-            other => panic!("expected Record, got {other:?}"),
-        }
-
-        let cli = Cli::try_parse_from([
-            "keyhole",
-            "record",
-            "--connect",
-            "p",
-            "--source",
-            "stream:k",
-            "--out",
-            "/data",
-        ])
-        .unwrap();
-        match cli.command {
-            Some(Command::Record { out, .. }) => {
-                assert_eq!(out.as_deref(), Some(Path::new("/data")))
-            }
-            other => panic!("expected Record, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn record_requires_connect_and_source() {
-        assert!(Cli::try_parse_from(["keyhole", "record", "--source", "pubsub:c"]).is_err());
-        assert!(Cli::try_parse_from(["keyhole", "record", "--connect", "p"]).is_err());
-    }
-
-    #[test]
-    fn export_subcommand_parses() {
-        let cli = Cli::try_parse_from(["keyhole", "export", "rec.jsonl", "--csv"]).unwrap();
-        match cli.command {
-            Some(Command::Export { file, csv, out }) => {
-                assert_eq!(file, PathBuf::from("rec.jsonl"));
-                assert!(csv);
-                assert!(out.is_none());
-            }
-            other => panic!("expected Export, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn export_csv_defaults_off_and_accepts_out() {
-        let cli =
-            Cli::try_parse_from(["keyhole", "export", "rec.jsonl", "--out", "rec.csv"]).unwrap();
-        match cli.command {
-            Some(Command::Export { csv, out, .. }) => {
-                assert!(!csv, "the --csv flag defaults to false");
-                assert_eq!(out.as_deref(), Some(Path::new("rec.csv")));
-            }
-            other => panic!("expected Export, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn export_requires_a_file_argument() {
-        assert!(Cli::try_parse_from(["keyhole", "export"]).is_err());
     }
 
     #[test]

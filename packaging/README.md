@@ -19,10 +19,9 @@ them straight from a file.
 ## Feature policy
 
 The AUR `keyhole`/`keyhole-bin`, the Homebrew/Nix builds, and the Tier 3
-`.deb`/`.rpm` all ship the **full glibc feature set** (keyring + AMQP +
-RabbitMQ), matching the `gnu` release tarballs. The dependency-free static build
-is the `musl` release tarball — see the README "Prebuilt binaries" section. The
-OS-keyring backend is pure-Rust zbus, so it needs a Secret Service provider (e.g.
+`.deb`/`.rpm` all ship the **full feature set** (keyring + AMQP + RabbitMQ),
+matching the release tarballs — these are always built in. The OS-keyring
+backend is pure-Rust zbus, so it needs a Secret Service provider (e.g.
 `gnome-keyring`) on the session bus at runtime, declared as an optional /
 recommended dependency rather than a hard one.
 
@@ -109,7 +108,7 @@ cargo build --release && keyhole gen man --out dist-assets   # + gen completions
 just package                                                 # → target/debian, target/generate-rpm
 ```
 
-Other architectures are served by the static `musl` tarball or `cargo install`;
+Other architectures are served by the prebuilt `gnu` tarball or `cargo install`;
 adding an aarch64 `.deb`/`.rpm` means a native `ubuntu-24.04-arm` workflow leg
 (a cross-built package would carry a wrong dependency floor).
 

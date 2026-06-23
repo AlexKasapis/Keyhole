@@ -13,35 +13,31 @@
 //! and the recorder work against any broker unchanged.
 
 pub mod actor;
-#[cfg(feature = "amqp")]
 pub mod amqp;
 pub mod factory;
-#[cfg(feature = "rabbitmq")]
 pub mod rabbitmq;
 pub mod redis;
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
-#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures_util::Stream;
-#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use time::OffsetDateTime;
 
 /// The AMQP short-string length cap (one length byte), shared by the AMQP 1.0
 /// and RabbitMQ brokers. Names longer than this make the AMQP client panic on
-/// conversion, so source specs are validated against it up front. Always built
-/// (the spec parser enforces it) even when neither AMQP broker is compiled.
+/// conversion, so source specs are validated against it up front. Referenced
+/// only by the test-exercised spec parser now that headless `record` is gone.
+#[allow(dead_code)]
 pub(crate) const AMQP_SHORTSTR_MAX: usize = 255;
 
 /// A process-wide, monotonically increasing sequence for minting unique
 /// connection identifiers (AMQP container-ids, RabbitMQ connection names), so
 /// every broker connection is distinct even against a single broker.
-#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
 pub(crate) fn next_conn_seq() -> u64 {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     SEQ.fetch_add(1, Ordering::Relaxed)
@@ -50,7 +46,6 @@ pub(crate) fn next_conn_seq() -> u64 {
 /// Build `amqp[s]://[user[:pass]@]host:port` with percent-encoded credentials
 /// and an IPv6-bracketed host. Shared by the AMQP 1.0 and RabbitMQ brokers
 /// (RabbitMQ appends a `/vhost` segment); `tls` selects the `amqps://` scheme.
-#[cfg(any(feature = "amqp", feature = "rabbitmq"))]
 pub(crate) fn amqp_base_url(
     tls: bool,
     host: &str,
@@ -162,10 +157,7 @@ impl Capabilities {
     /// AMQP (v1): no key browser, dashboard, or command console (the broker
     /// model and the read-only mandate don't fit them yet). The broker can still
     /// tail + record at the protocol level, but the UI exposes no tail view for
-    /// it yet (the Realtime screen was removed pending a rework). Only
-    /// constructed by the AMQP impl / tests, so it is dead code in a build
-    /// without the `amqp` feature.
-    #[cfg_attr(not(feature = "amqp"), allow(dead_code))]
+    /// it yet (the Realtime screen was removed pending a rework).
     pub fn amqp() -> Self {
         Self {
             kind: BrokerKind::Amqp,
@@ -179,10 +171,7 @@ impl Capabilities {
     /// RabbitMQ (AMQP 0.9.1): same capability shape as the AMQP 1.0 broker. The
     /// one tail is a non-destructive exchange tap (see
     /// [`crate::broker::rabbitmq`]); like AMQP, the UI exposes no tail view for
-    /// it yet (the Realtime screen was removed pending a rework). Only
-    /// constructed by the RabbitMQ impl / tests, so it is dead code in a build
-    /// without the `rabbitmq` feature.
-    #[cfg_attr(not(feature = "rabbitmq"), allow(dead_code))]
+    /// it yet (the Realtime screen was removed pending a rework).
     pub fn rabbitmq() -> Self {
         Self {
             kind: BrokerKind::Rabbitmq,
@@ -393,14 +382,22 @@ pub enum SubSpec {
     Monitor,
     /// An AMQP 1.0 topic — a non-destructive live subscription (each subscriber
     /// gets its own copy, so observing never steals messages). The primary AMQP tail.
+    ///
+    /// `Topic`/`Queue`/`Exchange` are constructed only in tests now that the
+    /// headless `record` source-spec parser is gone; the AMQP/RabbitMQ subscribe
+    /// paths still match on them, so they are retained for the pending TUI
+    /// realtime rework that will re-expose AMQP/RabbitMQ tailing.
+    #[allow(dead_code)]
     Topic(String),
     /// An AMQP 1.0 queue address.
+    #[allow(dead_code)]
     Queue(String),
     /// A RabbitMQ (AMQP 0.9.1) exchange tap: bind a temporary, exclusive,
     /// auto-delete queue to `exchange` with `binding_key` and consume the
     /// copies routed to it. Non-destructive — real queues and their consumers
     /// never lose a message. `binding_key` defaults to `#` (matches every
     /// routing key on a topic exchange; ignored by a fanout exchange).
+    #[allow(dead_code)]
     Exchange {
         exchange: String,
         binding_key: String,
@@ -412,6 +409,11 @@ impl SubSpec {
     /// `pubsub:ch`, `psub:ch.*`, `stream:key`; `default_db` supplies the database
     /// for `stream`/`keyspace` targets. `monitor` and `keyspace` may be given
     /// bare (the latter defaults to `default_db`) or as `keyspace:N`.
+    ///
+    /// Exercised only by tests now that the headless `record` command (its sole
+    /// caller) is gone; retained as the canonical spec parser for the pending
+    /// TUI realtime rework.
+    #[allow(dead_code)]
     pub fn parse(spec: &str, default_db: u32) -> anyhow::Result<Self> {
         let spec = spec.trim();
         // Targetless / database-defaulted forms.
@@ -536,6 +538,10 @@ impl SubSpec {
     /// The broker kind this source spec targets. Each spec belongs to exactly
     /// one broker, so a spec typed for the wrong broker can be rejected up front
     /// (with a clear message) instead of failing later at subscribe time.
+    ///
+    /// Exercised only by tests now that the headless `record` command (its sole
+    /// caller) is gone; retained for the pending TUI realtime rework.
+    #[allow(dead_code)]
     pub fn supported_kind(&self) -> BrokerKind {
         match self {
             SubSpec::Channel(_)
@@ -881,7 +887,6 @@ mod tests {
         assert!(!BrokerKind::Rabbitmq.uses_database());
     }
 
-    #[cfg(any(feature = "amqp", feature = "rabbitmq"))]
     #[test]
     fn amqp_base_url_encodes_creds_and_brackets_ipv6() {
         // Percent-encodes userinfo (shared by both AMQP brokers).

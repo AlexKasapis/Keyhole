@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Headless mode**: the `keyhole record` and `keyhole export` subcommands are
+  gone. Keyhole is now TUI-only (the hidden `gen` packaging helper remains).
+  CSV export — previously available only through `keyhole export` — is removed;
+  recordings are still written to JSONL and browsable in the in-app recordings
+  viewer.
+- The minimal static **musl** build. The `musl` release tarballs and the
+  `KEYHOLE_INSTALL_FLAVOR=musl` installer option are no longer published; the
+  glibc tarballs, `.deb`/`.rpm`, Nix, and `cargo install` channels remain.
+
+### Changed
+
+- Keyring, AMQP 1.0, and RabbitMQ are always built in. The optional `keyring`,
+  `amqp`, and `rabbitmq` Cargo features (and the `--no-default-features` build)
+  have been removed; only the `integration` test-gating feature remains.
+
 ## [0.1.0] - 2026-06-23
 
 Initial release.

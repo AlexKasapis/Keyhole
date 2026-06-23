@@ -15,15 +15,10 @@
 # check, verify the GitHub build-provenance attestation:
 #   gh attestation verify keyhole-<target>.tar.gz --repo AlexKasapis/Keyhole
 #
-# Two build flavors are published per architecture (see the README "Build
-# variants" table). The default is the full glibc build (keyring + AMQP +
-# RabbitMQ); the `musl` flavor is a dependency-free static binary (Redis only,
-# env-var secrets), for headless/minimal hosts:
-#
-#   KEYHOLE_INSTALL_FLAVOR=musl sh keyhole-installer.sh
+# Prebuilt glibc binaries (keyring + AMQP + RabbitMQ) are published per
+# architecture.
 #
 # Environment overrides:
-#   KEYHOLE_INSTALL_FLAVOR  gnu (default) | musl       — which build to fetch
 #   KEYHOLE_INSTALL_DIR     install prefix for the binary (default ~/.local/bin)
 #   KEYHOLE_INSTALL_BASE    release asset base URL
 #                           (default: .../releases/latest/download)
@@ -57,13 +52,12 @@ usage() {
     awk 'NR==1 {next} /^#/ {sub(/^# ?/, ""); print; next} {exit}' "$0"
 }
 
-# Resolve the Rust target triple for this host + selected flavor. Honours the
-# KEYHOLE_UNAME_* overrides so the detection logic is unit-testable without
-# actually running on every platform.
+# Resolve the Rust target triple for this host. Honours the KEYHOLE_UNAME_*
+# overrides so the detection logic is unit-testable without actually running on
+# every platform.
 resolve_target() {
     os="${KEYHOLE_UNAME_S:-$(uname -s)}"
     arch="${KEYHOLE_UNAME_M:-$(uname -m)}"
-    flavor="${KEYHOLE_INSTALL_FLAVOR:-gnu}"
 
     case "$os" in
         Linux) ;;
@@ -77,12 +71,7 @@ resolve_target() {
         *) die "unsupported architecture '${arch}' (x86_64 and aarch64 are published)" ;;
     esac
 
-    case "$flavor" in
-        gnu | musl) ;;
-        *) die "unknown KEYHOLE_INSTALL_FLAVOR '${flavor}' (expected 'gnu' or 'musl')" ;;
-    esac
-
-    printf '%s-unknown-linux-%s' "$rust_arch" "$flavor"
+    printf '%s-unknown-linux-gnu' "$rust_arch"
 }
 
 # Download $1 to $2 using whichever of curl/wget is available. A local path or

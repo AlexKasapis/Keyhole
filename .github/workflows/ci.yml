@@ -98,28 +98,6 @@ jobs:
           KEYHOLE_TEST_RABBITMQ_PORT: "5673"
         run: cargo test --locked --features integration -- --include-ignored
 
-  # Headless, statically-linked build (env-var secrets only; no keyring backend).
-  musl:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: x86_64-unknown-linux-musl
-
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Clippy (headless feature set)
-        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
-
-      - name: Build static musl binary
-        run: cargo build --locked --release --no-default-features --target x86_64-unknown-linux-musl
-
   # Guard the release plumbing (installer script + workflows) on every push,
   # so breakage is caught here rather than when a real `vX.Y.Z` tag is pushed.
   release-lint:
@@ -209,9 +187,6 @@ jobs:
 
       - name: cargo check (full feature set, on MSRV)
         run: cargo check --locked --all-features
-
-      - name: cargo check (headless feature set, on MSRV)
-        run: cargo check --locked --no-default-features
 
   # Measure line coverage across the FULL surface, including the broker-backed
   # integration tests so the live connection code in src/broker/* is counted,
@@ -305,22 +280,6 @@ jobs:
           name: coverage-lcov
           path: lcov.info
           if-no-files-found: error
-
-  # Compile every feature combination. The build/musl jobs only cover the two
-  # extremes (all-features and --no-default-features); this catches a broken
-  # intermediate combo (e.g. amqp without rabbitmq). `integration` only gates
-  # test code, so it is excluded from the powerset.
-  feature-combos:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - uses: taiki-e/install-action@9e1e5806d4a4822de933115878265be9aaa786d9 # v2.82.2
-        with:
-          tool: cargo-hack
-      - name: cargo hack (feature powerset)
-        run: cargo hack --locked --feature-powerset --depth 2 --exclude-features integration check --all-targets
 
   # Validate the Nix flake (Tier 2c): evaluate it, build the default package, and
   # smoke-run the result. This is the only automated proof that

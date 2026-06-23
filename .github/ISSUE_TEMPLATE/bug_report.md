@@ -18,7 +18,7 @@ What you expected instead.
 
 **Environment**
 - Keyhole version (`keyhole --version`):
-- Install method (cargo install / prebuilt gnu / prebuilt musl / from source):
+- Install method (cargo install / prebuilt binary / distro package / from source):
 - OS / distro:
 - Broker + version (Redis / ActiveMQ / Amazon MQ / RabbitMQ):
 
