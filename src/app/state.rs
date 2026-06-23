@@ -45,6 +45,19 @@ pub enum InputMode {
     Rename,
 }
 
+/// Which Browser pane currently owns the keyboard. Independent of which bottom
+/// subpanel tab is *selected*: the selected tab stays visible (and its feed
+/// live) regardless of focus — only the focused pane receives keybinds, so the
+/// key list keeps Space / `j` / `k` while a text subpanel is merely on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaneFocus {
+    /// The key list (and the value pane it drives). The default on Browser entry.
+    #[default]
+    Keys,
+    /// The bottom subpanel (Console / Monitor / Keyspace / Pub-Sub / Tail / tails).
+    Bottom,
+}
+
 /// One tab in the Browser's bottom panel. The first five are fixed and always
 /// present; [`PanelTab::Sub`] is one tab per live pub/sub or stream tail, placed
 /// immediately after its anchor ([`PanelTab::PubSub`] for pub/sub channels and
@@ -673,9 +686,13 @@ pub struct Connection {
     /// tab and run only while it is focused. See [`Self::panel_slots`].
     pub subs: Vec<Subscription>,
     /// Active tab in the Browser's bottom panel: an index into the computed
-    /// [`Self::panel_slots`] list. Cycled with Tab / Shift-Tab — the only way to
-    /// move between tabs.
+    /// [`Self::panel_slots`] list. Cycled with Tab / Shift-Tab. Which tab is
+    /// *selected* (visible) is separate from which pane has the keyboard —
+    /// see [`Self::focus`].
     pub panel_tab: usize,
+    /// Which Browser pane has the keyboard for this connection. Resets to `Keys`
+    /// on entry; moved with Tab / Shift-Tab (→ bottom) and Ctrl-↑ / Ctrl-↓.
+    pub focus: PaneFocus,
     /// Read-only command console state for this connection.
     pub console: Console,
     pub handle: ConnHandle,
@@ -693,6 +710,7 @@ impl Connection {
             dashboard: StatsPanel::default(),
             subs: Vec::new(),
             panel_tab: 0,
+            focus: PaneFocus::Keys,
             console: Console::default(),
             handle,
         }

@@ -13,8 +13,8 @@ use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, ConnForm, ConnHealth, Connection, InputMode, PanelTab, RecordState, Screen, SubState,
-    Subscription, ViewRow,
+    App, ConnForm, ConnHealth, Connection, InputMode, PaneFocus, PanelTab, RecordState, Screen,
+    SubState, Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
 use crate::theme::Theme;
@@ -187,6 +187,8 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         frame.render_widget(body, area);
         return;
     };
+    // Which pane owns the keyboard — used to tint the focused pane's border.
+    let focus = conn.focus;
 
     // The view (sorted/grouped rows) is a cache derived from `keys`, kept current
     // by the update phase: every SCAN page rebuilds it (see `App::on_keys_page`)
@@ -308,7 +310,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             Block::bordered()
                 .title(" Keys ")
                 .title_style(theme.heading)
-                .border_style(theme.border),
+                .border_style(border_style(theme, focus == PaneFocus::Keys)),
         )
         .row_highlight_style(theme.selected)
         .highlight_symbol("▶ ");
@@ -593,7 +595,7 @@ fn panel_band(
 
     let block = Block::bordered()
         .title(Line::from(title_spans))
-        .border_style(theme.border);
+        .border_style(border_style(theme, conn.focus == PaneFocus::Bottom));
     let content_area = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1083,7 +1085,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             if tls_focused { theme.accent } else { theme.dim },
         ),
         Span::raw(if form.tls { "[x]" } else { "[ ]" }),
-        Span::styled("  (space toggles)", theme.dim),
+        Span::styled("  (←/→ toggles)", theme.dim),
     ]));
     let kind_focused = form.focus == ConnForm::KIND_FOCUS;
     let kind = match form.kind {
@@ -1101,7 +1103,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             },
         ),
         Span::raw(format!("[{kind}]")),
-        Span::styled("  (space cycles)", theme.dim),
+        Span::styled("  (←/→ cycles)", theme.dim),
     ]));
     lines.push(Line::from(""));
     // One consolidated per-kind note (defined alongside each kind's defaults).
@@ -1132,25 +1134,24 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Tab / Shift-Tab switch tabs   b jump to last-viewed browser"),
         Line::from("  Recordings: ↑↓ select · PgUp/PgDn scroll · r rename · dd delete"),
         Line::from(""),
-        Line::styled("Browser", theme.heading),
-        Line::from("  server stats (Redis) appear in a band above the panes"),
+        Line::styled("Browser — focus follows the pane", theme.heading),
+        Line::from("  the focused pane has a highlighted border; the footer lists its keys"),
+        Line::from("  Tab / Shift-Tab focus & cycle the bottom subpanels"),
+        Line::from("  Ctrl-↑ focus keys · Ctrl-↓ focus bottom · Esc steps focus back"),
+        Line::from(""),
+        Line::styled("Keys pane", theme.heading),
         Line::from("  / filter   [ ] change DB   o sort column   O direction"),
         Line::from("  keys nest into collapsible groups by each ':' (start folded)"),
         Line::from("  Enter/Space collapse/expand group   z fold/unfold all"),
         Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),
         Line::from(""),
-        Line::styled("Bottom panel (Redis)", theme.heading),
-        Line::from("  fixed tabs: Console · Monitor · Keyspace · Pub/Sub · Tail"),
-        Line::from("  plus one tab per pub/sub or stream tail"),
-        Line::from("  Tab / Shift-Tab cycle tabs (the only way to switch)"),
-        Line::from("  Monitor/Keyspace run while focused, start paused · p play/pause"),
-        Line::from("  Pub/Sub & Tail: type in the tab, Enter subscribes/tails"),
+        Line::styled("Bottom subpanel (Redis)", theme.heading),
+        Line::from("  tabs: Console · Monitor · Keyspace · Pub/Sub · Tail · one per tail"),
+        Line::from("  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends · p play/pause · r rec · x close"),
+        Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
         Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
-        Line::from("  r record the focused feed   x close a pub/sub or tail tab"),
-        Line::from(""),
-        Line::styled("Console tab (read-only)", theme.heading),
-        Line::from("  type a command, Enter runs   Ctrl-P/N history"),
-        Line::from("  Ctrl-L clear   PgUp/PgDn scroll   writes/admin refused"),
+        Line::from("  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history"),
+        Line::from("  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused"),
         Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  a add connection   ? toggle help   Esc back   Ctrl-c quit"),
@@ -1169,6 +1170,17 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
 }
 
 // -- helpers ----------------------------------------------------------------
+
+/// The border style for a pane: the highlighted `border_focused` when it owns
+/// the keyboard, the plain `border` otherwise. Keeps the focused-pane tint in
+/// one place across the key list and the bottom subpanel.
+fn border_style(theme: &Theme, focused: bool) -> Style {
+    if focused {
+        theme.border_focused
+    } else {
+        theme.border
+    }
+}
 
 fn render_value(theme: &Theme, view: Option<&ValueView>) -> Vec<Line<'static>> {
     let Some(view) = view else {

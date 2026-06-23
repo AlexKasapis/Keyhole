@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, ConnHealth, InputMode, Screen};
+use crate::app::{App, ConnHealth, InputMode, PaneFocus, PanelTab, Screen};
 use crate::broker::BrokerKind;
 use crate::theme::Theme;
 
@@ -136,7 +136,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         InputMode::Form => {
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    " editing connection — Tab move · Enter save · Esc cancel ",
+                    " editing connection — Tab move · ←/→ toggle · Enter save · Esc cancel ",
                     theme.dim,
                 ))
                 .style(theme.status_bar),
@@ -163,7 +163,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
                 Span::styled(
-                    format!("   {hint}   Enter start · Tab tabs · Esc back"),
+                    format!("   {hint}   Enter start · Tab tabs · Esc keys"),
                     theme.dim,
                 ),
             ]);
@@ -224,34 +224,57 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
             ("go", "b browser"),
             ("app", "? help · Esc Esc quit"),
         ]),
-        // Keys are always grouped by prefix, so the footer always offers the
-        // collapse/expand controls — there is no grouping toggle. The bottom
-        // panel's fixed tabs are cycled with Tab / Shift-Tab (the only way).
+        // The footer follows the focused pane: the key list keeps its grouping /
+        // sort / db controls, while a focused bottom subpanel shows its own keys.
+        // (Pub/Sub & Tail anchors render the Subscribe prompt instead — see
+        // `render_footer` — so only Console and the feed tabs reach this arm.)
         Screen::Browser => {
-            let (sort, arrow, pattern) = app
+            let bottom = app
                 .active_conn()
-                .map(|c| {
-                    let arrow = if c.browser.sort_desc { "↓" } else { "↑" };
-                    (c.browser.sort.label(), arrow, c.browser.pattern.clone())
-                })
-                .unwrap_or(("name", "↑", "*".to_string()));
-            // Show the match pattern only once it differs from the default `*`,
-            // so the everyday case stays terse.
-            let filter = if pattern == "*" {
-                "/ filter".to_string()
+                .map(|c| c.focus == PaneFocus::Bottom)
+                .unwrap_or(false);
+            if bottom {
+                let console = matches!(
+                    app.active_conn().map(|c| c.active_panel()),
+                    Some(PanelTab::Console)
+                );
+                if console {
+                    owned(&[
+                        ("console", "type · Enter run"),
+                        ("history", "↑↓ · Ctrl-P/N"),
+                        ("output", "Ctrl-L clear · PgUp/PgDn scroll"),
+                        ("focus", "Tab tabs · Ctrl-↑/Esc keys"),
+                    ])
+                } else {
+                    owned(&[
+                        ("scroll", "↑↓ line · PgUp/PgDn page · g/G ends"),
+                        ("feed", "p play/pause · r rec · x close"),
+                        ("focus", "Tab tabs · Ctrl-↑/Esc keys"),
+                    ])
+                }
             } else {
-                format!("/ filter {pattern}")
-            };
-            vec![
-                ("nav", "↑↓ keys · [ ] db".to_string()),
-                ("groups", "⏎/Space collapse · z all".to_string()),
-                ("view", format!("{filter} · o sort {sort}{arrow} · O dir")),
-                (
-                    "panel",
-                    "Tab tabs · p play/pause · r rec · x close".to_string(),
-                ),
-                ("app", "? help · Esc back".to_string()),
-            ]
+                let (sort, arrow, pattern) = app
+                    .active_conn()
+                    .map(|c| {
+                        let arrow = if c.browser.sort_desc { "↓" } else { "↑" };
+                        (c.browser.sort.label(), arrow, c.browser.pattern.clone())
+                    })
+                    .unwrap_or(("name", "↑", "*".to_string()));
+                // Show the match pattern only once it differs from the default
+                // `*`, so the everyday case stays terse.
+                let filter = if pattern == "*" {
+                    "/ filter".to_string()
+                } else {
+                    format!("/ filter {pattern}")
+                };
+                vec![
+                    ("nav", "↑↓ keys · [ ] db".to_string()),
+                    ("groups", "⏎/Space collapse · z all".to_string()),
+                    ("view", format!("{filter} · o sort {sort}{arrow} · O dir")),
+                    ("panel", "Tab/Ctrl-↓ panel".to_string()),
+                    ("app", "? help · Esc back".to_string()),
+                ]
+            }
         }
         Screen::Recordings => owned(&[
             ("nav", "↑↓ move · PgUp/PgDn scroll"),
@@ -531,11 +554,12 @@ mod tests {
         assert!(text.contains("collapse"), "and advertises collapse/expand");
         assert!(!text.contains("p group"), "no `p group` toggle");
         assert!(!text.contains("ungroup"), "no `p ungroup` toggle");
-        // The bottom panel (Console + tails) is advertised, cycled with Tab.
+        // With the keys pane focused, the footer advertises moving focus to the
+        // bottom panel (Tab / Ctrl-↓) rather than the feed/console controls.
         assert!(text.contains("panel"), "browser footer has a panel section");
         assert!(
-            text.contains("Tab tabs"),
-            "and advertises Tab to cycle tabs"
+            text.contains("Tab/Ctrl-↓ panel"),
+            "and advertises Tab/Ctrl-↓ to focus the panel"
         );
     }
 

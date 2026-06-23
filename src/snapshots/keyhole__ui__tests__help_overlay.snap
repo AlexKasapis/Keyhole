@@ -11,27 +11,27 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │  Tab / Shift-Tab switch tabs   b jump to last-viewed browser   │           │
 │           │  Recordings: ↑↓ select · PgUp/PgDn scroll · r rename · dd delet│           │
 │           │                                                                │           │
-│           │Browser                                                         │           │
-│           │  server stats (Redis) appear in a band above the panes         │           │
+│           │Browser — focus follows the pane                                │           │
+│           │  the focused pane has a highlighted border; the footer lists it│           │
+│           │  Tab / Shift-Tab focus & cycle the bottom subpanels            │           │
+│           │  Ctrl-↑ focus keys · Ctrl-↓ focus bottom · Esc steps focus back│           │
+│           │                                                                │           │
+│           │Keys pane                                                       │           │
 │           │  / filter   [ ] change DB   o sort column   O direction        │           │
 │           │  keys nest into collapsible groups by each ':' (start folded)  │           │
 │           │  Enter/Space collapse/expand group   z fold/unfold all         │           │
 │           │  PgUp/PgDn scroll the value pane   keys auto-refresh           │           │
 │           │                                                                │           │
-│           │Bottom panel (Redis)                                            │           │
-│           │  fixed tabs: Console · Monitor · Keyspace · Pub/Sub · Tail     │           │
-│           │  plus one tab per pub/sub or stream tail                       │           │
-│           │  Tab / Shift-Tab cycle tabs (the only way to switch)           │           │
-│           │  Monitor/Keyspace run while focused, start paused · p play/paus│           │
-│           │  Pub/Sub & Tail: type in the tab, Enter subscribes/tails       │           │
+│           │Bottom subpanel (Redis)                                         │           │
+│           │  tabs: Console · Monitor · Keyspace · Pub/Sub · Tail · one per │           │
+│           │  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends · p play/pause · r re│           │
+│           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │  (empty Tail = selected key · a glob makes a pattern)          │           │
-│           │  r record the focused feed   x close a pub/sub or tail tab     │           │
-│           │                                                                │           │
-│           │Console tab (read-only)                                         │           │
-│           │  type a command, Enter runs   Ctrl-P/N history                 │           │
-│           │  Ctrl-L clear   PgUp/PgDn scroll   writes/admin refused        │           │
+│           │  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history  │           │
+│           │  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused        │           │
 │           │                                                                │           │
 │           │General                                                         │           │
 │           │  a add connection   ? toggle help   Esc back   Ctrl-c quit     │           │
-└───────────│  m toggle mouse capture (off = select/copy text)               │───────────┘
-  nav ↑↓ mov└────────────────────────────────────────────────────────────────┘r │ app ? he
+│           │  m toggle mouse capture (off = select/copy text)               │           │
+└───────────└────────────────────────────────────────────────────────────────┘───────────┘
+  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app ? he

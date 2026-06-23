@@ -16,8 +16,9 @@ mod realtime;
 mod recordings;
 
 pub use state::{
-    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PanelTab, RecordState,
-    RecordingFile, ScanStep, Screen, Status, StatusKind, SubState, Subscription, ViewRow,
+    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PaneFocus, PanelTab,
+    RecordState, RecordingFile, ScanStep, Screen, Status, StatusKind, SubState, Subscription,
+    ViewRow,
 };
 
 use std::path::PathBuf;
@@ -64,6 +65,8 @@ const VALUE_SCROLL_STEP: i32 = 10;
 /// Lines the Browser console band scrolls per PageUp/PageDown while focused —
 /// roughly one band's worth of output rows (see `CONSOLE_BAND_HEIGHT` in `ui`).
 const CONSOLE_SCROLL_STEP: i32 = 4;
+/// Events a focused live-feed tab scrolls per PageUp/PageDown (or Ctrl-U/D).
+const FEED_SCROLL_STEP: i32 = 10;
 
 /// The whole application as seen by the render loop.
 pub struct App {
@@ -267,6 +270,12 @@ impl App {
     fn note_browser_view(&mut self) {
         if self.screen == Screen::Browser {
             self.last_browser = self.active_id();
+            // Each entry starts with the keys pane focused; reconcile the panel
+            // mode + focus-scoped feeds for the freshly-entered browser.
+            if let Some(conn) = self.active_conn_mut() {
+                conn.focus = PaneFocus::Keys;
+            }
+            self.sync_panel_focus();
         }
     }
 

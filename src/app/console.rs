@@ -27,29 +27,33 @@ impl App {
         }
     }
 
+    /// The console prompt while it is focused (bottom subpanel, Console tab).
+    /// Focus moves (Tab / Ctrl-↑↓ / Esc) are handled in `handle_browser_key`
+    /// before this runs; ↑/↓ (and Ctrl-P/N) recall history since the key list is
+    /// no longer driven from here.
     pub(super) fn handle_command_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // Ctrl-P / Ctrl-N recall history: the Console prompt is always live now,
-        // so ↑/↓ are reserved for moving the key list (via `browser_input_nav`).
         match key.code {
+            KeyCode::Up => {
+                if let Some(console) = self.active_console_mut() {
+                    console.recall_prev();
+                }
+            }
+            KeyCode::Down => {
+                if let Some(console) = self.active_console_mut() {
+                    console.recall_next();
+                }
+            }
             KeyCode::Char('p') if ctrl => {
                 if let Some(console) = self.active_console_mut() {
                     console.recall_prev();
                 }
-                return;
             }
             KeyCode::Char('n') if ctrl => {
                 if let Some(console) = self.active_console_mut() {
                     console.recall_next();
                 }
-                return;
             }
-            _ => {}
-        }
-        if self.browser_input_nav(&key) {
-            return;
-        }
-        match key.code {
             KeyCode::Enter => self.submit_command(),
             // The output band scrolls with PageUp/PageDown.
             KeyCode::PageUp => self.scroll_console(-CONSOLE_SCROLL_STEP),

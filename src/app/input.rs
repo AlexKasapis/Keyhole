@@ -10,29 +10,141 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return; // ignore key-release/repeat (Windows emits these)
         }
-        // Keep the panel reconciled with the focused tab on every Browser key:
-        // the mode tracks the tab (so the Console / Pub/Sub / Tail prompts are
-        // always live) and the focused MONITOR/keyspace feed runs. The text-entry
-        // modals (Filter, Form) are excluded so their input is never clobbered.
-        if self.screen == Screen::Browser
-            && matches!(
-                self.mode,
-                InputMode::Normal | InputMode::Command | InputMode::Subscribe
-            )
-        {
-            self.sync_panel_focus();
-        }
+        // The full-screen text-entry modals own the keyboard wholesale until they
+        // are dismissed, so their input is never treated as a command.
         match self.mode {
-            InputMode::Normal => {
+            InputMode::Filter => return self.handle_filter_key(key),
+            InputMode::Form => return self.handle_form_key(key),
+            InputMode::Rename => return self.handle_rename_key(key),
+            // Normal / Command / Subscribe are reconciled from the focused pane.
+            InputMode::Normal | InputMode::Command | InputMode::Subscribe => {}
+        }
+        match self.screen {
+            Screen::Browser => self.handle_browser_key(key),
+            // The home screens have a single navigable list; keys map straight to
+            // actions (the bottom-panel focus model is Browser-only).
+            Screen::Connections | Screen::Recordings => {
                 if let Some(action) = action::map_key(&key) {
                     self.apply(action);
                 }
             }
-            InputMode::Filter => self.handle_filter_key(key),
-            InputMode::Form => self.handle_form_key(key),
-            InputMode::Subscribe => self.handle_subscribe_key(key),
-            InputMode::Command => self.handle_command_key(key),
-            InputMode::Rename => self.handle_rename_key(key),
+        }
+    }
+
+    /// Dispatch a Browser key by the focused pane. The pane-focus controls run
+    /// first and are non-printable, so they work even while a text subpanel is
+    /// capturing input — you can never get trapped in the console / anchor
+    /// prompts. The keys pane then runs the (feed-control-free) keymap, while a
+    /// focused text or feed subpanel handles the key itself.
+    fn handle_browser_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            // Ctrl-C always quits (even mid-typing); Ctrl-↑/↓ move the keyboard
+            // between the keys pane and the bottom subpanel.
+            (true, KeyCode::Char('c')) => {
+                self.running = false;
+                return;
+            }
+            (true, KeyCode::Up) => {
+                self.set_pane_focus(PaneFocus::Keys);
+                return;
+            }
+            (true, KeyCode::Down) => {
+                self.set_pane_focus(PaneFocus::Bottom);
+                return;
+            }
+            // Tab / Shift-Tab move into and cycle the bottom subpanels.
+            (false, KeyCode::Tab) => {
+                self.focus_or_cycle_panel(1);
+                return;
+            }
+            (false, KeyCode::BackTab) => {
+                self.focus_or_cycle_panel(-1);
+                return;
+            }
+            // Esc steps the keyboard back to the keys pane; from the keys pane it
+            // leaves the Browser (the global "back").
+            (false, KeyCode::Esc) => {
+                if self.bottom_focused() {
+                    self.set_pane_focus(PaneFocus::Keys);
+                } else {
+                    self.apply(Action::Back);
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        if self.bottom_focused() {
+            match self.active_conn().map(|c| c.active_panel()) {
+                Some(PanelTab::Console) => self.handle_command_key(key),
+                Some(PanelTab::PubSub | PanelTab::Tail) => self.handle_subscribe_key(key),
+                // A live-feed tab (Monitor / Keyspace / a pub-sub or stream tail):
+                // navigation scrolls the feed and p/x/r control it.
+                _ => self.handle_feed_key(key),
+            }
+        } else if let Some(action) = action::map_keys_focus(&key) {
+            self.apply(action);
+        }
+    }
+
+    /// Whether the active connection's bottom subpanel currently has the keyboard.
+    pub(super) fn bottom_focused(&self) -> bool {
+        self.active_conn()
+            .map(|c| c.focus == PaneFocus::Bottom)
+            .unwrap_or(false)
+    }
+
+    /// Move the keyboard between the keys pane and the bottom subpanel. Focusing
+    /// the bottom is a no-op when the broker has no panel (non-Redis). Reconciles
+    /// the panel mode + focus-scoped feeds and freshens the anchor prompt.
+    pub(super) fn set_pane_focus(&mut self, focus: PaneFocus) {
+        if focus == PaneFocus::Bottom && !self.active_can_tail() {
+            return;
+        }
+        if let Some(conn) = self.active_conn_mut() {
+            conn.focus = focus;
+        }
+        if focus == PaneFocus::Bottom {
+            // A fresh prompt on the Pub/Sub and Tail anchors when entering them.
+            self.subscribe_buf.clear();
+        }
+        self.sync_panel_focus();
+    }
+
+    /// Tab / Shift-Tab: the first press from the keys pane drops the keyboard onto
+    /// the currently shown subpanel; further presses cycle through the subpanels.
+    pub(super) fn focus_or_cycle_panel(&mut self, delta: i32) {
+        if !self.active_can_tail() {
+            return;
+        }
+        if self.bottom_focused() {
+            self.cycle_panel(delta);
+        } else {
+            self.set_pane_focus(PaneFocus::Bottom);
+        }
+    }
+
+    /// Keys while a Browser live-feed tab (Monitor / Keyspace / a pub-sub or
+    /// stream tail) is focused: navigation scrolls the feed's scrollback, and
+    /// p/x/r play-pause / close / record it. Focus moves are handled upstream.
+    fn handle_feed_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (false, KeyCode::Char('j') | KeyCode::Down) => self.scroll_feed(-1),
+            (false, KeyCode::Char('k') | KeyCode::Up) => self.scroll_feed(1),
+            (true, KeyCode::Char('d')) => self.scroll_feed(-FEED_SCROLL_STEP),
+            (true, KeyCode::Char('u')) => self.scroll_feed(FEED_SCROLL_STEP),
+            (_, KeyCode::PageDown) => self.scroll_feed(-FEED_SCROLL_STEP),
+            (_, KeyCode::PageUp) => self.scroll_feed(FEED_SCROLL_STEP),
+            (false, KeyCode::Char('g') | KeyCode::Home) => self.feed_to_edge(true),
+            (false, KeyCode::Char('G') | KeyCode::End) => self.feed_to_edge(false),
+            (false, KeyCode::Char('p')) => self.toggle_play_pause(),
+            (false, KeyCode::Char('x')) => self.close_active_tab(),
+            (false, KeyCode::Char('r')) => self.toggle_recording(),
+            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
+            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
+            _ => {}
         }
     }
 
@@ -218,26 +330,10 @@ impl App {
         }
     }
 
-    /// Keys that work the same on every text-input anchor (Console / Pub/Sub /
-    /// Tail): Tab / Shift-Tab cycle tabs, Esc steps out of the Browser, and the
-    /// arrow keys still move the key list so browsing works while a prompt is
-    /// focused. Returns whether the key was consumed.
-    pub(super) fn browser_input_nav(&mut self, key: &KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Tab => self.cycle_panel(1),
-            KeyCode::BackTab => self.cycle_panel(-1),
-            KeyCode::Esc => self.apply(Action::Back),
-            KeyCode::Up => self.nav(-1),
-            KeyCode::Down => self.nav(1),
-            _ => return false,
-        }
-        true
-    }
-
+    /// The Pub/Sub and Tail anchor prompts: type a spec and Enter to subscribe /
+    /// tail. Focus moves (Tab / Ctrl-↑↓ / Esc) are handled in
+    /// [`Self::handle_browser_key`] before this runs, so this only edits the buffer.
     pub(super) fn handle_subscribe_key(&mut self, key: KeyEvent) {
-        if self.browser_input_nav(&key) {
-            return;
-        }
         match key.code {
             KeyCode::Enter => self.submit_subscribe(),
             KeyCode::Char(c) => self.subscribe_buf.push(c),
@@ -267,23 +363,22 @@ impl App {
                     form.focus_prev();
                 }
             }
-            KeyCode::Char(c) => {
+            // ←/→ flip the focused boolean field (TLS / broker Kind). Space is no
+            // longer a toggle — it types a literal space into the text fields,
+            // matching every other text-entry surface.
+            KeyCode::Left | KeyCode::Right => {
                 if let Some(form) = &mut self.form {
                     match form.focus {
-                        // Space is the sole toggle key (the old t/f/y/n aliases
-                        // were duplicates and have been dropped).
-                        ConnForm::TLS_FOCUS => {
-                            if c == ' ' {
-                                form.tls = !form.tls;
-                            }
-                        }
-                        ConnForm::KIND_FOCUS => {
-                            if c == ' ' {
-                                form.toggle_kind();
-                            }
-                        }
-                        f if f < ConnForm::FIELD_COUNT => form.fields[f].push(c),
+                        ConnForm::TLS_FOCUS => form.tls = !form.tls,
+                        ConnForm::KIND_FOCUS => form.toggle_kind(),
                         _ => {}
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                if let Some(form) = &mut self.form {
+                    if form.focus < ConnForm::FIELD_COUNT {
+                        form.fields[form.focus].push(c);
                     }
                 }
             }
@@ -452,7 +547,11 @@ impl App {
                 self.active = self.connections.iter().position(|c| c.id == id);
                 self.last_browser = Some(id);
                 self.screen = Screen::Browser;
-                // Reconcile the panel (mode + focused feed) on entry.
+                // Enter with the keys pane focused; reconcile the panel
+                // (mode + focused feed) on entry.
+                if let Some(conn) = self.active_conn_mut() {
+                    conn.focus = PaneFocus::Keys;
+                }
                 self.sync_panel_focus();
             }
             // A live but non-browsable broker (e.g. AMQP) earns a hint; with no

@@ -1,5 +1,12 @@
 //! Normal-mode key bindings as data. Text-entry modes (filter, connection form)
 //! handle keys directly in [`crate::app::App`] rather than through this map.
+//!
+//! [`map_key`] is the base map used on the home screens (Connections /
+//! Recordings). On the Browser, keybinds follow the focused pane: the key list
+//! uses [`map_keys_focus`] (the base map minus the feed-only controls), while a
+//! focused live-feed tab is driven directly (see `App::handle_feed_key`). The
+//! pane-focus and tab-cycling keys (Tab / Shift-Tab / Ctrl-↑ / Ctrl-↓ / Esc) are
+//! intercepted in `App::handle_browser_key` before either map is consulted.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -95,6 +102,17 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
     }
 }
 
+/// Key bindings while the Browser's key list is focused: the base [`map_key`]
+/// minus the feed-only controls (`p` play/pause, `x` close, `r` record), which
+/// act on a focused live-feed tab instead (see `App::handle_feed_key`). Keeping
+/// one source of truth — the base map, filtered — avoids drift between the two.
+pub fn map_keys_focus(key: &KeyEvent) -> Option<Action> {
+    match map_key(key) {
+        Some(Action::PlayPause | Action::CloseTab | Action::Refresh) => None,
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,6 +124,23 @@ mod tests {
 
     fn ctrl(code: KeyCode) -> Option<Action> {
         map_key(&KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn keys_focus(code: KeyCode) -> Option<Action> {
+        map_keys_focus(&KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn keys_focus_drops_feed_controls_but_keeps_list_bindings() {
+        // The feed-only controls belong to a focused feed tab, not the key list.
+        assert_eq!(keys_focus(Char('p')), None, "p is a feed control");
+        assert_eq!(keys_focus(Char('x')), None, "x is a feed control");
+        assert_eq!(keys_focus(Char('r')), None, "r records a feed");
+        // The list bindings stay — Space toggles a group, not the console.
+        assert_eq!(keys_focus(Char(' ')), Some(Action::ToggleCollapse));
+        assert_eq!(keys_focus(Char('z')), Some(Action::ToggleAllGroups));
+        assert_eq!(keys_focus(Char('/')), Some(Action::StartFilter));
+        assert_eq!(keys_focus(Char('j')), Some(Action::Down));
     }
 
     #[test]

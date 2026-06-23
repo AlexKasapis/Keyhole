@@ -177,18 +177,21 @@ impl App {
         self.sync_panel_mode();
     }
 
-    /// The input mode the focused tab implies: an always-shown prompt on the
-    /// Console / Pub/Sub / Tail anchors, normal navigation on the live-feed tabs.
-    /// Idempotent — safe to call on every Browser key so the mode always tracks
-    /// the focused tab regardless of how the screen was entered.
+    /// The input mode the focused pane implies. Text capture happens only while
+    /// the *bottom subpanel* has the keyboard ([`PaneFocus::Bottom`]) and the
+    /// selected tab is a text anchor (Console → Command, Pub/Sub / Tail →
+    /// Subscribe). With the keys pane focused — or a live-feed tab selected — the
+    /// mode is Normal, so the key list keeps its bindings while a text subpanel
+    /// is merely on screen. Idempotent — driven from the pane-focus / tab moves.
     pub(super) fn sync_panel_mode(&mut self) {
-        let Some(panel) = self.active_conn().map(|c| c.active_panel()) else {
+        let Some(conn) = self.active_conn() else {
             return;
         };
-        self.mode = match panel {
-            PanelTab::Console => InputMode::Command,
-            PanelTab::PubSub | PanelTab::Tail => InputMode::Subscribe,
-            PanelTab::Monitor | PanelTab::Keyspace | PanelTab::Sub(_) => InputMode::Normal,
+        let bottom = conn.focus == PaneFocus::Bottom;
+        self.mode = match (bottom, conn.active_panel()) {
+            (true, PanelTab::Console) => InputMode::Command,
+            (true, PanelTab::PubSub | PanelTab::Tail) => InputMode::Subscribe,
+            _ => InputMode::Normal,
         };
     }
 
@@ -292,6 +295,38 @@ impl App {
             "feed paused"
         };
         self.set_status(msg.to_string(), false);
+    }
+
+    /// Scroll the focused feed's scrollback by `delta` events (positive = toward
+    /// older). Scrolling off the newest event disables follow; returning to it
+    /// re-enables it. No-op without a focused feed. `offset` is measured back from
+    /// the newest event, so older = larger offset (see [`Subscription::push`]).
+    pub(super) fn scroll_feed(&mut self, delta: i32) {
+        if let Some(sub) = self
+            .active_conn_mut()
+            .and_then(|c| c.panel_subscription_mut())
+        {
+            let max = sub.events.len().saturating_sub(1) as i32;
+            sub.offset = (sub.offset as i32 + delta).clamp(0, max) as usize;
+            sub.follow = sub.offset == 0;
+        }
+    }
+
+    /// Jump the focused feed to its oldest (`top`) or newest event. Newest
+    /// resumes follow; oldest freezes the view there.
+    pub(super) fn feed_to_edge(&mut self, top: bool) {
+        if let Some(sub) = self
+            .active_conn_mut()
+            .and_then(|c| c.panel_subscription_mut())
+        {
+            if top {
+                sub.offset = sub.events.len().saturating_sub(1);
+                sub.follow = false;
+            } else {
+                sub.offset = 0;
+                sub.follow = true;
+            }
+        }
     }
 
     /// Whether the active connection can open realtime tails. Tails live in the

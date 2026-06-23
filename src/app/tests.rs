@@ -68,8 +68,9 @@ async fn connect(app: &mut App, id: u32, name: &str, databases: u32) -> ConnId {
     ConnId(id)
 }
 
-/// Move the bottom-panel focus to a fixed anchor tab and reconcile the panel
-/// (mode + focus-scoped feeds), mirroring what cycling there does.
+/// Give the keyboard to a fixed anchor tab in the bottom subpanel and reconcile
+/// the panel (mode + focus-scoped feeds), mirroring what Tab-cycling there does:
+/// the bottom pane takes focus and lands on the given tab.
 fn focus_panel(app: &mut App, tab: PanelTab) {
     let pos = app
         .active_conn()
@@ -78,7 +79,9 @@ fn focus_panel(app: &mut App, tab: PanelTab) {
         .iter()
         .position(|t| *t == tab)
         .expect("panel tab present");
-    app.active_conn_mut().unwrap().panel_tab = pos;
+    let conn = app.active_conn_mut().unwrap();
+    conn.panel_tab = pos;
+    conn.focus = PaneFocus::Bottom;
     app.sync_panel_focus();
 }
 
@@ -1709,7 +1712,7 @@ fn form_typing_and_backspace_edit_focused_field() {
 }
 
 #[test]
-fn form_tab_moves_focus_and_tls_toggles() {
+fn form_tab_moves_focus_and_arrows_toggle_tls() {
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
     app.handle_key(key(KeyCode::Tab));
@@ -1717,10 +1720,12 @@ fn form_tab_moves_focus_and_tls_toggles() {
     app.handle_key(key(KeyCode::BackTab));
     assert_eq!(app.form.as_ref().unwrap().focus, 0);
 
+    // ←/→ flip the TLS toggle when it is focused (Space no longer does — see
+    // `form_space_types_into_fields_and_no_longer_toggles`).
     app.form.as_mut().unwrap().focus = ConnForm::TLS_FOCUS;
-    app.handle_key(ch(' '));
+    app.handle_key(key(KeyCode::Right));
     assert!(app.form.as_ref().unwrap().tls);
-    app.handle_key(ch(' '));
+    app.handle_key(key(KeyCode::Left));
     assert!(!app.form.as_ref().unwrap().tls);
 }
 
@@ -1740,21 +1745,30 @@ fn form_arrow_keys_no_longer_navigate() {
 }
 
 #[test]
-fn form_tls_toggle_only_responds_to_space() {
-    // The old t/f/y/n aliases duplicated Space and were removed: typing them on
-    // the TLS toggle is a no-op (Space remains the sole toggle key).
+fn form_space_types_into_fields_and_no_longer_toggles() {
+    // Regression: Space used to flip the TLS/Kind toggles even while typing a
+    // text field. Now it types a literal space into the focused text field, and
+    // the booleans flip with ←/→ only.
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
+
+    // On the TLS toggle, Space (and the old t/f/y/n aliases) do nothing.
     app.form.as_mut().unwrap().focus = ConnForm::TLS_FOCUS;
-    for c in ['t', 'f', 'y', 'n'] {
+    for c in [' ', 't', 'f', 'y', 'n'] {
         app.handle_key(ch(c));
-        assert!(
-            !app.form.as_ref().unwrap().tls,
-            "'{c}' must not toggle TLS anymore"
-        );
+        assert!(!app.form.as_ref().unwrap().tls, "'{c}' must not toggle TLS");
     }
-    app.handle_key(ch(' '));
-    assert!(app.form.as_ref().unwrap().tls, "Space still toggles TLS");
+    app.handle_key(key(KeyCode::Right));
+    assert!(app.form.as_ref().unwrap().tls, "←/→ toggles TLS");
+
+    // In a text field, Space types a literal space.
+    let form = app.form.as_mut().unwrap();
+    form.focus = 0; // Name
+    form.fields[0].clear();
+    for c in "a b".chars() {
+        app.handle_key(ch(c));
+    }
+    assert_eq!(app.form.as_ref().unwrap().fields[0], "a b");
 }
 
 #[test]
@@ -2556,7 +2570,12 @@ async fn console_typing_and_submit_records_command() {
     assert_eq!(console.history, vec!["GET k"]);
     assert!(console.input.is_empty(), "input cleared after submit");
     assert_eq!(app.mode, InputMode::Command, "stays in command mode");
-    // Esc steps out of the Browser entirely (and back to normal navigation).
+    // Esc steps the keyboard back to the keys pane (still on the Browser); a
+    // second Esc from the keys pane then leaves the Browser.
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.screen, Screen::Browser);
+    assert!(!app.bottom_focused(), "focus returned to the keys pane");
+    assert_eq!(app.mode, InputMode::Normal);
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.screen, Screen::Connections);
     assert_eq!(app.mode, InputMode::Normal);
@@ -2621,7 +2640,7 @@ async fn console_scroll_via_pageup_pagedown() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     // The console band scrolls with PageUp/PageDown while focused (command
-    // mode); ↑↓ now move the key list and Ctrl-P/N recall history.
+    // mode); ↑↓ and Ctrl-P/N recall history.
     app.screen = Screen::Browser;
     focus_panel(&mut app, PanelTab::Console);
     app.handle_key(key(KeyCode::PageUp)); // scroll back a page
@@ -2633,6 +2652,156 @@ async fn console_scroll_via_pageup_pagedown() {
     assert_eq!(app.connections[0].console.scroll, 0);
     app.handle_key(key(KeyCode::PageDown)); // clamped at the bottom
     assert_eq!(app.connections[0].console.scroll, 0);
+}
+
+// -- pane focus ----------------------------------------------------------
+
+#[tokio::test]
+async fn browser_opens_with_keys_focused_so_space_folds_groups() {
+    // Regression: the Browser used to open in command mode (Console is tab 0),
+    // so Space typed into the console instead of folding a group. It now opens
+    // with the keys pane focused.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    finish_initial_scan(
+        &mut app,
+        id,
+        vec![
+            stream_entry("user:1", ValueType::String),
+            stream_entry("user:2", ValueType::String),
+        ],
+    );
+    assert_eq!(app.screen, Screen::Browser);
+    assert!(!app.bottom_focused(), "opens with the keys pane focused");
+    assert_eq!(app.mode, InputMode::Normal);
+
+    // The group starts folded; Space on the keys pane expands it, and types
+    // nothing into the console.
+    app.connections[0].browser.table.select(Some(0));
+    let folded = app.connections[0].browser.collapsed.len();
+    assert!(folded > 0, "groups start folded");
+    app.handle_key(ch(' '));
+    assert!(
+        app.connections[0].browser.collapsed.len() < folded,
+        "Space folds/unfolds the selected group"
+    );
+    assert!(
+        app.connections[0].console.input.is_empty(),
+        "Space did not leak into the console"
+    );
+}
+
+#[tokio::test]
+async fn tab_focuses_bottom_then_cycles_subpanels() {
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod", 16).await;
+    app.screen = Screen::Browser;
+    assert!(!app.bottom_focused());
+
+    // The first Tab drops the keyboard onto the currently shown subpanel
+    // (Console) without advancing.
+    app.handle_key(key(KeyCode::Tab));
+    assert!(app.bottom_focused());
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Console);
+    assert_eq!(app.mode, InputMode::Command);
+
+    // Further Tabs cycle the subpanels; Shift-Tab steps back.
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Monitor);
+    assert_eq!(
+        app.mode,
+        InputMode::Normal,
+        "a feed tab is not a text prompt"
+    );
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Console);
+}
+
+#[tokio::test]
+async fn ctrl_arrows_move_focus_between_panes() {
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod", 16).await;
+    app.screen = Screen::Browser;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert!(app.bottom_focused(), "Ctrl-↓ focuses the bottom panel");
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert!(!app.bottom_focused(), "Ctrl-↑ focuses the keys pane");
+}
+
+#[tokio::test]
+async fn esc_steps_focus_back_to_keys_before_leaving() {
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod", 16).await;
+    app.screen = Screen::Browser;
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert!(app.bottom_focused());
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.bottom_focused(), "Esc returns focus to the keys pane");
+    assert_eq!(app.screen, Screen::Browser, "still on the Browser");
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.screen, Screen::Connections, "Esc from keys leaves");
+}
+
+#[tokio::test]
+async fn console_focus_captures_space_without_folding_groups() {
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    finish_initial_scan(
+        &mut app,
+        id,
+        vec![stream_entry("user:1", ValueType::String)],
+    );
+    let folded = app.connections[0].browser.collapsed.clone();
+    focus_panel(&mut app, PanelTab::Console);
+    for c in "a b".chars() {
+        app.handle_key(ch(c));
+    }
+    assert_eq!(app.connections[0].console.input, "a b", "Space is typed");
+    assert_eq!(
+        app.connections[0].browser.collapsed, folded,
+        "no group toggled while the console is focused"
+    );
+}
+
+#[tokio::test]
+async fn feed_focus_controls_the_feed_not_the_key_list() {
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    finish_initial_scan(
+        &mut app,
+        id,
+        vec![stream_entry("user:1", ValueType::String)],
+    );
+    // A live tail creates and selects its own Sub tab; focus the bottom pane.
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert!(matches!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::Sub(0)
+    ));
+
+    // `p` pauses the focused feed; Space is inert on the key list.
+    assert!(
+        app.active_conn()
+            .unwrap()
+            .panel_subscription()
+            .unwrap()
+            .follow
+    );
+    app.handle_key(ch('p'));
+    assert!(
+        !app.active_conn()
+            .unwrap()
+            .panel_subscription()
+            .unwrap()
+            .follow
+    );
+    let folded = app.connections[0].browser.collapsed.clone();
+    app.handle_key(ch(' '));
+    assert_eq!(
+        app.connections[0].browser.collapsed, folded,
+        "Space does not fold a group from a focused feed"
+    );
 }
 
 // -- mouse ---------------------------------------------------------------
