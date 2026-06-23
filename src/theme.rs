@@ -115,6 +115,50 @@ impl Theme {
         }
     }
 
+    /// A warm "Gruvbox"-flavoured dark palette: orange accents and a yellow
+    /// heading over a soft brown-black base, with the retro green/red signal
+    /// colours. A second coloured dark theme beside [`Self::dark`], selectable
+    /// from the settings page.
+    pub fn gruvbox() -> Self {
+        // Gruvbox tones, by their canonical hex (see https://github.com/morhetz/gruvbox).
+        let bg_status = Color::Rgb(0x3c, 0x38, 0x36); // bg1
+        let bg_sel = Color::Rgb(0x50, 0x49, 0x45); // bg2
+        let fg_status = Color::Rgb(0xa8, 0x99, 0x84); // fg4 (gray-4)
+        let fg_bright = Color::Rgb(0xfb, 0xf1, 0xc7); // fg0 (brightest)
+        let gray = Color::Rgb(0x92, 0x83, 0x74); // gray
+        let orange = Color::Rgb(0xfe, 0x80, 0x19); // bright orange
+        let yellow = Color::Rgb(0xfa, 0xbd, 0x2f); // bright yellow
+        let green = Color::Rgb(0xb8, 0xbb, 0x26); // bright green
+        let red = Color::Rgb(0xfb, 0x49, 0x34); // bright red
+        let border = Color::Rgb(0x66, 0x5c, 0x54); // bg3
+        Self {
+            status_bar: Style::new().bg(bg_status).fg(fg_status),
+            heading: Style::new().fg(yellow).add_modifier(Modifier::BOLD),
+            dim: Style::new().fg(gray),
+            // A step brighter than `dim` (gray) so unselected tabs read.
+            tab_inactive: Style::new().fg(fg_status),
+            // The selection highlight plus the brightest foreground so the
+            // selected tab stays the standout beside the brighter inactive tabs.
+            tab_selected: Style::new()
+                .bg(bg_sel)
+                .fg(fg_bright)
+                .add_modifier(Modifier::BOLD),
+            // A background highlight (not reverse video) so per-span foreground
+            // colours survive on the selected row — see the dark palette.
+            selected: Style::new().bg(bg_sel).add_modifier(Modifier::BOLD),
+            header: Style::new()
+                .fg(yellow)
+                .add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED)),
+            border: Style::new().fg(border),
+            border_focused: Style::new().fg(orange),
+            accent: Style::new().fg(orange),
+            error: Style::new().fg(red).add_modifier(Modifier::BOLD),
+            success: Style::new().fg(green),
+            warning: Style::new().fg(yellow),
+            gauge: Style::new().fg(orange).bg(bg_status),
+        }
+    }
+
     /// A colourless palette for `NO_COLOR`: affordances survive via modifiers
     /// (reverse video, bold, underline) but nothing sets a foreground/background
     /// colour, so it reads correctly on any terminal theme.
@@ -149,6 +193,7 @@ impl Theme {
         }
         let mut theme = match cfg.base.as_deref() {
             Some(b) if b.eq_ignore_ascii_case("light") => Self::light(),
+            Some(b) if b.eq_ignore_ascii_case("gruvbox") => Self::gruvbox(),
             _ => Self::dark(),
         };
         override_fg(&mut theme.accent, &cfg.accent);
@@ -166,6 +211,23 @@ impl Theme {
     pub fn resolve(cfg: &ThemeConfig) -> Self {
         Self::from_config(cfg, no_color_env())
     }
+}
+
+/// The built-in theme bases the settings page cycles through, in order. Each
+/// name is matched (case-insensitively) by [`Theme::from_config`]; the first is
+/// the default applied for an absent or unrecognised `base`.
+pub const THEME_BASES: [&str; 3] = ["dark", "light", "gruvbox"];
+
+/// The index of `base` within [`THEME_BASES`], defaulting to `0` (the first,
+/// `dark`) for an absent or unrecognised name — mirroring the fallback in
+/// [`Theme::from_config`]. Lets the settings page show and step the selection.
+pub fn theme_base_index(base: Option<&str>) -> usize {
+    base.and_then(|b| {
+        THEME_BASES
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(b))
+    })
+    .unwrap_or(0)
 }
 
 /// `NO_COLOR` is honoured when set to a non-empty value (the widely-adopted
@@ -310,5 +372,56 @@ mod tests {
         };
         let t = Theme::from_config(&cfg, false);
         assert_eq!(t.accent.fg, Some(Color::Cyan), "base colour is kept");
+    }
+
+    #[test]
+    fn gruvbox_base_selects_the_warm_palette() {
+        // "gruvbox" is its own coloured base, distinct from dark/light: an orange
+        // accent (neither cyan nor blue) and the warm yellow heading.
+        let t = Theme::from_config(
+            &ThemeConfig {
+                base: Some("gruvbox".into()),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(t.accent.fg, Some(Color::Rgb(0xfe, 0x80, 0x19)));
+        assert_eq!(t.heading.fg, Some(Color::Rgb(0xfa, 0xbd, 0x2f)));
+        assert_ne!(t.accent.fg, Theme::dark().accent.fg);
+        assert_ne!(t.accent.fg, Theme::light().accent.fg);
+        // The base is case-insensitive, like dark/light.
+        let upper = Theme::from_config(
+            &ThemeConfig {
+                base: Some("GRUVBOX".into()),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(upper.accent.fg, t.accent.fg);
+        // Per-style colour overrides still apply on top of the gruvbox base.
+        let overridden = Theme::from_config(
+            &ThemeConfig {
+                base: Some("gruvbox".into()),
+                accent: Some("magenta".into()),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(overridden.accent.fg, Some(Color::Magenta));
+    }
+
+    #[test]
+    fn theme_base_index_finds_the_cycle_position_or_defaults_to_dark() {
+        // Each known base resolves to its slot in the cycle order …
+        assert_eq!(THEME_BASES, ["dark", "light", "gruvbox"]);
+        assert_eq!(theme_base_index(Some("dark")), 0);
+        assert_eq!(theme_base_index(Some("light")), 1);
+        assert_eq!(theme_base_index(Some("gruvbox")), 2);
+        // … case-insensitively …
+        assert_eq!(theme_base_index(Some("GruvBox")), 2);
+        // … while an absent or unknown base falls back to dark (index 0),
+        // matching `from_config`'s own fallback.
+        assert_eq!(theme_base_index(None), 0);
+        assert_eq!(theme_base_index(Some("solarized")), 0);
     }
 }

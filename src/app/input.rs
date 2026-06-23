@@ -10,6 +10,16 @@ impl App {
         if key.kind != KeyEventKind::Press {
             return; // ignore key-release/repeat (Windows emits these)
         }
+        // The command-palette and settings overlays own the keyboard wholesale
+        // until dismissed, so their navigation never leaks to the screen beneath.
+        // Settings is checked first: it is reached *from* the palette (which has
+        // closed by then), so they are mutually exclusive in practice.
+        if self.settings.is_some() {
+            return self.handle_settings_key(key);
+        }
+        if self.palette.is_some() {
+            return self.handle_palette_key(key);
+        }
         // The full-screen text-entry modals own the keyboard wholesale until they
         // are dismissed, so their input is never treated as a command.
         match self.mode {
@@ -324,6 +334,9 @@ impl App {
                 Screen::Home => {}
             },
             Action::ToggleHelp => self.show_help = !self.show_help,
+            // `:` opens the command palette (the keys-pane/home discoverable
+            // entry point). The overlay then captures input until dismissed.
+            Action::OpenPalette => self.open_palette(),
             // Flip the desired capture state and report it; the render loop
             // applies the change to the real terminal (keeping terminal I/O out
             // of `App`). Off hands native text selection back to the user.

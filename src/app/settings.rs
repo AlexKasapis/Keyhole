@@ -1,0 +1,236 @@
+//! The command palette and settings overlays: opening and dismissing them,
+//! palette navigation + command execution, and the settings page's live theme
+//! switch (applied immediately and persisted best-effort to the config file).
+//! Part of the `app` module (overview in `app.rs`).
+
+use super::*;
+use crate::theme::{self, Theme};
+
+impl App {
+    // -- command palette -----------------------------------------------------
+
+    /// Open the command palette (a small list of commands, opened with `:`).
+    /// Dismisses the help overlay if it was up, so the two never stack.
+    pub(super) fn open_palette(&mut self) {
+        self.show_help = false;
+        self.palette = Some(PaletteState::default());
+    }
+
+    /// Keys while the command palette is open. It owns the keyboard wholesale:
+    /// navigate the command list, Enter runs the highlighted command, Esc closes
+    /// it, and Ctrl-C still quits.
+    pub(super) fn handle_palette_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (true, KeyCode::Char('c')) => self.running = false,
+            (false, KeyCode::Esc) => self.palette = None,
+            (false, KeyCode::Down | KeyCode::Char('j')) => self.move_palette(1),
+            (false, KeyCode::Up | KeyCode::Char('k')) => self.move_palette(-1),
+            (false, KeyCode::Enter) => self.run_palette_selection(),
+            _ => {}
+        }
+    }
+
+    /// Move the palette's highlight by `delta`, clamped to the command list.
+    fn move_palette(&mut self, delta: i32) {
+        if let Some(palette) = &mut self.palette {
+            let len = PaletteCommand::all().len();
+            palette.selected = move_selection(Some(palette.selected), len, delta).unwrap_or(0);
+        }
+    }
+
+    /// Run the highlighted palette command and close the palette.
+    fn run_palette_selection(&mut self) {
+        let Some(selected) = self.palette.as_ref().map(|p| p.selected) else {
+            return;
+        };
+        let commands = PaletteCommand::all();
+        // `selected` is kept in range by `move_palette`, but clamp defensively so
+        // a future longer list can never index out of bounds here.
+        match commands[selected.min(commands.len() - 1)] {
+            PaletteCommand::OpenSettings => {
+                self.palette = None;
+                self.settings = Some(SettingsState::default());
+            }
+        }
+    }
+
+    // -- settings page -------------------------------------------------------
+
+    /// Keys while the settings page is open. It owns the keyboard wholesale:
+    /// ←/→ cycle the theme (applied live), Enter/Esc close, and Ctrl-C quits.
+    pub(super) fn handle_settings_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (true, KeyCode::Char('c')) => self.running = false,
+            (false, KeyCode::Esc | KeyCode::Enter) => self.settings = None,
+            (false, KeyCode::Left | KeyCode::Char('h')) => self.cycle_theme(-1),
+            (false, KeyCode::Right | KeyCode::Char('l')) => self.cycle_theme(1),
+            _ => {}
+        }
+    }
+
+    /// Step the active theme base through [`theme::THEME_BASES`] by `delta`
+    /// (wrapping), apply the new palette to the live UI at once, and persist the
+    /// choice to the config file. Persisting is best-effort: a write failure is
+    /// surfaced as a footer status but the in-memory theme still changes, so the
+    /// switch is never silently lost on screen.
+    pub(super) fn cycle_theme(&mut self, delta: i32) {
+        let names = theme::THEME_BASES;
+        let cur = theme::theme_base_index(self.theme_base()) as i32;
+        let next = (cur + delta).rem_euclid(names.len() as i32) as usize;
+        let name = names[next];
+        self.config.theme.base = Some(name.to_string());
+        // Re-resolve from config so per-style overrides and `NO_COLOR` are honoured
+        // exactly as they are at startup.
+        self.theme = Theme::resolve(&self.config.theme);
+        match config::save(&self.config_path, &self.config) {
+            Ok(()) => self.set_status(format!("Theme: {name}"), false),
+            Err(e) => self.set_status(
+                format!("theme set to {name}, but could not save: {e}"),
+                true,
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::event::AppEvent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+    use tokio_util::task::TaskTracker;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    /// A fresh app over a unique (initially absent) config file, so theme
+    /// persistence can be asserted by reading the file back.
+    fn app_with_config_path() -> (App, PathBuf) {
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("keyhole-settings-{}-{n}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (tx, _rx) = mpsc::channel::<AppEvent>(16);
+        let app = App::new(
+            Config::default(),
+            path.clone(),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        (app, path)
+    }
+
+    #[test]
+    fn colon_opens_palette_and_it_captures_input() {
+        let (mut app, _) = app_with_config_path();
+        // `:` from the home screen opens the palette.
+        app.handle_key(key(KeyCode::Char(':')));
+        assert!(app.palette.is_some(), "':' opens the command palette");
+        // While the palette is up it captures input: a 'j' moves its highlight
+        // (clamped to the single command) rather than navigating the home list.
+        let before = app.profile_state.selected();
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            app.profile_state.selected(),
+            before,
+            "input is captured by the palette, not the underlying screen"
+        );
+        // Esc closes it.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.palette.is_none(), "Esc closes the palette");
+    }
+
+    #[test]
+    fn palette_enter_opens_settings_and_closes_palette() {
+        let (mut app, _) = app_with_config_path();
+        app.open_palette();
+        app.handle_key(key(KeyCode::Enter));
+        assert!(
+            app.palette.is_none(),
+            "running a command closes the palette"
+        );
+        assert!(
+            app.settings.is_some(),
+            "Settings page command opens settings"
+        );
+    }
+
+    #[test]
+    fn settings_cycles_theme_live_and_persists() {
+        let (mut app, path) = app_with_config_path();
+        // Default base is unset (dark). Right steps dark -> light -> gruvbox -> dark.
+        app.settings = Some(SettingsState::default());
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.theme_base(), Some("light"));
+        assert_eq!(
+            app.theme.accent.fg,
+            Theme::light().accent.fg,
+            "applied live"
+        );
+
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.theme_base(), Some("gruvbox"));
+        assert_eq!(app.theme.accent.fg, Theme::gruvbox().accent.fg);
+
+        // The choice is persisted to the config file as it changes.
+        let saved = crate::config::load(&path).expect("config reloads");
+        assert_eq!(saved.theme.base.as_deref(), Some("gruvbox"));
+
+        // Wrapping forward returns to dark; Left wraps the other way.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.theme_base(), Some("dark"));
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.theme_base(), Some("gruvbox"), "Left wraps backwards");
+
+        // Esc closes the settings overlay.
+        app.handle_key(key(KeyCode::Esc));
+        assert!(app.settings.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_overlay_takes_priority_over_palette_in_dispatch() {
+        // Both flags set (defensive): the settings handler wins, so its keys
+        // (←/→) are interpreted as theme cycling, not palette navigation.
+        let (mut app, _) = app_with_config_path();
+        app.palette = Some(PaletteState::default());
+        app.settings = Some(SettingsState::default());
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.theme_base(), Some("light"));
+    }
+
+    #[test]
+    fn open_overlay_swallows_mouse_scroll() {
+        // An open overlay owns input, so the scroll wheel must not move the
+        // selection on the screen beneath it.
+        use crossterm::event::MouseEventKind;
+        let (mut app, _) = app_with_config_path();
+        let before = app.profile_state.selected();
+        app.palette = Some(PaletteState::default());
+        app.handle_mouse(MouseEventKind::ScrollDown);
+        assert_eq!(
+            app.profile_state.selected(),
+            before,
+            "palette swallows scroll"
+        );
+        app.palette = None;
+        app.settings = Some(SettingsState::default());
+        app.handle_mouse(MouseEventKind::ScrollDown);
+        assert_eq!(
+            app.profile_state.selected(),
+            before,
+            "settings swallows scroll"
+        );
+    }
+}

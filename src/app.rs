@@ -14,11 +14,12 @@ mod events;
 mod input;
 mod realtime;
 mod recordings;
+mod settings;
 
 pub use state::{
-    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PaneFocus, PanelTab,
-    RecordState, RecordingFile, ScanStep, Screen, Status, StatusKind, SubState, Subscription,
-    ViewRow,
+    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PaletteCommand,
+    PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile, ScanStep, Screen, SettingsState,
+    Status, StatusKind, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -114,6 +115,12 @@ pub struct App {
     /// outcomes also post a footer status. See [`Self::conn_health`].
     pub(crate) health: ConnHealth,
     pub(crate) show_help: bool,
+    /// The command palette overlay (opened with `:`), when showing. While set it
+    /// captures all input until dismissed. See [`Self::open_palette`].
+    pub(crate) palette: Option<PaletteState>,
+    /// The settings page overlay, when showing (reached from the palette). While
+    /// set it captures all input until dismissed. See [`Self::handle_settings_key`].
+    pub(crate) settings: Option<SettingsState>,
     /// Whether terminal mouse capture is on. While on, the scroll wheel scrolls
     /// lists/panes; while off, the terminal's own text selection (and copy)
     /// works. Toggled with `m`. The render loop reconciles the real terminal
@@ -196,6 +203,8 @@ impl App {
             status: None,
             health: ConnHealth::Offline,
             show_help: false,
+            palette: None,
+            settings: None,
             // Capture starts on, matching `tui::init`.
             mouse_capture: true,
             recordings: Vec::new(),
@@ -242,6 +251,12 @@ impl App {
     /// this to reconcile the real terminal state (see `crate::tui`).
     pub fn mouse_capture(&self) -> bool {
         self.mouse_capture
+    }
+
+    /// The configured theme base name (e.g. `"dark"`), if any — read by the
+    /// settings overlay to show and step the current theme selection.
+    pub(crate) fn theme_base(&self) -> Option<&str> {
+        self.config.theme.base.as_deref()
     }
 
     /// Connection health, surfaced by the Browser's Server band. An active

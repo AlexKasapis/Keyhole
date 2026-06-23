@@ -31,7 +31,7 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused        │           │
 │           │                                                                │           │
 │           │General                                                         │           │
-│           │  a add connection   ? toggle help   Esc back   Ctrl-c quit     │           │
-│           │  m toggle mouse capture (off = select/copy text)               │           │
+│           │  : command palette   a add connection   ? toggle help          │           │
+│           │  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)   │           │
 └───────────└────────────────────────────────────────────────────────────────┘───────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app ? he
+  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app : pa

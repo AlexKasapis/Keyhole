@@ -32,6 +32,46 @@ pub enum Screen {
     Recordings,
 }
 
+/// A command in the command palette (opened with `:`). Selecting one runs it;
+/// the palette is the discoverable entry point for actions that don't warrant a
+/// dedicated key. Today it holds a single command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteCommand {
+    /// Open the settings page.
+    OpenSettings,
+}
+
+impl PaletteCommand {
+    /// Every command, in the order shown in the palette.
+    pub fn all() -> &'static [PaletteCommand] {
+        &[PaletteCommand::OpenSettings]
+    }
+
+    /// The label shown for this command in the palette list.
+    pub fn label(self) -> &'static str {
+        match self {
+            PaletteCommand::OpenSettings => "Settings page",
+        }
+    }
+}
+
+/// The command-palette overlay's state: which command is highlighted. The list
+/// of commands is fixed ([`PaletteCommand::all`]); only the cursor moves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaletteState {
+    /// Index of the highlighted command in [`PaletteCommand::all`].
+    pub selected: usize,
+}
+
+/// The settings-page overlay's state. It hosts one option today — the colour
+/// theme, cycled with ←/→ — so `selected` (the highlighted row) is always `0`;
+/// it is kept so adding rows later is a local change.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SettingsState {
+    /// Index of the highlighted settings row.
+    pub selected: usize,
+}
+
 /// Keyboard input mode (text-entry modes capture raw keys).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {

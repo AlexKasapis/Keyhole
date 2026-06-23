@@ -1,8 +1,9 @@
 //! Rendering. [`render`] is a pure function of [`App`] state, called once per
 //! frame by the main loop: the active screen and a footer (hints or the active
-//! text-entry prompt), then modal overlays (connection form,
-//! help). There is no top bar — connection health lives with its screen (the
-//! Browser's Server band, the connections list's per-row dots).
+//! text-entry prompt), then modal overlays (connection form, help, the command
+//! palette, and the settings page). There is no top bar — connection health
+//! lives with its screen (the Browser's Server band, the connections list's
+//! per-row dots).
 
 mod anim;
 mod views;
@@ -38,6 +39,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
     if app.show_help {
         views::help(frame, &theme, full);
+    }
+    // The command palette and the settings page it opens are top-most overlays.
+    // They are mutually exclusive in practice (settings opens as the palette
+    // closes); settings draws last so it wins if both were ever set.
+    if app.palette.is_some() {
+        views::command_palette(frame, app, &theme, full);
+    }
+    if app.settings.is_some() {
+        views::settings(frame, app, &theme, full);
     }
 }
 
@@ -160,7 +170,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
             ("conn", "Enter connect · a add"),
             ("tabs", "Tab recordings"),
             ("go", "b browser"),
-            ("app", "? help · Esc Esc quit"),
+            ("app", ": palette · ? help · Esc Esc quit"),
         ]),
         // The footer follows the focused pane: the key list keeps its grouping /
         // sort / db controls, while a focused bottom subpanel shows its own keys.
@@ -210,7 +220,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     ("groups", "⏎/Space collapse · z all".to_string()),
                     ("view", format!("{filter} · o sort {sort}{arrow} · O dir")),
                     ("panel", "Tab/Ctrl-↓ panel".to_string()),
-                    ("app", "? help · Esc back".to_string()),
+                    ("app", ": palette · ? help · Esc back".to_string()),
                 ]
             }
         }
@@ -219,7 +229,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
             ("file", "r rename · dd delete"),
             ("tabs", "Tab connections"),
             ("go", "b browser"),
-            ("app", "? help · Esc back"),
+            ("app", ": palette · ? help · Esc back"),
         ]),
     }
 }
@@ -627,27 +637,23 @@ mod tests {
     }
 
     #[test]
-    fn footer_has_no_palette_hint_and_offers_navigation() {
-        // The command palette was removed, so no screen's footer may advertise
-        // it; every screen instead reaches its actions directly by key, and the
-        // "app" group always offers help.
+    fn footer_advertises_palette_and_offers_navigation() {
+        // Every screen's "app" group advertises both the command palette (`:`)
+        // and help (`?`), so the palette is discoverable without opening help.
         for screen in [Screen::Home, Screen::Browser, Screen::Recordings] {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             let sections = hint_sections(&app);
-
-            for (label, keys) in &sections {
-                assert!(
-                    !label.contains("palette") && !keys.contains("palette"),
-                    "{screen:?} footer still mentions the palette: {label} {keys}"
-                );
-            }
 
             let app_keys = sections
                 .iter()
                 .find(|(label, _)| *label == "app")
                 .map(|(_, keys)| keys.as_str())
                 .unwrap_or_else(|| panic!("{screen:?} footer has no 'app' group"));
+            assert!(
+                app_keys.contains(": palette"),
+                "{screen:?} 'app' group should advertise the palette: {app_keys:?}"
+            );
             assert!(
                 app_keys.contains("? help"),
                 "{screen:?} 'app' group should offer help: {app_keys:?}"
@@ -755,6 +761,29 @@ mod tests {
         let text = screen_text(&mut app);
         assert!(text.contains("Help"));
         assert!(text.contains("Navigation"));
+    }
+
+    #[test]
+    fn command_palette_overlay_renders_its_one_command() {
+        let (mut app, _rx) = test_app();
+        app.palette = Some(crate::app::PaletteState::default());
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("Command palette"),
+            "the palette title renders"
+        );
+        assert!(text.contains("Settings page"), "its one command renders");
+    }
+
+    #[test]
+    fn settings_overlay_renders_the_theme_option() {
+        let (mut app, _rx) = test_app();
+        app.settings = Some(crate::app::SettingsState::default());
+        let text = screen_text(&mut app);
+        assert!(text.contains("Settings"), "the settings title renders");
+        assert!(text.contains("Theme"), "the theme option renders");
+        // The default (unset) base reads as the first cycle entry, "dark".
+        assert!(text.contains("dark"), "current theme shown");
     }
 
     #[test]
@@ -1616,6 +1645,23 @@ mod tests {
         pin_clock(&mut app);
         app.show_help = true;
         insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 33));
+    }
+
+    #[test]
+    fn snapshot_command_palette() {
+        let (mut app, _rx) = test_app();
+        pin_clock(&mut app);
+        app.palette = Some(crate::app::PaletteState::default());
+        insta::assert_snapshot!("command_palette", render_lines(&mut app, 90, 16));
+    }
+
+    #[test]
+    fn snapshot_settings_overlay() {
+        let (mut app, _rx) = test_app();
+        pin_clock(&mut app);
+        // Default config (no base set) reads as the first cycle entry, "dark".
+        app.settings = Some(crate::app::SettingsState::default());
+        insta::assert_snapshot!("settings_overlay", render_lines(&mut app, 90, 16));
     }
 
     #[tokio::test]

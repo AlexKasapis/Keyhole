@@ -8,9 +8,9 @@ expression: "render_lines(&mut app, 90, 16)"
 │                                                                                        │
 │                                  Press 'a' to add one.                                 │
 │                                                                                        │
-│                                                                                        │
-│                                                                                        │
-│                                                                                        │
+│                        ┌ Command palette ─────────────────────┐                        │
+│                        │▶ Settings page                       │                        │
+│                        └──────────────────────────────────────┘                        │
 │                                                                                        │
 │                                                                                        │
 │                                                                                        │

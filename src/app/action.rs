@@ -63,6 +63,9 @@ pub enum Action {
     /// Toggle terminal mouse capture. With capture on the scroll wheel scrolls;
     /// with it off the terminal's own text selection (and copy) works again.
     ToggleMouse,
+    /// Open the command palette (`:`) — a small list of commands, the
+    /// discoverable entry point for actions without a dedicated key.
+    OpenPalette,
 }
 
 /// Translate a key event into an [`Action`], if bound.
@@ -97,6 +100,7 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('r')) => Some(Action::Refresh),
         (false, Char('m')) => Some(Action::ToggleMouse),
         (false, Char('?')) => Some(Action::ToggleHelp),
+        (false, Char(':')) => Some(Action::OpenPalette),
         (false, Esc) => Some(Action::Back),
         _ => None,
     }
@@ -173,6 +177,15 @@ mod tests {
         assert_eq!(plain(Char('r')), Some(Action::Refresh));
         assert_eq!(plain(Char('m')), Some(Action::ToggleMouse));
         assert_eq!(plain(Char('?')), Some(Action::ToggleHelp));
+        assert_eq!(plain(Char(':')), Some(Action::OpenPalette));
+    }
+
+    #[test]
+    fn colon_opens_palette_from_home_and_the_keys_pane() {
+        // `:` is the command-palette key on the home screens and, via the
+        // filtered keys-pane map, in the Browser's key list too.
+        assert_eq!(plain(Char(':')), Some(Action::OpenPalette));
+        assert_eq!(keys_focus(Char(':')), Some(Action::OpenPalette));
     }
 
     #[test]
@@ -199,9 +212,8 @@ mod tests {
         // `e` opened the standalone Console screen, which is gone: the console is
         // now an always-visible band in the Browser, entered with `i`.
         assert_eq!(plain(Char('e')), None, "'e' is unbound: no Console screen");
-        // `:` opened the command palette, which has been removed: every action
-        // is now reached directly by its own key.
-        assert_eq!(plain(Char(':')), None, "':' is unbound: no command palette");
+        // `:` opens the command palette (see `colon_opens_palette_*`), so it is
+        // deliberately *not* unbound here.
         // `w` opened the standalone Realtime screen, which is gone: tails now
         // live in the Browser's bottom panel, cycled with Tab / Shift-Tab.
         assert_eq!(plain(Char('w')), None, "'w' is unbound: no Realtime screen");

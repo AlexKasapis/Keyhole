@@ -7,7 +7,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph,
+    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
     RenderDirection, Row, Sparkline, Table, TableState, Wrap,
 };
 use ratatui::Frame;
@@ -15,8 +15,8 @@ use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, ConnForm, ConnHealth, Connection, InputMode, PaneFocus, PanelTab, RecordState, Screen,
-    SubState, Subscription, ViewRow,
+    App, ConnForm, ConnHealth, Connection, InputMode, PaletteCommand, PaneFocus, PanelTab,
+    RecordState, Screen, SubState, Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerKind, ClientInfo, Payload, ServerStats, Ttl, ValueView};
 use crate::theme::Theme;
@@ -1441,8 +1441,8 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused"),
         Line::from(""),
         Line::styled("General", theme.heading),
-        Line::from("  a add connection   ? toggle help   Esc back   Ctrl-c quit"),
-        Line::from("  m toggle mouse capture (off = select/copy text)"),
+        Line::from("  : command palette   a add connection   ? toggle help"),
+        Line::from("  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)"),
     ];
     // Grow the overlay with its content (lines + 2 borders) so no row is
     // clipped, capped to the available height.
@@ -1454,6 +1454,64 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         .title_style(theme.heading)
         .border_style(theme.border_focused);
     frame.render_widget(Paragraph::new(lines).block(block), rect);
+}
+
+/// The command-palette overlay (opened with `:`): a small centred, bordered list
+/// of commands with the highlighted one marked. Today it lists a single command.
+pub fn command_palette(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let Some(palette) = app.palette.as_ref() else {
+        return;
+    };
+    let commands = PaletteCommand::all();
+    let rect = centered(area, 40, commands.len() as u16 + 2);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Command palette ")
+        .title_style(theme.heading)
+        .border_style(theme.border_focused);
+    let items: Vec<ListItem> = commands
+        .iter()
+        .map(|c| ListItem::new(Line::raw(c.label())))
+        .collect();
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(theme.selected)
+        .highlight_symbol("▶ ");
+    let mut state = ListState::default();
+    state.select(Some(palette.selected.min(commands.len().saturating_sub(1))));
+    frame.render_stateful_widget(list, rect, &mut state);
+}
+
+/// The settings-page overlay (reached from the command palette): a small centred
+/// page of options. It hosts one option today — the colour theme — shown as the
+/// current base bracketed by `‹ ›` and cycled with ←/→. The theme switch applies
+/// live, so the overlay itself is repainted in the just-picked palette.
+pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    if app.settings.is_none() {
+        return;
+    }
+    let rect = centered(area, 46, 8);
+    frame.render_widget(Clear, rect);
+    let block = Block::bordered()
+        .title(" Settings ")
+        .title_style(theme.heading)
+        .border_style(theme.border_focused);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let current = crate::theme::THEME_BASES[crate::theme::theme_base_index(app.theme_base())];
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Theme   ", theme.accent),
+            Span::styled("‹ ", theme.dim),
+            Span::raw(current.to_string()),
+            Span::styled(" ›", theme.dim),
+        ]),
+        Line::from(""),
+        Line::styled("  ←/→ change theme · Enter/Esc close", theme.dim),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 // -- helpers ----------------------------------------------------------------

@@ -64,7 +64,9 @@ impl App {
     /// tracked — the immediate-mode render keeps no hit-test map). Ignored
     /// during text entry so a scroll can't disturb a half-typed command.
     pub(super) fn handle_mouse(&mut self, kind: MouseEventKind) {
-        if self.mode != InputMode::Normal {
+        // A modal overlay (palette / settings) or a text-entry mode owns input,
+        // so the scroll wheel must not reach the screen beneath them.
+        if self.mode != InputMode::Normal || self.palette.is_some() || self.settings.is_some() {
             return;
         }
         match kind {
