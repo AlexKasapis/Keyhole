@@ -83,7 +83,8 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
     for p in &app.profiles {
         let conn = app.connections.iter().find(|c| c.name == p.name());
         let (dot, dot_style) = if app.is_connected(p.name()) {
-            ("●", theme.success)
+            // A live connection's dot breathes so the row reads as alive.
+            ("●", crate::ui::anim::pulse(theme.success, app.now))
         } else {
             ("○", theme.dim)
         };
@@ -192,6 +193,9 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // bottom panel's height tracks the window; both are read before the `&mut`
     // borrow of the active connection below.
     let health = app.conn_health();
+    // The Server band's connected dot pulses on the tick clock; capture `now`
+    // before the `&mut` borrow of the active connection below.
+    let now = app.now;
     let panel_h = panel_band_height(frame.area().height);
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
@@ -235,7 +239,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let panel_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
 
     if let Some(band_area) = band_area {
-        server_stats_band(frame, conn, health, theme, band_area);
+        server_stats_band(frame, conn, health, now, theme, band_area);
     }
 
     let [table_area, value_area] =
@@ -418,6 +422,7 @@ fn server_stats_band(
     frame: &mut Frame,
     conn: &Connection,
     health: ConnHealth,
+    now: OffsetDateTime,
     theme: &Theme,
     area: Rect,
 ) {
@@ -426,6 +431,12 @@ fn server_stats_band(
     // The connection-health indicator (the former top-right header dot) rides in
     // the title here, beside the "Server" label.
     let (dot, hlabel, dot_style) = crate::ui::health_indicator(health, theme);
+    // A connected dot breathes; transitional/offline states hold steady.
+    let dot_style = if health == ConnHealth::Connected {
+        crate::ui::anim::pulse(dot_style, now)
+    } else {
+        dot_style
+    };
     let title = Line::from(vec![
         Span::styled(" Server ", theme.heading),
         Span::styled(format!(" {dot} "), dot_style),

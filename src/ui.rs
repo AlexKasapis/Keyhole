@@ -4,6 +4,7 @@
 //! help). There is no top bar — connection health lives with its screen (the
 //! Browser's Server band, the connections list's per-row dots).
 
+mod anim;
 mod views;
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -114,11 +115,14 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                     Paragraph::new(hint_line(app, theme)).style(theme.status_bar),
                     hints_area,
                 );
-                let style = if status.is_error {
+                let base = if status.is_error {
                     theme.error
                 } else {
                     theme.success
                 };
+                // A transient notification dissolves into the bar over the tail
+                // of its life; a confirmation prompt stays solid (fade == 1.0).
+                let style = anim::fade(base, theme, app.status_fade());
                 frame.render_widget(
                     Paragraph::new(Line::styled(format!("{} ", status.message), style))
                         .alignment(Alignment::Right)
@@ -240,7 +244,9 @@ fn hint_line(app: &App, theme: &Theme) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{ConnForm, Connection, RecordState, SubState, Subscription};
+    use crate::app::{
+        ConnForm, Connection, RecordState, Status, StatusKind, SubState, Subscription,
+    };
     use crate::broker::actor::mock;
     use crate::broker::{
         BrokerEvent, EntryMeta, Payload, PayloadEncoding, ServerStats, StreamEntry, SubSpec, Ttl,
@@ -249,7 +255,9 @@ mod tests {
     use crate::config::Config;
     use crate::event::AppEvent;
     use ratatui::backend::TestBackend;
+    use ratatui::style::{Color, Modifier};
     use ratatui::Terminal;
+    use time::OffsetDateTime;
     use tokio::sync::mpsc::{self, Receiver};
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::TaskTracker;
@@ -421,6 +429,158 @@ mod tests {
         app.active = Some(0);
         app.screen = Screen::Browser;
         assert!(screen_text(&mut app).contains("● connected"));
+    }
+
+    /// Style of the first filled status dot (`●`) in a rendered frame.
+    fn dot_style(buf: &ratatui::buffer::Buffer) -> Style {
+        let i = buf
+            .content()
+            .iter()
+            .position(|c| c.symbol() == "●")
+            .expect("a filled status dot is rendered");
+        buf.content()[i].style()
+    }
+
+    /// Render the current frame at a given clock instant and return the style of
+    /// its first filled status dot.
+    fn dot_at(app: &mut App, unix_secs: i64) -> Style {
+        app.now = OffsetDateTime::from_unix_timestamp(unix_secs).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let frame = terminal.draw(|f| render(f, app)).expect("render");
+        dot_style(frame.buffer)
+    }
+
+    #[tokio::test]
+    async fn connected_server_dot_breathes_on_the_tick_clock() {
+        // The connected dot in the Browser's Server band pulses: the 2s breath
+        // rides DIM/BOLD, with the epoch start at the dim trough and one second
+        // in at the bold peak. The colour is left untouched (still the success
+        // green) so the pulse is faithful to the palette.
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        let theme = app.theme;
+
+        let trough = dot_at(&mut app, 0);
+        let peak = dot_at(&mut app, 1);
+        assert!(
+            trough.add_modifier.contains(Modifier::DIM),
+            "the breath's trough dims the dot"
+        );
+        assert!(
+            peak.add_modifier.contains(Modifier::BOLD),
+            "the breath's peak brightens the dot"
+        );
+        assert_eq!(
+            trough.fg, theme.success.fg,
+            "the pulse never rewrites the dot's colour"
+        );
+        assert_eq!(peak.fg, theme.success.fg);
+    }
+
+    #[tokio::test]
+    async fn connected_connections_row_dot_breathes() {
+        // The same breathing rides the Connections list's per-row dot, which is
+        // green only for a profile with a live connection. `mock::handle` opens a
+        // connection named "prod", so a matching profile reads as connected.
+        use crate::config::{Config, ConnectionConfig, RedisProfile};
+        let (tx, _rx) = mpsc::channel(64);
+        let config = Config {
+            connections: vec![ConnectionConfig::Redis(RedisProfile {
+                name: "prod".into(),
+                host: "127.0.0.1".into(),
+                port: 6379,
+                db: 0,
+                username: None,
+                password: None,
+                tls: false,
+            })],
+            ..Default::default()
+        };
+        let mut app = App::new(
+            config,
+            std::path::PathBuf::from("/tmp/bt.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
+        let handle = mock::handle(1, "prod", 16).await;
+        app.connections.push(Connection::new(handle));
+        // Home (Connections tab) is the default screen for this test app.
+        assert!(app.is_connected("prod"), "the profile reads as connected");
+        assert!(
+            dot_at(&mut app, 0).add_modifier.contains(Modifier::DIM),
+            "the connected row's dot dims at the breath's trough"
+        );
+        assert!(
+            dot_at(&mut app, 1).add_modifier.contains(Modifier::BOLD),
+            "and brightens at its peak"
+        );
+    }
+
+    /// Style of the last non-blank cell on the footer (last) row — where the
+    /// right-aligned status notification is drawn.
+    fn footer_status_style(app: &mut App) -> Style {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let frame = terminal.draw(|f| render(f, app)).expect("render");
+        let buf = &frame.buffer;
+        let w = buf.area.width as usize;
+        let last_row = &buf.content()[(buf.area.height as usize - 1) * w..];
+        last_row
+            .iter()
+            .rev()
+            .find(|c| c.symbol() != " ")
+            .expect("the footer carries the status text")
+            .style()
+    }
+
+    #[test]
+    fn footer_transient_notification_fades_as_it_nears_expiry() {
+        let (mut app, _rx) = test_app();
+        let theme = app.theme;
+        app.status = Some(Status {
+            message: "saved".into(),
+            is_error: false,
+            kind: StatusKind::Transient,
+            shown_at: app.now,
+        });
+
+        // Fresh: drawn solid in the success colour.
+        assert_eq!(
+            footer_status_style(&mut app).fg,
+            theme.success.fg,
+            "a fresh notification is solid"
+        );
+
+        // Backdated into the final stretch of its life: the colour dissolves
+        // toward the bar, so it is now an interpolated RGB, no longer flat green.
+        app.status.as_mut().unwrap().shown_at = app.now - time::Duration::milliseconds(2700);
+        let fading = footer_status_style(&mut app).fg;
+        assert!(
+            matches!(fading, Some(Color::Rgb(..))),
+            "the fading colour interpolates in RGB, got {fading:?}"
+        );
+        assert_ne!(fading, theme.success.fg, "it has left solid green");
+    }
+
+    #[test]
+    fn footer_confirm_prompt_does_not_fade() {
+        // A confirmation prompt doesn't self-dismiss, so it never fades: even past
+        // the transient lifetime it stays in its solid colour.
+        let (mut app, _rx) = test_app();
+        let theme = app.theme;
+        app.status = Some(Status {
+            message: "Press d again to delete".into(),
+            is_error: false,
+            kind: StatusKind::Confirm,
+            shown_at: app.now - time::Duration::seconds(10),
+        });
+        assert_eq!(
+            footer_status_style(&mut app).fg,
+            theme.success.fg,
+            "a confirm prompt is drawn solid regardless of age"
+        );
     }
 
     #[test]

@@ -52,6 +52,10 @@ const STATS_REFRESH_TICKS: u32 = 8;
 /// Confirmation prompts (e.g. "Press d again …") are exempt — they live and die
 /// with their key chord, not this timer (see [`Status`] / [`StatusKind`]).
 const STATUS_TTL: time::Duration = time::Duration::seconds(3);
+/// How long before its expiry a transient notification begins to fade out.
+/// Shorter than [`STATUS_TTL`] so the message reads solid for most of its life
+/// and only dissolves over the final stretch. See [`App::status_fade`].
+const STATUS_FADE: time::Duration = time::Duration::milliseconds(1000);
 /// How many elements of a value to fetch into the inspector at a time.
 const VALUE_LIMIT: usize = 200;
 /// Minimum wall-clock gap between progressive key-browser view rebuilds while a
@@ -316,6 +320,27 @@ impl App {
         if matches!(&self.status, Some(s) if s.kind == StatusKind::Confirm) {
             self.status = None;
         }
+    }
+
+    /// Opacity for the active status notification while it fades out: `1.0`
+    /// fully visible, `0.0` about to vanish. Only a [`StatusKind::Transient`]
+    /// fades, and only over the final [`STATUS_FADE`] of its [`STATUS_TTL`]
+    /// life; a confirmation prompt (or no status at all) always reads fully
+    /// opaque, so the renderer draws it solid. A transient that is replaced by a
+    /// newer one never reaches its fade window — the replacement resets the
+    /// clock — so it just swaps in. Driven by the tick clock via `now`.
+    pub(crate) fn status_fade(&self) -> f32 {
+        let Some(status) = &self.status else {
+            return 1.0;
+        };
+        if status.kind != StatusKind::Transient {
+            return 1.0;
+        }
+        let remaining = STATUS_TTL - (self.now - status.shown_at);
+        if remaining >= STATUS_FADE {
+            return 1.0;
+        }
+        (remaining.as_seconds_f32() / STATUS_FADE.as_seconds_f32()).clamp(0.0, 1.0)
     }
 
     /// Drop a transient notification once it has been on screen for

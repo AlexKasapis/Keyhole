@@ -2184,6 +2184,53 @@ fn transient_notification_self_dismisses_after_its_ttl() {
 }
 
 #[test]
+fn a_transient_notification_fades_over_the_tail_of_its_life() {
+    let (mut app, _rx) = test_app();
+    app.apply(Action::ToggleMouse); // posts a transient notification
+    assert_eq!(
+        app.status.as_ref().unwrap().kind,
+        StatusKind::Transient,
+        "mouse toggle posts a transient"
+    );
+
+    // Fresh, and for most of its life, it reads fully opaque.
+    assert_eq!(app.status_fade(), 1.0, "a fresh notification is solid");
+    app.status.as_mut().unwrap().shown_at = app.now - time::Duration::milliseconds(1500);
+    assert_eq!(app.status_fade(), 1.0, "still solid before the fade window");
+
+    // Inside the final stretch the opacity drops below 1 …
+    app.status.as_mut().unwrap().shown_at = app.now - time::Duration::milliseconds(2500);
+    let mid = app.status_fade();
+    assert!(mid > 0.0 && mid < 1.0, "fading mid-window: {mid}");
+
+    // … and deepens as expiry nears.
+    app.status.as_mut().unwrap().shown_at = app.now - time::Duration::milliseconds(2950);
+    let late = app.status_fade();
+    assert!(
+        late < mid,
+        "the fade deepens toward expiry: {late} !< {mid}"
+    );
+}
+
+#[test]
+fn a_confirm_prompt_never_fades() {
+    let (mut app, _rx) = test_app();
+    app.apply(Action::Back); // arm quit -> confirmation prompt
+    assert_eq!(app.status.as_ref().unwrap().kind, StatusKind::Confirm);
+    // A confirm prompt doesn't self-dismiss, so it has no fade-out: it stays
+    // fully opaque even long past the transient lifetime.
+    app.status.as_mut().unwrap().shown_at = app.now - time::Duration::seconds(10);
+    assert_eq!(app.status_fade(), 1.0);
+}
+
+#[test]
+fn an_absent_notification_reads_as_fully_opaque() {
+    let (app, _rx) = test_app();
+    assert!(app.status.is_none());
+    assert_eq!(app.status_fade(), 1.0);
+}
+
+#[test]
 fn a_newer_notification_overrides_the_previous_one() {
     let (mut app, _rx) = test_app();
     app.apply(Action::ToggleMouse);
