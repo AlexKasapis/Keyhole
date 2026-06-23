@@ -103,10 +103,11 @@ pub struct App {
     pub(crate) subscribe_buf: String,
     pub(crate) form: Option<ConnForm>,
     pub(crate) status: Option<Status>,
-    /// Connection health for the header indicator, while no connection is
-    /// active. `Connected` is derived live from [`Self::active_conn`], so this
-    /// field only carries the no-connection sub-state (offline / connecting /
-    /// error). See [`Self::conn_health`].
+    /// Connection health while no connection is active. `Connected` is derived
+    /// live from [`Self::active_conn`], so this field only carries the
+    /// no-connection sub-state (offline / connecting / error); the connected
+    /// state surfaces in the Browser's Server band, and connect/disconnect
+    /// outcomes also post a footer status. See [`Self::conn_health`].
     pub(crate) health: ConnHealth,
     pub(crate) show_help: bool,
     /// Whether terminal mouse capture is on. While on, the scroll wheel scrolls
@@ -183,7 +184,7 @@ impl App {
             profile_state,
             connections: Vec::new(),
             active: None,
-            screen: Screen::Connections,
+            screen: Screen::Home,
             mode: InputMode::Normal,
             filter: String::new(),
             subscribe_buf: String::new(),
@@ -239,9 +240,10 @@ impl App {
         self.mouse_capture
     }
 
-    /// Connection health for the header indicator. An active connection always
-    /// reads as [`ConnHealth::Connected`]; otherwise the most recent
-    /// connection-lifecycle outcome (offline / connecting / error) is reported.
+    /// Connection health, surfaced by the Browser's Server band. An active
+    /// connection always reads as [`ConnHealth::Connected`]; otherwise the most
+    /// recent connection-lifecycle outcome (offline / connecting / error) is
+    /// reported.
     pub fn conn_health(&self) -> ConnHealth {
         if self.active_conn().is_some() {
             ConnHealth::Connected
@@ -336,7 +338,7 @@ fn initial_screen(caps: &Capabilities) -> Screen {
     if caps.can_browse {
         Screen::Browser
     } else {
-        Screen::Connections
+        Screen::Home
     }
 }
 

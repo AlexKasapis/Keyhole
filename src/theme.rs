@@ -24,7 +24,7 @@ pub struct Theme {
     pub error: Style,
     pub success: Style,
     /// A cautionary amber, used for transitional/at-risk states such as the
-    /// header's "connecting" connection indicator.
+    /// Server band's "connecting" connection indicator.
     pub warning: Style,
     pub gauge: Style,
 }

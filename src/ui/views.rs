@@ -25,8 +25,18 @@ use crate::theme::Theme;
 /// single-frame treatment as the Browser's bottom panel.
 pub fn home(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let on_recordings = app.screen == Screen::Recordings;
+    // The active tab keeps its highlight (a background fill + bold); inactive tabs
+    // use the normal foreground rather than the dim style, which was too faint to
+    // read against the terminal background.
     let tab = |label: &'static str, active: bool| {
-        Span::styled(label, if active { theme.selected } else { theme.dim })
+        Span::styled(
+            label,
+            if active {
+                theme.selected
+            } else {
+                Style::default()
+            },
+        )
     };
     let title = Line::from(vec![
         Span::raw(" "),
@@ -503,16 +513,20 @@ fn server_stats_band(
         left.push(Span::styled(" ops/s", theme.dim));
     }
 
-    // Right group: total keys, then the per-DB breakdown (`db0 42 · db1 7`).
+    // Right group: the total key count, then a per-DB breakdown (`· db0 42 · db1 7`)
+    // — but only when more than one DB holds keys. With a single DB the total *is*
+    // that DB's count, so appending `· db0 N` would just print the number twice.
     let mut right: Vec<Span<'static>> = Vec::new();
     if !stats.db_keys.is_empty() {
         let total: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
         right.push(Span::raw(total.to_string()));
         right.push(Span::styled(" keys", theme.dim));
-        for (db, n) in &stats.db_keys {
-            right.push(Span::styled(" · ", theme.dim));
-            right.push(Span::styled(format!("db{db} "), theme.dim));
-            right.push(Span::raw(n.to_string()));
+        if stats.db_keys.len() > 1 {
+            for (db, n) in &stats.db_keys {
+                right.push(Span::styled(" · ", theme.dim));
+                right.push(Span::styled(format!("db{db} "), theme.dim));
+                right.push(Span::raw(n.to_string()));
+            }
         }
     }
     let right = Line::from(right);
@@ -643,7 +657,13 @@ fn tab_spans(
     active: bool,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
-    let base = if active { theme.selected } else { theme.dim };
+    // The active tab keeps its highlight; inactive tabs use the normal foreground
+    // (the dim style read too faint), matching the home area's tab strip.
+    let base = if active {
+        theme.selected
+    } else {
+        Style::default()
+    };
     let mut spans = Vec::new();
     match slot {
         PanelTab::Console => spans.push(Span::styled("Console", base)),

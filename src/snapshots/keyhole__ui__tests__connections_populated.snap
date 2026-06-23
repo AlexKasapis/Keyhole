@@ -2,7 +2,6 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 120, 12)"
 ---
- no connection  · connections                                                                  ○ offline   12:34:56 UTC
 ┌ Connections │ Recordings ────────────────────────────────────────────────────────────────────────────────────────────┐
 │     NAME                KIND      ENDPOINT                    INFO                                                   │
 │▶ ●  cache               redis     admin@127.0.0.1:6379        v7.4.0 · 49 keys · 7 clients · 120 ops/s · 1.0 MiB     │
@@ -12,5 +11,6 @@ expression: "render_lines(&mut app, 120, 12)"
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │
+│                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app ? help · Esc Esc quit
+  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app ? help · Esc Esc qui 12:34:56 UTC

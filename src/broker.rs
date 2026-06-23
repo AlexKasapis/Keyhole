@@ -95,15 +95,6 @@ pub enum BrokerKind {
 }
 
 impl BrokerKind {
-    /// Lowercase tag for display and the recording envelope.
-    pub fn label(self) -> &'static str {
-        match self {
-            BrokerKind::Redis => "redis",
-            BrokerKind::Amqp => "amqp",
-            BrokerKind::Rabbitmq => "rabbitmq",
-        }
-    }
-
     /// A compact one-line hint of the source specs this broker accepts, shown in
     /// the subscribe prompt so the user knows what to type. The brokers tail
     /// different kinds of destination, so the hint is broker-specific.
@@ -112,17 +103,6 @@ impl BrokerKind {
             BrokerKind::Redis => "pubsub:ch · psub:ch.* · stream:key · keyspace · monitor",
             BrokerKind::Amqp => "topic:name · queue:name",
             BrokerKind::Rabbitmq => "exchange:name · exchange:name/binding-key",
-        }
-    }
-
-    /// Whether this broker is database-scoped (Redis `SELECT`); the AMQP brokers
-    /// are not. Centralizes the Redis-vs-rest distinction so the "db-agnostic"
-    /// behaviour isn't re-spelled as `Amqp | Rabbitmq` at each use site. Kept
-    /// exhaustive (no `_` arm) so a new broker must consciously classify itself.
-    pub fn uses_database(self) -> bool {
-        match self {
-            BrokerKind::Redis => true,
-            BrokerKind::Amqp | BrokerKind::Rabbitmq => false,
         }
     }
 }
@@ -881,13 +861,6 @@ mod tests {
     }
 
     #[test]
-    fn broker_kind_uses_database_only_for_redis() {
-        assert!(BrokerKind::Redis.uses_database());
-        assert!(!BrokerKind::Amqp.uses_database());
-        assert!(!BrokerKind::Rabbitmq.uses_database());
-    }
-
-    #[test]
     fn amqp_base_url_encodes_creds_and_brackets_ipv6() {
         // Percent-encodes userinfo (shared by both AMQP brokers).
         assert_eq!(
@@ -932,8 +905,6 @@ mod tests {
         assert_eq!(a.kind, BrokerKind::Amqp);
         assert_eq!(a.databases, 1);
         assert!(!a.can_browse && !a.can_dashboard && !a.can_console);
-        assert_eq!(BrokerKind::Amqp.label(), "amqp");
-        assert_eq!(BrokerKind::Redis.label(), "redis");
 
         // RabbitMQ mirrors AMQP's capability shape (no browser, dashboard, or
         // console).
@@ -941,7 +912,6 @@ mod tests {
         assert_eq!(rmq.kind, BrokerKind::Rabbitmq);
         assert_eq!(rmq.databases, 1);
         assert!(!rmq.can_browse && !rmq.can_dashboard && !rmq.can_console);
-        assert_eq!(BrokerKind::Rabbitmq.label(), "rabbitmq");
     }
 
     #[test]

@@ -1,6 +1,9 @@
 //! Rendering. [`render`] is a pure function of [`App`] state, called once per
-//! frame by the main loop: a header, the active screen, a footer (hints or the
-//! active text-entry prompt), plus modal overlays (connection form, help).
+//! frame by the main loop: the active screen and a footer (hints or the active
+//! text-entry prompt, plus the clock), then modal overlays (connection form,
+//! help). There is no top bar — connection health lives with its screen (the
+//! Browser's Server band, the connections list's per-row dots) and the clock sits
+//! at the right edge of the footer.
 
 mod views;
 
@@ -18,18 +21,13 @@ use crate::theme::Theme;
 pub fn render(frame: &mut Frame, app: &mut App) {
     // `Theme` is `Copy`, so taking it by value frees `app` for `&mut` borrows.
     let theme = app.theme;
-    let [header_area, body_area, footer_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-    ])
-    .areas(frame.area());
+    let [body_area, footer_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
 
-    render_header(frame, app, &theme, header_area);
     match app.screen {
         // Connections and Recordings are two tabs of one merged home area,
         // drawn as a single bordered box whose title is the tab strip.
-        Screen::Connections | Screen::Recordings => views::home(frame, app, &theme, body_area),
+        Screen::Home | Screen::Recordings => views::home(frame, app, &theme, body_area),
         Screen::Browser => views::browser(frame, app, &theme, body_area),
     }
     render_footer(frame, app, &theme, footer_area);
@@ -43,74 +41,11 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    // One row carries everything: the active-connection label (with its db) and
-    // the screen on the left; the clock on the right, preceded — depending on the
-    // screen — by the key count (Browser, where the health dot has moved into the
-    // Server band) or the connection indicator (everywhere else). The "Keyhole"
-    // brand was dropped to keep the row to one line.
-    let [left, right] =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(40)]).areas(area);
-
-    let active = app
-        .active_conn()
-        .map(|c| c.label())
-        .unwrap_or_else(|| "no connection".to_string());
-    let screen = match app.screen {
-        Screen::Connections => "connections",
-        Screen::Browser => "browser",
-        Screen::Recordings => "recordings",
-    };
-    let line = Line::from(vec![
-        Span::raw(" "),
-        Span::styled(active, theme.accent),
-        Span::styled(format!("  · {screen}"), theme.dim),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme.status_bar), left);
-
-    let mut right_spans = Vec::new();
-    let on_browser = app.screen == Screen::Browser;
-    let key_count = on_browser
-        .then(|| app.active_conn())
-        .flatten()
-        .filter(|c| c.caps.can_browse);
-    match key_count {
-        // On the Browser the key count leads (the health dot lives in the Server
-        // band); a running scan is flagged so a growing count reads as expected.
-        Some(conn) => {
-            right_spans.push(Span::raw(conn.browser.keys.len().to_string()));
-            right_spans.push(Span::styled(" keys", theme.dim));
-            if !conn.browser.complete {
-                right_spans.push(Span::styled(" · scanning…", theme.accent));
-            }
-            right_spans.push(Span::raw("   "));
-        }
-        None => {
-            let (dot, label, dot_style) = conn_indicator(app, theme);
-            right_spans.push(Span::styled(format!("{dot} "), dot_style));
-            right_spans.push(Span::raw(format!("{label}   ")));
-        }
-    }
-    right_spans.push(Span::raw(format!("{} ", clock(app))));
-    frame.render_widget(
-        Paragraph::new(Line::from(right_spans))
-            .alignment(Alignment::Right)
-            .style(theme.status_bar),
-        right,
-    );
-}
-
-/// The header connection indicator: a status-dot glyph, a one-word label, and
-/// the style that colours the dot to convey connection health at a glance.
-fn conn_indicator(app: &App, theme: &Theme) -> (&'static str, &'static str, Style) {
-    health_indicator(app.conn_health(), theme)
-}
-
 /// Map a [`ConnHealth`] to a status-dot glyph, a one-word label, and the style
 /// that colours the dot. A filled `●` marks any live or transitional state; a
 /// dim hollow `○` marks having no connection. The word keeps the state legible
-/// under `NO_COLOR`, where the dot colours collapse to modifiers. Shared by the
-/// header (off-Browser) and the Browser's Server band.
+/// under `NO_COLOR`, where the dot colours collapse to modifiers. Used by the
+/// Browser's Server band.
 pub(crate) fn health_indicator(
     health: ConnHealth,
     theme: &Theme,
@@ -124,6 +59,22 @@ pub(crate) fn health_indicator(
 }
 
 fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    // The clock — formerly in the top bar — now rides the footer's right edge,
+    // shown on every screen and in every input mode. Carve a fixed column for it
+    // and let the mode-specific content (hints / prompt) take the rest.
+    let clock_str = format!("{} ", clock(app));
+    let [area, clock_area] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(clock_str.len() as u16 + 1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(clock_str))
+            .alignment(Alignment::Right)
+            .style(theme.status_bar),
+        clock_area,
+    );
+
     match app.mode {
         InputMode::Filter => {
             let line = Line::from(vec![
@@ -217,7 +168,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
             .collect::<Vec<_>>()
     };
     match app.screen {
-        Screen::Connections => owned(&[
+        Screen::Home => owned(&[
             ("nav", "↑↓ move"),
             ("conn", "Enter connect · a add"),
             ("tabs", "Tab recordings"),
@@ -361,21 +312,54 @@ mod tests {
         }
     }
 
-    // -- header & footer (always drawn) --------------------------------------
+    // -- footer (always drawn) -----------------------------------------------
 
     #[test]
-    fn header_shows_connection_label_and_clock() {
-        // The "Keyhole" brand was dropped to keep the header to one row; what
-        // remains is the active-connection label (here, none) and the clock.
+    fn footer_carries_the_clock_and_there_is_no_top_bar() {
+        // The top bar is gone: there is no "Keyhole" brand and no active-connection
+        // label up top. The clock that used to live there now rides the footer.
         let (mut app, _rx) = test_app();
         let text = screen_text(&mut app);
         assert!(!text.contains("Keyhole"), "the brand label is gone");
-        assert!(text.contains("UTC"), "the clock is in the header");
-        assert!(text.contains("no connection"), "no active connection label");
+        assert!(
+            !text.contains("no connection"),
+            "no top-bar connection label"
+        );
+        assert!(text.contains("UTC"), "the clock renders in the footer");
     }
 
     #[test]
-    fn conn_indicator_maps_each_health_to_dot_word_and_colour() {
+    fn inactive_subtabs_use_a_readable_foreground_not_the_dim_style() {
+        // The home tab strip's inactive tab ("Recordings", with Connections active
+        // on the default screen) renders with the normal foreground, not the faint
+        // dim style that read as almost no contrast — a guard for the subtab fix.
+        let (mut app, _rx) = test_app();
+        let theme = app.theme;
+        let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+        let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
+        let buf = &frame.buffer;
+        let w = buf.area.width as usize;
+        // Locate "Recordings" in the top (title) row by cell symbols: the border
+        // glyphs are multi-byte, so a byte-offset string search would misalign
+        // with screen columns.
+        let row0: Vec<&str> = buf.content()[..w].iter().map(|c| c.symbol()).collect();
+        let target: Vec<String> = "Recordings".chars().map(|c| c.to_string()).collect();
+        let start = row0
+            .windows(target.len())
+            .position(|win| win == target.as_slice())
+            .expect("the inactive Recordings tab label renders in the title row");
+        for i in start..start + target.len() {
+            assert_ne!(
+                buf.content()[i].style().fg,
+                theme.dim.fg,
+                "inactive tab char {:?} must not use the dim foreground",
+                buf.content()[i].symbol()
+            );
+        }
+    }
+
+    #[test]
+    fn health_indicator_maps_each_health_to_dot_word_and_colour() {
         // The glyph/word/colour triple must be distinct per state: a filled dot
         // for live or transitional states, a dim hollow one only when there is
         // no connection. The word keeps states legible without colour.
@@ -389,10 +373,10 @@ mod tests {
         ];
         for (health, glyph, label, style) in cases {
             // With no active connection, `conn_health` returns this field as-is,
-            // so each branch of `conn_indicator` is exercised.
+            // so each branch of `health_indicator` is exercised.
             app.health = health;
             assert_eq!(
-                conn_indicator(&app, &theme),
+                health_indicator(app.conn_health(), &theme),
                 (glyph, label, style),
                 "{health:?}"
             );
@@ -400,29 +384,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn header_connection_indicator_renders_in_the_top_right() {
-        // Offline: a hollow dim dot and the "offline" word render in the header.
+    async fn browser_server_band_surfaces_connection_health() {
+        // The connection-health indicator (formerly the top-right header dot) now
+        // lives in the Browser's Server band: a filled dot and the "connected"
+        // word beside the band title. (The band only shows for a live connection —
+        // a dropped one bounces back to Home — so "connected" is what it carries;
+        // the full health→glyph mapping is covered by the unit test above.)
         let (mut app, _rx) = test_app();
-        assert!(screen_text(&mut app).contains("○ offline"));
-
-        // Connected: a filled dot and "connected", and the offline word is gone.
         let handle = mock::handle(1, "prod", 16).await;
         app.connections.push(Connection::new(handle));
         app.active = Some(0);
-        app.health = ConnHealth::Connected;
-        let text = screen_text(&mut app);
-        assert!(text.contains("● connected"));
-        assert!(
-            !text.contains("offline"),
-            "offline label gone once connected"
-        );
-
-        // Dropped: the dot turns to the red "error" state.
-        app.handle_event(AppEvent::Disconnected {
-            id: crate::broker::ConnId(1),
-            reason: "bye".into(),
-        });
-        assert!(screen_text(&mut app).contains("● error"));
+        app.screen = Screen::Browser;
+        assert!(screen_text(&mut app).contains("● connected"));
     }
 
     #[test]
@@ -445,11 +418,7 @@ mod tests {
         // Each screen's hint row is split into labelled sections; rendered wide
         // so nothing clips. The section labels and a key from each must appear.
         let cases = [
-            (
-                Screen::Connections,
-                vec!["nav", "conn", "app"],
-                "Enter connect",
-            ),
+            (Screen::Home, vec!["nav", "conn", "app"], "Enter connect"),
             (Screen::Browser, vec!["nav", "view", "panel"], "/ filter"),
             (Screen::Recordings, vec!["nav", "app"], "Esc back"),
         ];
@@ -475,7 +444,7 @@ mod tests {
         // The command palette was removed, so no screen's footer may advertise
         // it; every screen instead reaches its actions directly by key, and the
         // "app" group always offers help.
-        for screen in [Screen::Connections, Screen::Browser, Screen::Recordings] {
+        for screen in [Screen::Home, Screen::Browser, Screen::Recordings] {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             let sections = hint_sections(&app);
@@ -502,7 +471,7 @@ mod tests {
         // and the Tab tab-switch in a "tabs" group. The Browser steps back with
         // Esc, so it carries neither.
         let expected = [
-            (Screen::Connections, "b browser", "recordings"),
+            (Screen::Home, "b browser", "recordings"),
             (Screen::Recordings, "b browser", "connections"),
         ];
         for (screen, go_key, tab_target) in expected {
@@ -1038,6 +1007,33 @@ mod tests {
         // The gauges' name prefixes render.
         assert!(text.contains("Mem"));
         assert!(text.contains("Hit"));
+        // With a single DB, the key count shows once — the total, with no
+        // redundant `db0 N` breakdown repeating the same number.
+        assert!(text.contains("9 keys"), "total key count");
+        assert!(
+            !text.contains("db0"),
+            "no single-DB breakdown that doubles the count"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_stats_band_breaks_keys_down_across_multiple_dbs() {
+        // With keys in more than one DB the per-DB breakdown is informative (the
+        // total no longer equals any single DB), so it is shown alongside the total.
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        app.connections[0].dashboard.stats = Some(ServerStats {
+            redis_version: Some("7.4.0".into()),
+            db_keys: vec![(0, 42), (1, 7)],
+            ..Default::default()
+        });
+        let text = screen_text(&mut app);
+        assert!(text.contains("49 keys"), "summed total across DBs");
+        assert!(
+            text.contains("db0"),
+            "per-DB breakdown shown for multiple DBs"
+        );
+        assert!(text.contains("db1"));
     }
 
     #[tokio::test]

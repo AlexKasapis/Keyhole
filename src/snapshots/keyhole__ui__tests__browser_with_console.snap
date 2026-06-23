@@ -2,7 +2,6 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 24)"
 ---
- prod (db0)  · browser                                              2 keys   12:34:56 UTC
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
 │ Loading server stats…                                                                  │
 │                                                                                        │
@@ -16,6 +15,7 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
+│                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ─────────────────────────────────────────┐
 │uptime_in_seconds:42                                                                    │
@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·
+  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o 12:34:56 UTC

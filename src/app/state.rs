@@ -17,7 +17,9 @@ use crate::broker::{
 /// Which top-level screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
-    Connections,
+    /// The landing area: a single box whose tab strip switches between the saved
+    /// connections list and the on-disk recordings (paired with [`Screen::Recordings`]).
+    Home,
     /// Key browser + value inspector for the active connection. For brokers with
     /// server statistics (Redis) it also carries a compact stats band up top —
     /// the former standalone Dashboard, now merged into this main panel. Brokers
@@ -106,7 +108,7 @@ pub struct Status {
 }
 
 /// Health of the active broker connection, surfaced as a coloured dot in the
-/// header's top-right corner. `Connected` is derived from whether a connection
+/// Browser's Server band. `Connected` is derived from whether a connection
 /// is active (see [`crate::app::App::conn_health`]); the remaining variants
 /// describe the no-connection situation — nothing started yet (`Offline`), a
 /// connect in flight (`Connecting`), or a failed attempt / dropped connection
@@ -1117,17 +1119,6 @@ impl Connection {
     /// Find a tail by id (mutable).
     pub fn sub_by_id_mut(&mut self, sub_id: u32) -> Option<&mut Subscription> {
         self.subs.iter_mut().find(|s| s.sub_id == sub_id)
-    }
-
-    /// A short status-bar label: `name (dbN)` for Redis (database-scoped),
-    /// `name [amqp]` for brokers where a database index is meaningless.
-    pub fn label(&self) -> String {
-        if self.caps.kind.uses_database() {
-            format!("{} (db{})", self.name, self.db)
-        } else {
-            // The AMQP brokers are not database-scoped, so just tag the kind.
-            format!("{} [{}]", self.name, self.caps.kind.label())
-        }
     }
 }
 

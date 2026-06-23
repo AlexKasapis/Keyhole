@@ -2,7 +2,6 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 26)"
 ---
- prod (db0)  · browser                                              1 keys   12:34:56 UTC
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
 │ Loading server stats…                                                                  │
 │                                                                                        │
@@ -11,6 +10,7 @@ expression: "render_lines(&mut app, 90, 26)"
 │  Key             Type    TTL       Size   ││Select a key to inspect its value.         │
 │▶ ▾ user (1)                               ││                                           │
 │    1             string  2m 0s     128 B  ││                                           │
+│                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
@@ -27,4 +27,4 @@ expression: "render_lines(&mut app, 90, 26)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·
+  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o 12:34:56 UTC

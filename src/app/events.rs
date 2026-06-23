@@ -102,9 +102,9 @@ impl App {
         self.screen = initial_screen(&caps);
         // A freshly-focused browser becomes the `b` target.
         self.note_browser_view();
-        // The header's green connection dot now signals "connected" — and the
-        // active-connection label is shown there too — so no transient footer
-        // message is needed for the success case (errors still surface there).
+        // The Browser's Server band shows the green "connected" dot, so no
+        // transient footer message is needed for the success case (errors still
+        // surface there).
         self.health = ConnHealth::Connected;
         // Kick off the broker-appropriate first load.
         if caps.can_browse {
@@ -130,9 +130,9 @@ impl App {
                 Some(0)
             };
             if self.connections.is_empty() {
-                self.screen = Screen::Connections;
-                // No connection left: the header dot turns red. The footer keeps
-                // the detailed reason, which the glanceable dot can't carry.
+                self.screen = Screen::Home;
+                // No connection left: record the error health. The footer status
+                // (set below) carries the detailed reason for the user.
                 self.health = ConnHealth::Error;
             }
             self.set_status(format!("{name} disconnected: {reason}"), true);
@@ -202,8 +202,8 @@ impl App {
 
     pub(super) fn on_conn_error(&mut self, id: ConnId, context: String, error: String) {
         // An error with nothing connected means a connect attempt failed (auth,
-        // dial, unsupported broker) — flag the header dot red. Errors raised on
-        // a live connection leave the dot green; the connection is still up.
+        // dial, unsupported broker) — record error health. Errors raised on a
+        // live connection leave it connected; the connection is still up.
         if self.active_conn().is_none() {
             self.health = ConnHealth::Error;
         }

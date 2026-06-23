@@ -122,7 +122,7 @@ fn new_selects_first_profile_when_present() {
     let (app, _rx) = build_app(config_with(&["a", "b"]), unique_config_path(), None);
     assert_eq!(app.profiles.len(), 2);
     assert_eq!(app.profile_state.selected(), Some(0));
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     assert_eq!(app.mode, InputMode::Normal);
     assert!(app.running);
 }
@@ -177,9 +177,9 @@ async fn on_connected_activates_and_opens_browser() {
     assert_eq!(app.screen, Screen::Browser);
     assert!(app.is_connected("prod"));
     assert!(!app.is_connected("other"));
-    // The header dot — not a transient footer message — now signals success.
+    // The connection-health indicator (now in the Browser's Server band) signals
+    // success rather than a transient footer message.
     assert_eq!(app.conn_health(), ConnHealth::Connected);
-    assert_eq!(app.active_conn().unwrap().label(), "prod (db0)");
 }
 
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn conn_health_tracks_the_connection_lifecycle() {
 #[tokio::test]
 async fn conn_health_stays_connected_on_a_non_fatal_error() {
     // An error raised while a connection is live (e.g. a rejected command)
-    // must not flip the header dot away from green.
+    // must not flip the health indicator away from connected.
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.handle_event(AppEvent::ConnError {
@@ -292,7 +292,7 @@ async fn on_disconnected_removes_and_resets_to_connections() {
     });
     assert!(app.connections.is_empty());
     assert_eq!(app.active, None);
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     let status = app.status.as_ref().unwrap();
     assert!(status.is_error);
     assert!(status.message.contains("disconnected: bye"));
@@ -321,14 +321,14 @@ async fn on_disconnected_keeps_others_when_multiple() {
     assert_eq!(app.connections.len(), 1);
     assert_eq!(app.connections[0].name, "b");
     assert_eq!(app.active, Some(0));
-    assert_ne!(app.screen, Screen::Connections);
+    assert_ne!(app.screen, Screen::Home);
 }
 
 #[tokio::test]
 async fn connect_selected_focuses_existing_connection() {
     let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
     connect(&mut app, 1, "prod", 16).await;
-    app.screen = Screen::Connections;
+    app.screen = Screen::Home;
     app.profile_state.select(Some(0));
     app.apply(Action::Enter);
     assert_eq!(app.connections.len(), 1, "no duplicate connection opened");
@@ -810,18 +810,14 @@ fn esc_steps_back_then_quits_from_connections() {
 
     app.screen = Screen::Browser;
     app.handle_key(key(KeyCode::Esc));
-    assert_eq!(
-        app.screen,
-        Screen::Connections,
-        "Browser backs out to Connections"
-    );
+    assert_eq!(app.screen, Screen::Home, "Browser backs out to Connections");
     assert!(app.running);
 
     app.screen = Screen::Recordings;
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(
         app.screen,
-        Screen::Connections,
+        Screen::Home,
         "Recordings backs out to Connections"
     );
     assert!(app.running);
@@ -867,7 +863,7 @@ fn esc_dismisses_help_before_navigating() {
     );
     // With help closed, the next back steps out of the Browser as usual.
     app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
 }
 
 #[test]
@@ -887,11 +883,7 @@ fn help_toggles_and_dismisses() {
 fn goto_browser_requires_active_connection() {
     let (mut app, _rx) = test_app();
     app.apply(Action::GotoBrowser);
-    assert_eq!(
-        app.screen,
-        Screen::Connections,
-        "GotoBrowser needs a connection"
-    );
+    assert_eq!(app.screen, Screen::Home, "GotoBrowser needs a connection");
     // Tab still switches to the Recordings tab even with no connection.
     app.apply(Action::NextTab);
     assert_eq!(
@@ -907,12 +899,12 @@ async fn goto_screens_switch_with_active_connection() {
     connect(&mut app, 1, "prod", 16).await;
     // Connecting Redis lands on the Browser; Esc steps back to the home area.
     app.apply(Action::Back);
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     // Tab cycles the home tabs: Connections ↔ Recordings.
     app.apply(Action::NextTab);
     assert_eq!(app.screen, Screen::Recordings);
     app.apply(Action::NextTab);
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     // `b` jumps back into the browser of the last-viewed connection.
     app.apply(Action::GotoBrowser);
     assert_eq!(app.screen, Screen::Browser);
@@ -1162,7 +1154,7 @@ async fn change_db_clamps_to_capabilities() {
 async fn change_db_only_acts_in_browser() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 4).await;
-    app.screen = Screen::Connections;
+    app.screen = Screen::Home;
     app.change_db(1);
     assert_eq!(app.connections[0].db, 0, "no DB change outside the Browser");
 }
@@ -1658,7 +1650,7 @@ async fn tab_does_not_cycle_off_the_browser() {
     connect(&mut app, 1, "prod", 16).await;
     app.start_subscribe(SubSpec::Channel("a".into()));
     let before = app.connections[0].panel_tab;
-    app.screen = Screen::Connections;
+    app.screen = Screen::Home;
     app.apply(Action::NextTab);
     assert_eq!(
         app.connections[0].panel_tab, before,
@@ -2029,14 +2021,14 @@ fn tab_switches_between_the_connections_and_recordings_tabs() {
 
     let (mut app, _rx) = test_app();
     app.recordings_dir = dir.clone();
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
 
     // Tab moves to the Recordings tab and scans the directory; Shift-Tab back.
     app.apply(Action::NextTab);
     assert_eq!(app.screen, Screen::Recordings);
     assert_eq!(app.recordings.len(), 1, "entering the tab scans");
     app.apply(Action::PrevTab);
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2276,7 +2268,7 @@ async fn b_jumps_to_the_last_viewed_browser() {
     let two = app.active_conn().unwrap().id;
     // Step back to the home area, then `b` returns to the last-viewed browser.
     app.apply(Action::Back);
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     app.apply(Action::GotoBrowser);
     assert_eq!(app.screen, Screen::Browser);
     assert_eq!(
@@ -2451,7 +2443,7 @@ async fn leaving_browser_stops_focus_feeds() {
     focus_panel(&mut app, PanelTab::Monitor);
     assert!(app.active_conn().unwrap().monitor_sub().is_some());
     app.apply(Action::Back); // Browser -> Connections
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     assert!(
         app.active_conn().unwrap().monitor_sub().is_none(),
         "the MONITOR feed stops when the panel loses focus"
@@ -2500,10 +2492,9 @@ async fn amqp_connection_stays_on_connections() {
     // connection has no data screen yet — it stays on the Connections list.
     assert_eq!(
         app.screen,
-        Screen::Connections,
+        Screen::Home,
         "AMQP has no data screen, so it lands on Connections"
     );
-    assert_eq!(app.active_conn().unwrap().label(), "mq [amqp]");
 }
 
 #[tokio::test]
@@ -2511,13 +2502,9 @@ async fn amqp_capabilities_gate_redis_only_screens() {
     let (mut app, _rx) = test_app();
     connect_amqp(&mut app, 1, "mq").await;
     // The Browser (and the bottom panel it carries) is Redis-only.
-    app.screen = Screen::Connections;
+    app.screen = Screen::Home;
     app.apply(Action::GotoBrowser);
-    assert_eq!(
-        app.screen,
-        Screen::Connections,
-        "GotoBrowser must be blocked"
-    );
+    assert_eq!(app.screen, Screen::Home, "GotoBrowser must be blocked");
     assert!(app
         .status
         .as_ref()
@@ -2578,7 +2565,7 @@ async fn console_tab_drives_command_mode() {
 
     connect(&mut app, 1, "prod", 16).await;
     // Console-capable, but not on the Browser screen: still inert.
-    app.screen = Screen::Connections;
+    app.screen = Screen::Home;
     app.sync_panel_focus();
     assert_eq!(
         app.mode,
@@ -2626,7 +2613,7 @@ async fn console_typing_and_submit_records_command() {
     assert!(!app.bottom_focused(), "focus returned to the keys pane");
     assert_eq!(app.mode, InputMode::Normal);
     app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Connections);
+    assert_eq!(app.screen, Screen::Home);
     assert_eq!(app.mode, InputMode::Normal);
 }
 
@@ -2788,7 +2775,7 @@ async fn esc_steps_focus_back_to_keys_before_leaving() {
     assert!(!app.bottom_focused(), "Esc returns focus to the keys pane");
     assert_eq!(app.screen, Screen::Browser, "still on the Browser");
     app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Connections, "Esc from keys leaves");
+    assert_eq!(app.screen, Screen::Home, "Esc from keys leaves");
 }
 
 #[tokio::test]

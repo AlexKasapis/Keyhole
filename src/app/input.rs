@@ -23,7 +23,7 @@ impl App {
             Screen::Browser => self.handle_browser_key(key),
             // The home screens have a single navigable list; keys map straight to
             // actions (the bottom-panel focus model is Browser-only).
-            Screen::Connections | Screen::Recordings => {
+            Screen::Home | Screen::Recordings => {
                 if let Some(action) = action::map_key(&key) {
                     self.apply(action);
                 }
@@ -192,12 +192,12 @@ impl App {
                 if self.show_help {
                     self.show_help = false;
                     self.quit_armed = false;
-                } else if self.screen != Screen::Connections {
+                } else if self.screen != Screen::Home {
                     // Leaving the Browser unfocuses the panel: stop the
                     // focus-scoped feeds and drop back to normal navigation.
                     self.stop_focus_feeds();
                     self.mode = InputMode::Normal;
-                    self.screen = Screen::Connections;
+                    self.screen = Screen::Home;
                     self.quit_armed = false;
                 } else if self.quit_armed {
                     self.running = false;
@@ -214,17 +214,17 @@ impl App {
             Action::PageUp => match self.screen {
                 Screen::Browser => self.scroll_value(-VALUE_SCROLL_STEP),
                 Screen::Recordings => self.scroll_recording(-VALUE_SCROLL_STEP),
-                Screen::Connections => self.nav(-10),
+                Screen::Home => self.nav(-10),
             },
             Action::PageDown => match self.screen {
                 Screen::Browser => self.scroll_value(VALUE_SCROLL_STEP),
                 Screen::Recordings => self.scroll_recording(VALUE_SCROLL_STEP),
-                Screen::Connections => self.nav(10),
+                Screen::Home => self.nav(10),
             },
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
             Action::Enter => match self.screen {
-                Screen::Connections => self.connect_selected_profile(),
+                Screen::Home => self.connect_selected_profile(),
                 // On a group header, fold/unfold it; on a key, no-op.
                 Screen::Browser => self.toggle_selected_group(),
                 _ => {}
@@ -255,11 +255,11 @@ impl App {
             // home area they switch between the Connections and Recordings tabs.
             Action::PrevTab => match self.screen {
                 Screen::Browser => self.cycle_panel(-1),
-                Screen::Connections | Screen::Recordings => self.switch_home_tab(),
+                Screen::Home | Screen::Recordings => self.switch_home_tab(),
             },
             Action::NextTab => match self.screen {
                 Screen::Browser => self.cycle_panel(1),
-                Screen::Connections | Screen::Recordings => self.switch_home_tab(),
+                Screen::Home | Screen::Recordings => self.switch_home_tab(),
             },
             // `p` freezes/resumes the focused live feed's view.
             Action::PlayPause => self.toggle_play_pause(),
@@ -297,7 +297,7 @@ impl App {
             Action::Refresh => match self.screen {
                 Screen::Browser => self.toggle_recording(),
                 Screen::Recordings => self.start_rename(),
-                Screen::Connections => {}
+                Screen::Home => {}
             },
             Action::ToggleHelp => self.show_help = !self.show_help,
             // Flip the desired capture state and report it; the render loop
@@ -397,7 +397,7 @@ impl App {
 
     pub(super) fn nav(&mut self, delta: i32) {
         match self.screen {
-            Screen::Connections => {
+            Screen::Home => {
                 let len = self.profiles.len();
                 let next = move_selection(self.profile_state.selected(), len, delta);
                 self.profile_state.select(next);
@@ -431,7 +431,7 @@ impl App {
 
     pub(super) fn nav_edge(&mut self, top: bool) {
         match self.screen {
-            Screen::Connections => {
+            Screen::Home => {
                 let len = self.profiles.len();
                 if len > 0 {
                     self.profile_state
@@ -567,10 +567,10 @@ impl App {
     /// with Tab / Shift-Tab; entering Recordings (re)scans the directory.
     pub(super) fn switch_home_tab(&mut self) {
         match self.screen {
-            Screen::Connections => self.enter_recordings_tab(),
+            Screen::Home => self.enter_recordings_tab(),
             Screen::Recordings => {
                 self.leave_recordings_tab();
-                self.screen = Screen::Connections;
+                self.screen = Screen::Home;
             }
             Screen::Browser => {}
         }
