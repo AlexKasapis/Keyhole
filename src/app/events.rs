@@ -2,10 +2,32 @@
 //! the loop. Part of the `app` module (overview in `app.rs`); split out to
 //! keep that file a thin spine. Methods operate on `App`'s private state.
 
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::Receiver;
+
 use super::*;
 
 impl App {
     // -- event handling ------------------------------------------------------
+
+    /// Apply every event already queued in `rx` without blocking, folding a
+    /// burst into one update batch. The render loop calls this after a blocking
+    /// `recv` so a high-rate feed (e.g. redis `MONITOR`) collapses into a single
+    /// redraw instead of one redraw per event — the difference between a
+    /// responsive UI and one pinned re-rendering at the event rate. Returns once
+    /// the queue is momentarily empty, the channel has closed, or a handled
+    /// event requested quit (so the loop exits promptly rather than draining a
+    /// firehose first).
+    pub fn drain_events(&mut self, rx: &mut Receiver<AppEvent>) {
+        while self.running {
+            match rx.try_recv() {
+                Ok(event) => self.handle_event(event),
+                // Empty: caught up for now. Disconnected: every sender is gone,
+                // so the loop is about to end anyway. Either way, stop draining.
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+    }
 
     pub fn handle_event(&mut self, event: AppEvent) {
         match event {

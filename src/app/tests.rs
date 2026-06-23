@@ -1460,6 +1460,84 @@ async fn paused_feed_marks_active_but_drops_events() {
     assert_eq!(sub.events.len(), 1);
 }
 
+// -- event coalescing (render-loop drain) --------------------------------
+
+#[tokio::test]
+async fn drain_events_applies_a_whole_burst_in_one_pass() {
+    // The render loop drains all queued events before redrawing, so a
+    // high-rate feed folds into a single frame. Every queued event must land.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let sub_id = app.connections[0].subs[0].sub_id;
+
+    let (tx, mut rx) = mpsc::channel::<AppEvent>(64);
+    for i in 0..10 {
+        tx.try_send(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event(&format!("e{i}")),
+        })
+        .unwrap();
+    }
+    app.drain_events(&mut rx);
+
+    let sub = &app.connections[0].subs[0];
+    assert_eq!(sub.received, 10, "every queued event applied in one drain");
+    assert_eq!(sub.events.len(), 10);
+    assert!(
+        rx.try_recv().is_err(),
+        "the queue is fully drained, ready for the next blocking recv"
+    );
+}
+
+#[tokio::test]
+async fn drain_events_on_empty_queue_is_a_noop() {
+    // Draining an empty (but open) channel must return at once without blocking
+    // and without disturbing state.
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let (_tx, mut rx) = mpsc::channel::<AppEvent>(4);
+    app.drain_events(&mut rx);
+    assert_eq!(app.connections[0].subs[0].received, 0);
+    assert!(app.running);
+}
+
+#[tokio::test]
+async fn drain_events_stops_at_a_quit_event() {
+    // A quit handled mid-burst stops the drain immediately so the loop exits
+    // promptly instead of first chewing through a firehose backlog.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let sub_id = app.connections[0].subs[0].sub_id;
+
+    let (tx, mut rx) = mpsc::channel::<AppEvent>(8);
+    tx.try_send(AppEvent::Realtime {
+        id,
+        sub_id,
+        event: broker_event("before"),
+    })
+    .unwrap();
+    // Ctrl-c is the hard quit from any screen.
+    tx.try_send(AppEvent::Input(Event::Key(ctrl_ch('c'))))
+        .unwrap();
+    tx.try_send(AppEvent::Realtime {
+        id,
+        sub_id,
+        event: broker_event("after"),
+    })
+    .unwrap();
+    app.drain_events(&mut rx);
+
+    assert!(!app.running, "the quit event was handled");
+    assert_eq!(
+        app.connections[0].subs[0].received, 1,
+        "draining stops at the quit; the trailing event is left in the queue"
+    );
+}
+
 #[tokio::test]
 async fn sub_started_marks_active() {
     let (mut app, _rx) = test_app();

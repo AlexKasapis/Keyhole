@@ -16,7 +16,7 @@ mod tui;
 mod ui;
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
@@ -34,6 +34,15 @@ use crate::tui::Tui;
 const TICK_PERIOD: Duration = Duration::from_millis(250);
 /// Capacity of the app-event channel. Bounded so a firehose applies backpressure.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// Smallest gap between full repaints (~60 fps). Under a high-rate feed (e.g.
+/// redis `MONITOR`) the render loop coalesces every queued event into one frame
+/// and holds repaints to this budget, so a firehose can't drive the renderer at
+/// the event rate and starve input. It sits far below the cost of per-event
+/// redraws yet far above the 250 ms `TICK_PERIOD` that paces stats/animation, so
+/// nothing visible is lost. Sparse, interactive events never reach the cap (the
+/// previous frame is already older than the budget), so typing/navigation latency
+/// is unchanged.
+const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -125,14 +134,39 @@ async fn run(
     // only issue an escape sequence when the app's desired state changes.
     // `tui::init` enabled capture, so they start in agreement.
     let mut mouse_capture = true;
+
+    // Paint once up front so the UI is on screen before the first event.
+    terminal
+        .draw(|frame| ui::render(frame, &mut app))
+        .context("drawing frame")?;
+    let mut last_draw = Instant::now();
+
     while app.running {
-        terminal
-            .draw(|frame| ui::render(frame, &mut app))
-            .context("drawing frame")?;
+        // Block for the next event so the loop sleeps when idle — no busy-poll.
         match rx.recv().await {
             Some(event) => app.handle_event(event),
             None => break,
         }
+        // Fold every event already queued into this same batch: a burst of
+        // realtime events becomes one redraw, not one redraw per event.
+        app.drain_events(&mut rx);
+
+        // Cap the repaint rate. When the last frame was painted less than one
+        // budget ago (a burst), wait out the remainder — folding in further
+        // arrivals — instead of spinning the renderer at the event rate. Sparse
+        // events leave the previous frame already older than the budget, so this
+        // never delays an interactive redraw.
+        if app.running {
+            if let Some(wait) = frame_wait(last_draw.elapsed(), FRAME_BUDGET) {
+                tokio::time::sleep(wait).await;
+                app.drain_events(&mut rx);
+            }
+            terminal
+                .draw(|frame| ui::render(frame, &mut app))
+                .context("drawing frame")?;
+            last_draw = Instant::now();
+        }
+
         // Reconcile the terminal with the app's desired capture state. The app
         // never touches the terminal itself, which keeps it fully testable.
         if app.mouse_capture() != mouse_capture {
@@ -146,4 +180,38 @@ async fn run(
     tracker.close();
     tracker.wait().await;
     Ok(())
+}
+
+/// How long to wait before the next repaint is allowed, given how long ago the
+/// last frame was painted and the per-frame `budget`. `None` means "draw now":
+/// the budget is already spent, which is the common case for sparse interactive
+/// events, so they incur no added latency. `Some(d)` throttles a burst to the
+/// frame budget.
+fn frame_wait(since_last: Duration, budget: Duration) -> Option<Duration> {
+    budget.checked_sub(since_last).filter(|d| !d.is_zero())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_wait_returns_none_once_budget_is_spent() {
+        let budget = Duration::from_millis(16);
+        // Exactly at and past the budget: draw now, no wait.
+        assert_eq!(frame_wait(budget, budget), None);
+        assert_eq!(frame_wait(Duration::from_millis(50), budget), None);
+    }
+
+    #[test]
+    fn frame_wait_returns_remaining_budget_within_a_burst() {
+        let budget = Duration::from_millis(16);
+        // Painted 6 ms ago: wait the remaining 10 ms before the next frame.
+        assert_eq!(
+            frame_wait(Duration::from_millis(6), budget),
+            Some(Duration::from_millis(10))
+        );
+        // Painted "just now": wait nearly the whole budget.
+        assert_eq!(frame_wait(Duration::ZERO, budget), Some(budget));
+    }
 }
