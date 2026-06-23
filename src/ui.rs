@@ -369,18 +369,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_inactive_panel_tab_uses_the_brighter_inactive_style() {
-        // In the Browser's bottom panel the active tab (Console) keeps the only
-        // selection highlight; an inactive tab (Monitor) uses the brighter
-        // `tab_inactive` foreground — readable, and distinct from the dim style.
+    async fn browser_panel_tabs_keep_the_selected_tab_the_brightest() {
+        // In the Browser's bottom panel the selected tab (Console) carries the
+        // bright `tab_selected` foreground, so it stays the standout even though
+        // the inactive tabs (Monitor) now use the brighter `tab_inactive` colour.
+        // Both differ from the muted dim style. The panel is unfocused here (keys
+        // own focus), which is exactly when the selected tab must not wash out.
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
         let theme = app.theme;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
         let buf = frame.buffer;
-        let start = find_label(buf, "Monitor");
-        for i in start..start + "Monitor".len() {
+
+        let sel = find_label(buf, "Console");
+        for i in sel..sel + "Console".len() {
+            assert_eq!(
+                buf.content()[i].style().fg,
+                theme.tab_selected.fg,
+                "selected panel tab uses the bright tab_selected foreground"
+            );
+        }
+        let inactive = find_label(buf, "Monitor");
+        for i in inactive..inactive + "Monitor".len() {
             assert_eq!(
                 buf.content()[i].style().fg,
                 theme.tab_inactive.fg,
@@ -392,6 +403,9 @@ mod tests {
                 "and not the muted dim foreground"
             );
         }
+        // The selected tab's foreground is distinct from (brighter than) the
+        // inactive tabs', so it remains the most prominent label.
+        assert_ne!(theme.tab_selected.fg, theme.tab_inactive.fg);
     }
 
     #[test]

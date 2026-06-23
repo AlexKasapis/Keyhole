@@ -28,12 +28,12 @@ pub fn home(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // The home area is the primary surface, so it reads at full brightness: the
     // box and both tab labels use the main foreground (the dim border/labels made
     // it look perpetually unfocused). The active tab additionally carries the
-    // selection highlight so it still stands out.
+    // selection highlight (with a bright foreground) so it stays the standout.
     let tab = |label: &'static str, active: bool| {
         Span::styled(
             label,
             if active {
-                theme.selected
+                theme.tab_selected
             } else {
                 Style::default()
             },
@@ -660,11 +660,12 @@ fn tab_spans(
     active: bool,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
-    // The active tab is the only highlighted one (selection style); inactive tabs
-    // use the brighter `tab_inactive` foreground — readable yet clearly secondary
-    // — so they stay legible even while the whole panel is unfocused.
+    // The active tab is the standout (selection highlight + bright foreground);
+    // inactive tabs use the brighter `tab_inactive` foreground — readable yet
+    // clearly secondary — so all tabs stay legible even while the panel is
+    // unfocused, with the selected one still the most prominent.
     let base = if active {
-        theme.selected
+        theme.tab_selected
     } else {
         theme.tab_inactive
     };

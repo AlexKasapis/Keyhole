@@ -18,9 +18,15 @@ pub struct Theme {
     pub dim: Style,
     /// Foreground for an inactive (unselected) tab in a tab strip. Brighter than
     /// [`Self::dim`] so unselected tabs stay legible even while their panel is
-    /// unfocused, while the selected tab's highlight (see [`Self::selected`])
-    /// stays the standout.
+    /// unfocused, while the selected tab (see [`Self::tab_selected`]) stays the
+    /// standout.
     pub tab_inactive: Style,
+    /// The selected tab in a tab strip: the selection highlight plus an *explicit*
+    /// bright foreground, so the label stays the most prominent one beside the
+    /// (now brighter) inactive tabs and regardless of panel focus. Distinct from
+    /// [`Self::selected`], which omits a foreground so table rows keep their
+    /// per-span colours — a tab label has no such colours to preserve.
+    pub tab_selected: Style,
     pub selected: Style,
     pub header: Style,
     pub border: Style,
@@ -49,6 +55,13 @@ impl Theme {
             dim: Style::new().fg(Color::DarkGray),
             // A step brighter than `dim` (DarkGray) so unselected tabs read.
             tab_inactive: Style::new().fg(Color::Gray),
+            // The selection highlight plus a bright white foreground (brighter
+            // than the inactive Gray) so the selected tab is unmistakably the
+            // standout — the bare highlight let the inactive tabs out-shine it.
+            tab_selected: Style::new()
+                .bg(Color::Indexed(238))
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
             // A background highlight (not reverse video) so per-span foreground
             // colours — e.g. a connected row's green status dot — survive on the
             // selected row and read the same whether selected or not.
@@ -77,6 +90,13 @@ impl Theme {
             // Darker (higher contrast on a light bg) than `dim` so unselected
             // tabs read — the light-theme analogue of the dark palette's Gray.
             tab_inactive: Style::new().fg(Color::Indexed(238)),
+            // Selection highlight plus a near-black foreground so the selected tab
+            // is the most prominent label on a light background (the dark-theme
+            // bright-white analogue).
+            tab_selected: Style::new()
+                .bg(Color::Indexed(252))
+                .fg(Color::Indexed(232))
+                .add_modifier(Modifier::BOLD),
             // Background highlight (see the dark palette) so foreground colours
             // survive on the selected row.
             selected: Style::new()
@@ -105,8 +125,9 @@ impl Theme {
             heading: none.add_modifier(Modifier::BOLD),
             dim: none.add_modifier(Modifier::DIM),
             // No colour under NO_COLOR: an unselected tab is plain text, while the
-            // selected tab's reverse video (see `selected`) does the disambiguating.
+            // selected tab's reverse video (see `tab_selected`) does the disambiguating.
             tab_inactive: none,
+            tab_selected: none.add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),
             selected: none.add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),
             header: none.add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED)),
             border: none,
@@ -216,6 +237,23 @@ mod tests {
         // NO_COLOR: no foreground at all; the selected tab's reverse video carries
         // the distinction instead.
         assert_eq!(Theme::plain().tab_inactive.fg, None);
+    }
+
+    #[test]
+    fn selected_tab_sets_an_explicit_foreground_unlike_row_selection() {
+        // The tab selection sets its own bright foreground (brighter than the
+        // inactive-tab colour) so the selected tab stays the standout, whereas
+        // the row-selection style omits a foreground so a selected row keeps its
+        // per-span colours.
+        let dark = Theme::dark();
+        assert_eq!(dark.tab_selected.fg, Some(Color::White));
+        assert_ne!(dark.tab_selected.fg, dark.tab_inactive.fg);
+        assert_eq!(dark.selected.fg, None, "row selection keeps no foreground");
+        // Both tab styles still carry the selection background highlight.
+        assert_eq!(dark.tab_selected.bg, dark.selected.bg);
+        let light = Theme::light();
+        assert!(light.tab_selected.fg.is_some());
+        assert_ne!(light.tab_selected.fg, light.tab_inactive.fg);
     }
 
     #[test]
