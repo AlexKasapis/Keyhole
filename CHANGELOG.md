@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-23
+
 ### Removed
 
 - **Headless mode**: the `keyhole record` and `keyhole export` subcommands are
@@ -67,5 +69,6 @@ Initial release.
   `SHA256SUMS`. The install script additionally verifies the cosign signature
   when `cosign` is available. See the README "Verifying a download" section.
 
-[Unreleased]: https://github.com/AlexKasapis/Keyhole/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/AlexKasapis/Keyhole/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/AlexKasapis/Keyhole/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/AlexKasapis/Keyhole/releases/tag/v0.1.0
