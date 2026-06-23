@@ -1,5 +1,5 @@
 //! Small, self-contained UI animations driven by the tick clock (`App::now`,
-//! advanced every ~250 ms). Two effects live here:
+//! advanced every ~33 ms, i.e. ~30 fps). Two effects live here:
 //!
 //! * [`pulse`] — a gentle "breathing" brightness applied to a *connected*
 //!   status dot, so a live connection reads as alive. It runs off the wall
@@ -15,44 +15,46 @@ use time::OffsetDateTime;
 
 use crate::theme::Theme;
 
-/// One full breath of the connected-dot pulse, in milliseconds. At the ~250 ms
-/// tick this is ~8 frames per cycle — slow enough to read as breathing rather
-/// than blinking.
+/// One full breath of the connected-dot pulse, in milliseconds. At the ~33 ms
+/// tick this is ~60 frames per cycle — a smooth, 30 fps breath rather than the
+/// stepped one a coarser tick produced.
 const PULSE_PERIOD_MS: u64 = 2000;
 
+/// The dimmest the breath fades to, as a fraction of the dot's full-colour
+/// luminance. Kept well above zero so a connected dot never reads as off, only
+/// as resting.
+const PULSE_FLOOR: f32 = 0.4;
+
 /// Apply the connection "breathing" pulse to a status dot's base style. The
-/// brightness eases up and down over [`PULSE_PERIOD_MS`] via the DIM/BOLD
-/// modifiers, so the effect stays faithful to the terminal palette — it never
-/// rewrites the dot's colour — and remains visible under `NO_COLOR`.
+/// brightness eases continuously up and down over [`PULSE_PERIOD_MS`]: with a
+/// resolvable colour the dot's luminance is interpolated between [`PULSE_FLOOR`]
+/// and full, so the 30 fps breath is smooth; with no colour to scale (e.g.
+/// `NO_COLOR`) it falls back to stepped DIM/BOLD modifiers so the pulse still
+/// reads.
 pub(crate) fn pulse(base: Style, now: OffsetDateTime) -> Style {
-    match pulse_level(now) {
-        Brightness::Dim => base.add_modifier(Modifier::DIM),
-        Brightness::Normal => base,
-        Brightness::Bold => base.add_modifier(Modifier::BOLD),
+    let tri = pulse_phase(now);
+    match base.fg.and_then(resolve_rgb) {
+        // Breathe the dot's luminance between the floor and its full colour.
+        Some(fg) => base.fg(lerp_rgb(scale_rgb(fg, PULSE_FLOOR), fg, tri)),
+        // No resolvable colour: step DIM → normal → BOLD across the breath.
+        None if tri < 1.0 / 3.0 => base.add_modifier(Modifier::DIM),
+        None if tri < 2.0 / 3.0 => base,
+        None => base.add_modifier(Modifier::BOLD),
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Brightness {
-    Dim,
-    Normal,
-    Bold,
-}
-
-/// The pulse brightness for an instant: a triangle wave over the period, so the
-/// dot steps dim → normal → bold → normal → dim across each breath rather than
-/// snapping between the extremes.
-fn pulse_level(now: OffsetDateTime) -> Brightness {
+/// The breath's brightness for an instant, as a fraction in `[0, 1]`: a triangle
+/// wave over the period — 0 at the period's ends, 1 at its midpoint — so the dot
+/// eases dim → bright → dim across each breath rather than snapping.
+fn pulse_phase(now: OffsetDateTime) -> f32 {
     let phase = cycle_phase(now, PULSE_PERIOD_MS);
-    // Triangle: 0 at the period's ends, 1 at its midpoint.
-    let tri = 1.0 - (2.0 * phase - 1.0).abs();
-    if tri < 1.0 / 3.0 {
-        Brightness::Dim
-    } else if tri < 2.0 / 3.0 {
-        Brightness::Normal
-    } else {
-        Brightness::Bold
-    }
+    1.0 - (2.0 * phase - 1.0).abs()
+}
+
+/// Scale an RGB colour toward black by `factor` (the breath's dim trough).
+fn scale_rgb((r, g, b): (u8, u8, u8), factor: f32) -> (u8, u8, u8) {
+    let s = |c: u8| (c as f32 * factor).round().clamp(0.0, 255.0) as u8;
+    (s(r), s(g), s(b))
 }
 
 /// Position within a repeating cycle of `period_ms`, as a fraction in `[0, 1)`.
@@ -168,31 +170,46 @@ mod tests {
         OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000).unwrap()
     }
 
-    #[test]
-    fn pulse_breathes_dim_normal_bold_over_the_cycle() {
-        // Start of the cycle: darkest. Midpoint: brightest. Quarter points:
-        // the normal mid-step. This is the triangle the eye reads as breathing.
-        assert_eq!(pulse_level(at(0)), Brightness::Dim);
-        assert_eq!(pulse_level(at(1000)), Brightness::Bold);
-        assert_eq!(pulse_level(at(500)), Brightness::Normal);
-        assert_eq!(pulse_level(at(1500)), Brightness::Normal);
-        // It repeats every period, regardless of which cycle we're in.
-        assert_eq!(pulse_level(at(PULSE_PERIOD_MS as i128)), Brightness::Dim);
-        assert_eq!(
-            pulse_level(at(PULSE_PERIOD_MS as i128 + 1000)),
-            Brightness::Bold
-        );
+    /// The green channel of a pulsed style, asserting the dot stays pure green
+    /// (only its brightness moves).
+    fn pulse_green(now: OffsetDateTime) -> u8 {
+        match pulse(Style::new().fg(Color::Green), now).fg {
+            Some(Color::Rgb(r, g, b)) => {
+                assert_eq!((r, b), (0, 0), "the dot stays green; only brightness moves");
+                g
+            }
+            other => panic!("pulse should scale the dot's colour, got {other:?}"),
+        }
     }
 
     #[test]
-    fn pulse_layers_modifiers_without_touching_colour() {
-        // The pulse only ever adds DIM/BOLD; the dot keeps its palette colour so
-        // a themed terminal's green is preserved.
-        let base = Style::new().fg(Color::Green);
-        assert_eq!(pulse(base, at(0)).fg, Some(Color::Green));
+    fn pulse_breathes_brightness_over_the_cycle() {
+        // The breath eases the dot's luminance: darkest at the period's start,
+        // brightest one second in (the midpoint), and partway between at the
+        // quarter point — the triangle the eye reads as breathing.
+        let trough = pulse_green(at(0));
+        let quarter = pulse_green(at(500));
+        let peak = pulse_green(at(1000));
+        assert!(
+            trough < quarter && quarter < peak,
+            "dim → mid → bright across the breath ({trough} < {quarter} < {peak})"
+        );
+        // It repeats every period, regardless of which cycle we're in.
+        assert_eq!(pulse_green(at(PULSE_PERIOD_MS as i128)), trough);
+        assert_eq!(pulse_green(at(PULSE_PERIOD_MS as i128 + 1000)), peak);
+    }
+
+    #[test]
+    fn pulse_falls_back_to_modifiers_without_a_resolvable_colour() {
+        // With no colour to scale (a NO_COLOR / Reset foreground, or none at all)
+        // the breath steps DIM → normal → BOLD so it still reads.
+        let base = Style::new().fg(Color::Reset);
         assert!(pulse(base, at(0)).add_modifier.contains(Modifier::DIM));
         assert!(pulse(base, at(1000)).add_modifier.contains(Modifier::BOLD));
         assert_eq!(pulse(base, at(500)).add_modifier, Modifier::empty());
+        assert!(pulse(Style::new(), at(0))
+            .add_modifier
+            .contains(Modifier::DIM));
     }
 
     #[test]

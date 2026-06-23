@@ -265,7 +265,7 @@ mod tests {
     use crate::config::Config;
     use crate::event::AppEvent;
     use ratatui::backend::TestBackend;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use time::OffsetDateTime;
     use tokio::sync::mpsc::{self, Receiver};
@@ -462,31 +462,33 @@ mod tests {
         dot_style(frame.buffer)
     }
 
+    /// The green channel of the first filled dot rendered at `unix_secs` — the
+    /// breath modulates a connected (green) dot's luminance, so this tracks the
+    /// pulse brightness over time.
+    fn dot_green_at(app: &mut App, unix_secs: i64) -> u8 {
+        match dot_at(app, unix_secs).fg {
+            Some(ratatui::style::Color::Rgb(r, g, b)) => {
+                assert_eq!((r, b), (0, 0), "a connected dot stays green");
+                g
+            }
+            other => panic!("the connected dot should breathe in green, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn connected_server_dot_breathes_on_the_tick_clock() {
         // The connected dot in the Browser's Server band pulses: the 2s breath
-        // rides DIM/BOLD, with the epoch start at the dim trough and one second
-        // in at the bold peak. The colour is left untouched (still the success
-        // green) so the pulse is faithful to the palette.
+        // eases its green luminance up and down, dimmest at the epoch start (the
+        // trough) and brightest one second in (the peak). The hue is preserved —
+        // only the brightness moves — so the pulse stays faithful to the palette.
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        let theme = app.theme;
-
-        let trough = dot_at(&mut app, 0);
-        let peak = dot_at(&mut app, 1);
+        let trough = dot_green_at(&mut app, 0);
+        let peak = dot_green_at(&mut app, 1);
         assert!(
-            trough.add_modifier.contains(Modifier::DIM),
-            "the breath's trough dims the dot"
+            trough < peak,
+            "the breath brightens from trough to peak ({trough} < {peak})"
         );
-        assert!(
-            peak.add_modifier.contains(Modifier::BOLD),
-            "the breath's peak brightens the dot"
-        );
-        assert_eq!(
-            trough.fg, theme.success.fg,
-            "the pulse never rewrites the dot's colour"
-        );
-        assert_eq!(peak.fg, theme.success.fg);
     }
 
     #[tokio::test]
@@ -522,12 +524,8 @@ mod tests {
         // Home (Connections tab) is the default screen for this test app.
         assert!(app.is_connected("prod"), "the profile reads as connected");
         assert!(
-            dot_at(&mut app, 0).add_modifier.contains(Modifier::DIM),
-            "the connected row's dot dims at the breath's trough"
-        );
-        assert!(
-            dot_at(&mut app, 1).add_modifier.contains(Modifier::BOLD),
-            "and brightens at its peak"
+            dot_green_at(&mut app, 0) < dot_green_at(&mut app, 1),
+            "the connected row's dot brightens from the breath's trough to its peak"
         );
     }
 
@@ -1078,6 +1076,7 @@ mod tests {
         let handle = spawn_connection(
             ConnId(1),
             "it-render".into(),
+            format!("127.0.0.1:{port}"),
             Box::new(RedisConnection::new(profile, None, 64 * 1024)),
             tx,
             &tracker,
@@ -1201,9 +1200,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_shows_server_stats_band() {
-        // The Dashboard's server stats are now merged into the Browser as a
-        // compact band atop the keys/value panes (Redis has `can_dashboard`).
+    async fn browser_band_identifies_the_connection() {
+        // The Server band atop the Browser identifies the live connection — its
+        // name, address, and the db in view — while the statistics now live in
+        // the Server Details tab below (the default bottom-panel tab, drawn here
+        // too, so the moved figures are on screen).
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
         app.connections[0].dashboard.stats = Some(ServerStats {
@@ -1217,47 +1218,52 @@ mod tests {
             ..Default::default()
         });
         let text = screen_text(&mut app);
-        assert!(text.contains("Server"), "the stats band has a title");
-        assert!(text.contains("7.4.0"), "version in the metrics line");
-        assert!(text.contains("clients"), "client count in the metrics line");
-        // The gauges' name prefixes render.
-        assert!(text.contains("Mem"));
-        assert!(text.contains("Hit"));
-        // With a single DB, the key count shows once — the total, with no
-        // redundant `db0 N` breakdown repeating the same number.
-        assert!(text.contains("9 keys"), "total key count");
+        // Band: title, connection name, address, and the db in view.
+        assert!(text.contains("Server"), "the band has a title");
+        assert!(text.contains("prod"), "the connection name");
+        assert!(text.contains("127.0.0.1:6379"), "the address");
+        assert!(text.contains("db0"), "the db in view");
+        // Statistics moved down into the Server Details tab.
+        assert!(text.contains("7.4.0"), "version moved to Server Details");
         assert!(
-            !text.contains("db0"),
-            "no single-DB breakdown that doubles the count"
+            text.contains("clients"),
+            "client count moved to Server Details"
         );
+        assert!(text.contains("hit"), "hit ratio moved to Server Details");
     }
 
     #[tokio::test]
-    async fn browser_stats_band_breaks_keys_down_across_multiple_dbs() {
+    async fn server_details_breaks_keys_down_across_multiple_dbs() {
         // With keys in more than one DB the per-DB breakdown is informative (the
-        // total no longer equals any single DB), so it is shown alongside the total.
+        // total no longer equals any single DB), so the Server Details "Keys"
+        // graph caption shows it alongside the total.
         let (mut app, _rx) = app_with_connection().await;
-        app.screen = Screen::Browser;
+        app.screen = Screen::Browser; // Server Details is the default bottom tab.
+        app.connections[0].dashboard.keys_history.push_back(49);
         app.connections[0].dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
         });
         let text = screen_text(&mut app);
-        assert!(text.contains("49 keys"), "summed total across DBs");
-        assert!(
-            text.contains("db0"),
-            "per-DB breakdown shown for multiple DBs"
-        );
-        assert!(text.contains("db1"));
+        assert!(text.contains("49"), "the summed total across DBs");
+        assert!(text.contains("db0 42"), "per-DB breakdown for db0");
+        assert!(text.contains("db1 7"), "and db1");
     }
 
     #[tokio::test]
-    async fn browser_stats_band_shows_loading_without_stats() {
+    async fn browser_band_renders_without_stats() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        // No stats yet → the band shows a loading placeholder, not gauges.
-        assert!(screen_text(&mut app).contains("Loading server stats"));
+        // No stats yet: the band still identifies the connection (it no longer
+        // depends on stats), while the Server Details tab notes it is collecting.
+        let text = screen_text(&mut app);
+        assert!(text.contains("prod"), "the band identifies the connection");
+        assert!(text.contains("127.0.0.1:6379"), "with its address");
+        assert!(
+            text.contains("Collecting server details"),
+            "the details tab waits for the first stats reply"
+        );
     }
 
     #[tokio::test]
@@ -1828,7 +1834,13 @@ mod tests {
         };
         let mut stats = ServerStats {
             redis_version: Some("7.4.0".into()),
+            uptime_seconds: Some(3661),
+            connected_clients: Some(7),
             instantaneous_ops_per_sec: Some(31),
+            used_memory: Some(1024 * 1024),
+            maxmemory: Some(4 * 1024 * 1024),
+            keyspace_hits: Some(900),
+            keyspace_misses: Some(100),
             db_keys: vec![(0, 412)],
             clients: vec![
                 client(3, "web-1", "10.0.0.2:5051", 75, "get"),
@@ -1854,7 +1866,9 @@ mod tests {
             app.connections[0].dashboard.keys_history.push_back(keys);
         }
         app.connections[0].dashboard.stats = Some(stats);
-        // Server Details is the leftmost tab (index 0), selected by default.
-        insta::assert_snapshot!("browser_server_details", render_lines(&mut app, 90, 24));
+        // Server Details is the leftmost tab (index 0), selected by default. A
+        // taller frame gives the panel room for the metrics/facts lines, the two
+        // graphs, and the client list with their margins.
+        insta::assert_snapshot!("browser_server_details", render_lines(&mut app, 90, 30));
     }
 }

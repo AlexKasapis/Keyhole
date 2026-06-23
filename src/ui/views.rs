@@ -379,9 +379,9 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     }
 }
 
-/// Total height (rows) reserved for the Browser's server-stats band: a border
-/// (2) wrapping a gauges row (1) and a one-line metrics summary (1).
-const SERVER_BAND_HEIGHT: u16 = 4;
+/// Total height (rows) reserved for the Browser's Server band: a border (2)
+/// wrapping a single identity line (name · address · db).
+const SERVER_BAND_HEIGHT: u16 = 3;
 
 /// The Browser's tabbed bottom panel sizes to a third of the terminal height,
 /// clamped to `[PANEL_BAND_MIN, PANEL_BAND_MAX]`. The maximum is 1.5× the former
@@ -416,10 +416,12 @@ fn entry_label(key: &str) -> &str {
     key.rsplit_once(':').map_or(key, |(_, tail)| tail)
 }
 
-/// The server-stats band shown atop the Browser for brokers that expose server
-/// statistics (Redis) — the former standalone Dashboard, merged into the main
-/// panel. A compact, full-width strip: a Memory and a Hit-ratio gauge over a
-/// one-line metrics summary (version, uptime, clients, ops/sec, keys-per-DB).
+/// The Server band shown atop the Browser for brokers that expose server
+/// statistics (Redis). A compact strip identifying the live connection — its
+/// name, `host:port` address, and the database in view — with the connection
+/// health dot riding in the title beside the "Server" label. The fuller
+/// statistics (memory, hit ratio, version, uptime, clients, ops/sec, keys) live
+/// in the Server Details tab below.
 fn server_stats_band(
     frame: &mut Frame,
     conn: &Connection,
@@ -449,146 +451,21 @@ fn server_stats_band(
         .title(title)
         .border_style(theme.border)
         .padding(Padding::horizontal(1));
-
-    // Stats arrive asynchronously after connect; until the first reply, hold the
-    // band's height with a placeholder so the panes below don't jump.
-    let Some(stats) = conn.dashboard.stats.as_ref() else {
-        frame.render_widget(
-            Paragraph::new(Line::styled("Loading server stats…", theme.dim)).block(block),
-            area,
-        );
-        return;
-    };
-
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [gauges, metrics] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-    // Split the gauges row in half, but carve a two-column gutter out of the
-    // left half so the Memory meter's value doesn't butt against the Hit meter.
-    let [g_mem_full, g_hit] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(gauges);
-    let g_mem = Rect {
-        width: g_mem_full.width.saturating_sub(2),
-        ..g_mem_full
-    };
-
-    // Memory: used / maxmemory when a cap is set, else used / peak, else just used.
-    let used = stats.used_memory.unwrap_or(0);
-    let (mem_ratio, mem_label) = if let Some(max) = stats.maxmemory.filter(|m| *m > 0) {
-        (
-            used as f64 / max as f64,
-            format!("{} / {}", human_bytes(used), human_bytes(max)),
-        )
-    } else if let Some(peak) = stats.used_memory_peak.filter(|p| *p > 0) {
-        (
-            used as f64 / peak as f64,
-            format!("{} · peak {}", human_bytes(used), human_bytes(peak)),
-        )
-    } else {
-        (0.0, human_bytes(used))
-    };
-    meter(frame, g_mem, theme, "Memory", mem_ratio, &mem_label);
-
-    let hit = stats.hit_ratio().unwrap_or(0.0);
-    meter(
-        frame,
-        g_hit,
-        theme,
-        "Hit",
-        hit,
-        &format!("{:.1}%", hit * 100.0),
-    );
-
-    // Metrics line, balanced like the info bar: server health flush left, the
-    // keyspace totals pinned right. Values inherit the foreground while their
-    // units and separators stay dim, so the figures lead.
-    let sep = |spans: &mut Vec<Span<'static>>| {
-        if !spans.is_empty() {
-            spans.push(Span::styled(" · ", theme.dim));
-        }
-    };
-    let mut left: Vec<Span<'static>> = Vec::new();
-    if let Some(v) = &stats.redis_version {
-        left.push(Span::raw(format!("v{v}")));
-    }
-    if let Some(up) = stats.uptime_seconds {
-        sep(&mut left);
-        left.push(Span::styled("up ", theme.dim));
-        left.push(Span::raw(human_duration(up)));
-    }
-    if let Some(c) = stats.connected_clients {
-        sep(&mut left);
-        left.push(Span::raw(c.to_string()));
-        left.push(Span::styled(" clients", theme.dim));
-    }
-    if let Some(ops) = stats.instantaneous_ops_per_sec {
-        sep(&mut left);
-        left.push(Span::raw(ops.to_string()));
-        left.push(Span::styled(" ops/s", theme.dim));
-    }
-
-    // Right group: the total key count, then a per-DB breakdown (`· db0 42 · db1 7`)
-    // — but only when more than one DB holds keys. With a single DB the total *is*
-    // that DB's count, so appending `· db0 N` would just print the number twice.
-    let mut right: Vec<Span<'static>> = Vec::new();
-    if !stats.db_keys.is_empty() {
-        let total: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
-        right.push(Span::raw(total.to_string()));
-        right.push(Span::styled(" keys", theme.dim));
-        if stats.db_keys.len() > 1 {
-            for (db, n) in &stats.db_keys {
-                right.push(Span::styled(" · ", theme.dim));
-                right.push(Span::styled(format!("db{db} "), theme.dim));
-                right.push(Span::raw(n.to_string()));
-            }
-        }
-    }
-    let right = Line::from(right);
-    let [m_left, m_right] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(line_width(&right) as u16),
-    ])
-    .areas(metrics);
-    frame.render_widget(Paragraph::new(Line::from(left)), m_left);
-    frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), m_right);
-}
-
-/// A one-line meter, sized to `width` columns: a dim `label`, a bracketed bar
-/// (the filled portion in the gauge style, the remainder a faint track), then
-/// the `value` flush to the right edge. Used by the Browser's server-stats
-/// band, where reading the value beside the bar is far clearer than a
-/// [`ratatui::widgets::Gauge`]'s percentage centred over a partial fill.
-fn meter_line(theme: &Theme, label: &str, ratio: f64, value: &str, width: usize) -> Line<'static> {
-    // Reserve the chrome (label + a space, the two bracket caps, a space, and
-    // the value), then give the rest to the bar. Labels and values here are
-    // ASCII/short, so byte length tracks display width closely enough.
-    let value_w = UnicodeWidthStr::width(value);
-    let chrome = label.len() + 1 + 2 + 1 + value_w;
-    let bar = width.saturating_sub(chrome);
-    let filled = (gauge_ratio(ratio) * bar as f64).round() as usize;
-
-    let mut spans = vec![
-        Span::styled(format!("{label} "), theme.dim),
-        Span::styled("▕", theme.dim),
-    ];
-    if filled > 0 {
-        spans.push(Span::styled("█".repeat(filled), theme.gauge));
-    }
-    if bar > filled {
-        spans.push(Span::styled("░".repeat(bar - filled), theme.dim));
-    }
-    spans.push(Span::styled("▏", theme.dim));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(value.to_string(), theme.accent));
-    Line::from(spans)
-}
-
-/// Render a [`meter_line`] into `area`.
-fn meter(frame: &mut Frame, area: Rect, theme: &Theme, label: &str, ratio: f64, value: &str) {
-    let line = meter_line(theme, label, ratio, value, area.width as usize);
-    frame.render_widget(Paragraph::new(line), area);
+    // One identifying line: the connection name leads, then its address and the
+    // database currently in view. Separators and the `db` label stay dim so the
+    // name and figures read.
+    let line = Line::from(vec![
+        Span::styled(conn.name.clone(), theme.heading),
+        Span::styled(" · ", theme.dim),
+        Span::raw(conn.handle.addr.clone()),
+        Span::styled(" · ", theme.dim),
+        Span::styled("db", theme.dim),
+        Span::raw(conn.db.to_string()),
+    ]);
+    frame.render_widget(Paragraph::new(line), inner);
 }
 
 /// The Browser's tabbed bottom panel: one bordered box whose *title line is the
@@ -1090,10 +967,12 @@ fn console_content(
     frame.render_widget(Paragraph::new(prompt), prompt_area);
 }
 
-/// The Server Details tab's content: a one-line strip of server facts the
-/// Server band doesn't already carry, two time-series graphs (ops/sec and total
-/// keys) on the left, and the connected-client list on the right. The leftmost
-/// bottom-panel tab; only ever drawn for a broker with a dashboard (Redis).
+/// The Server Details tab's content: the server statistics moved down from the
+/// Server band (version, uptime, clients, memory, hit) on one line, the
+/// deployment facts on the next, then — after a margin — two time-series graphs
+/// (ops/sec and total keys) on the left and the connected-client list on the
+/// right. The leftmost bottom-panel tab; only ever drawn for a broker with a
+/// dashboard (Redis).
 fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
     let Some(stats) = conn.dashboard.stats.as_ref() else {
         frame.render_widget(
@@ -1103,14 +982,38 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
         return;
     };
 
-    // A one-line header of facts, then the body: graphs left, clients right.
-    let [facts_area, body_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    // A one-column inset on each side keeps the content off the panel border, so
+    // the tab reads with a little margin rather than text flush to the frame.
+    let area = Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        ..area
+    };
+
+    // Two fact lines (server metrics, then deployment facts), a blank spacer for
+    // margin, then the body: graphs left, clients right.
+    let [metrics_area, facts_area, _gap, body_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(server_metrics_line(stats, theme)),
+        metrics_area,
+    );
     frame.render_widget(Paragraph::new(server_facts_line(stats, theme)), facts_area);
 
-    let [graphs_area, clients_area] =
+    // Carve a two-column gutter out of the graphs column so it doesn't butt
+    // against the client list.
+    let [graphs_full, clients_area] =
         Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
             .areas(body_area);
+    let graphs_area = Rect {
+        width: graphs_full.width.saturating_sub(2),
+        ..graphs_full
+    };
     server_graphs(frame, conn, theme, graphs_area);
     server_clients(
         frame,
@@ -1121,8 +1024,55 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
     );
 }
 
-/// A dim one-liner of server facts the Server band up top doesn't already show:
-/// the deployment mode and role, then the lifetime command / expiry / eviction
+/// The server statistics moved down from the Server band: version, uptime,
+/// client count, memory use, and cache hit ratio. Values lead in the foreground;
+/// their units and labels stay dim. Metrics absent from `INFO` are omitted.
+fn server_metrics_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let sep = |spans: &mut Vec<Span<'static>>| {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", theme.dim));
+        }
+    };
+    if let Some(v) = &stats.redis_version {
+        spans.push(Span::raw(format!("v{v}")));
+    }
+    if let Some(up) = stats.uptime_seconds {
+        sep(&mut spans);
+        spans.push(Span::styled("up ", theme.dim));
+        spans.push(Span::raw(human_duration(up)));
+    }
+    if let Some(c) = stats.connected_clients {
+        sep(&mut spans);
+        spans.push(Span::raw(c.to_string()));
+        spans.push(Span::styled(" clients", theme.dim));
+    }
+    // Memory: used / maxmemory when a cap is set, else used · peak, else just used.
+    if let Some(used) = stats.used_memory {
+        sep(&mut spans);
+        let value = if let Some(max) = stats.maxmemory.filter(|m| *m > 0) {
+            format!("{} / {}", human_bytes(used), human_bytes(max))
+        } else if let Some(peak) = stats.used_memory_peak.filter(|p| *p > 0) {
+            format!("{} · peak {}", human_bytes(used), human_bytes(peak))
+        } else {
+            human_bytes(used)
+        };
+        spans.push(Span::styled("mem ", theme.dim));
+        spans.push(Span::raw(value));
+    }
+    if let Some(hit) = stats.hit_ratio() {
+        sep(&mut spans);
+        spans.push(Span::styled("hit ", theme.dim));
+        spans.push(Span::raw(format!("{:.1}%", hit * 100.0)));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled("server metrics", theme.dim));
+    }
+    Line::from(spans)
+}
+
+/// A dim one-liner of server facts the metrics line above doesn't carry: the
+/// deployment mode and role, then the lifetime command / expiry / eviction
 /// counters. Values lead in the foreground; their units stay dim.
 fn server_facts_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
     let raw = |k: &str| stats.raw.get(k).cloned();
@@ -1159,8 +1109,14 @@ fn server_facts_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
 /// The left column of the Server Details tab: an ops/sec graph stacked over a
 /// total-keys graph, each captioned with its current value.
 fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
-    let [ops_area, keys_area] =
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+    // A blank row between the two graphs keeps their sparklines from running
+    // together — the margin asked for in the Details tab.
+    let [ops_area, _gap, keys_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
 
     let ops_now = conn
         .dashboard
@@ -1184,14 +1140,25 @@ fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect
         format!("{ops_now} · peak {ops_peak}"),
     );
 
+    // Total keys, plus a per-DB breakdown (`· db0 42 · db1 7`) when more than one
+    // DB holds keys — with a single DB the total *is* that DB's count, so the
+    // breakdown would just repeat the number.
     let keys_now = conn.dashboard.keys_history.back().copied().unwrap_or(0);
+    let mut keys_value = keys_now.to_string();
+    if let Some(stats) = conn.dashboard.stats.as_ref() {
+        if stats.db_keys.len() > 1 {
+            for (db, n) in &stats.db_keys {
+                keys_value.push_str(&format!(" · db{db} {n}"));
+            }
+        }
+    }
     server_graph(
         frame,
         theme,
         keys_area,
         "Keys",
         &conn.dashboard.keys_history,
-        keys_now.to_string(),
+        keys_value,
     );
 }
 
@@ -1718,17 +1685,6 @@ fn line_width(line: &Line) -> usize {
         .sum()
 }
 
-/// Clamp a gauge ratio into `[0, 1]`, mapping non-finite values (NaN/∞) to 0.
-/// `f64::clamp` passes NaN through unchanged, which would trip `Gauge::ratio`'s
-/// internal `0.0..=1.0` assertion and panic the render.
-fn gauge_ratio(r: f64) -> f64 {
-    if r.is_finite() {
-        r.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 fn human_bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = n as f64;
@@ -1919,47 +1875,6 @@ mod tests {
         ]);
         assert_eq!(line_width(&line), 5);
         assert_eq!(line_width(&Line::from("")), 0);
-    }
-
-    #[test]
-    fn meter_line_fills_proportionally_with_brackets_and_value() {
-        let theme = Theme::dark();
-        // Count the filled cells the meter draws at a given ratio and width.
-        let filled = |ratio: f64, width: usize| -> usize {
-            meter_line(&theme, "Mem", ratio, "50%", width)
-                .spans
-                .iter()
-                .map(|s| s.content.matches('█').count())
-                .sum()
-        };
-        // chrome = "Mem" (3) + space + brackets (2) + space + "50%" (3) = 10,
-        // so a width-30 meter has a 20-cell bar. Half full ⇒ 10 filled cells.
-        assert_eq!(filled(0.5, 30), 10);
-        assert_eq!(filled(0.0, 30), 0, "empty");
-        assert_eq!(filled(1.0, 30), 20, "full bar uses every cell");
-        // Out-of-range / non-finite ratios are clamped, never panicking.
-        assert_eq!(filled(2.0, 30), 20, "over 100% clamps to full");
-        assert_eq!(filled(f64::NAN, 30), 0, "NaN clamps to empty");
-
-        // The composed line carries the label, both bracket caps, and the value.
-        let text = line_text(&meter_line(&theme, "Hit", 0.9, "90.0%", 40));
-        assert!(text.contains("Hit"), "label present: {text:?}");
-        assert!(
-            text.contains('▕') && text.contains('▏'),
-            "bracket caps: {text:?}"
-        );
-        assert!(text.contains("90.0%"), "value present: {text:?}");
-    }
-
-    #[test]
-    fn meter_line_degrades_when_too_narrow_for_a_bar() {
-        let theme = Theme::dark();
-        // Narrower than the chrome ⇒ no bar cells, but it must not panic and
-        // still carries the value.
-        let line = meter_line(&theme, "Memory", 0.5, "1.0 / 4.0 MiB", 4);
-        let text = line_text(&line);
-        assert_eq!(text.matches('█').count(), 0, "no room for a bar");
-        assert!(text.contains("1.0 / 4.0 MiB"));
     }
 
     #[test]

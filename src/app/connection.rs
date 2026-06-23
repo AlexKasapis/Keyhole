@@ -39,6 +39,7 @@ impl App {
         let preview = self.preview_bytes;
         let recordings_dir = self.recordings_dir.clone();
         let name = profile.name().to_string();
+        let addr = profile.address();
         self.health = ConnHealth::Connecting;
         self.set_status(format!("Connecting to {name}…"), false);
 
@@ -77,6 +78,7 @@ impl App {
             match spawn_connection(
                 id,
                 name,
+                addr,
                 conn,
                 events.clone(),
                 &tracker,

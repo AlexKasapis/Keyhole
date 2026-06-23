@@ -63,6 +63,8 @@ pub enum ConnCommand {
 pub struct ConnHandle {
     pub id: ConnId,
     pub name: String,
+    /// The broker's `host:port` endpoint, shown in the Browser's Server band.
+    pub addr: String,
     pub caps: Capabilities,
     cmd_tx: Sender<ConnCommand>,
     cancel: CancellationToken,
@@ -93,9 +95,11 @@ struct SubEntry {
 
 /// Connect, then spawn the actor loop. Returns the handle once connected so the
 /// caller learns capabilities (and connection errors) synchronously.
+#[allow(clippy::too_many_arguments)]
 pub async fn spawn_connection(
     id: ConnId,
     name: String,
+    addr: String,
     mut conn: Box<dyn BrokerConnection>,
     events: Sender<AppEvent>,
     tracker: &TaskTracker,
@@ -149,6 +153,7 @@ pub async fn spawn_connection(
     Ok(ConnHandle {
         id,
         name,
+        addr,
         caps,
         cmd_tx,
         cancel,
@@ -580,6 +585,7 @@ pub(crate) mod mock {
         spawn_connection(
             ConnId(id),
             name.to_string(),
+            "127.0.0.1:6379".to_string(),
             MockBroker::new(databases).boxed(),
             tx,
             &tracker,
@@ -602,6 +608,7 @@ pub(crate) mod mock {
         spawn_connection(
             ConnId(id),
             name.to_string(),
+            "127.0.0.1:5672".to_string(),
             mock.boxed(),
             tx,
             &tracker,
@@ -624,6 +631,7 @@ pub(crate) mod mock {
         spawn_connection(
             ConnId(id),
             name.to_string(),
+            "127.0.0.1:5672".to_string(),
             mock.boxed(),
             tx,
             &tracker,
@@ -683,6 +691,7 @@ mod tests {
         let handle = spawn_connection(
             ConnId(1),
             "c".into(),
+            "127.0.0.1:6379".into(),
             mock.boxed(),
             tx,
             &tracker,
@@ -732,6 +741,7 @@ mod tests {
         let result = spawn_connection(
             ConnId(1),
             "c".into(),
+            "127.0.0.1:6379".into(),
             mock.boxed(),
             tx,
             &tracker,

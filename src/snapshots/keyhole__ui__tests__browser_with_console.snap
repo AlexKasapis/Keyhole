@@ -3,8 +3,7 @@ source: src/ui.rs
 expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
-│ Loading server stats…                                                                  │
-│                                                                                        │
+│ prod · 127.0.0.1:6379 · db0                                                            │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ─────────────────────────────────────┐┌ Value ────────────────────────────────────┐
 │  Key             Type    TTL       Size   ││Select a key to inspect its value.         │
@@ -12,6 +11,7 @@ expression: "render_lines(&mut app, 90, 24)"
 │    abc           hash    2m 0s     128 B  ││                                           │
 │  ▾ user (1)                               ││                                           │
 │    1             string  2m 0s     128 B  ││                                           │
+│                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │

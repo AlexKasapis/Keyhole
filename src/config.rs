@@ -96,6 +96,16 @@ impl ConnectionConfig {
         }
     }
 
+    /// The bare `host:port` endpoint, without the db/vhost/tls trimmings — shown
+    /// in the Browser's Server band (the db rides there as its own field).
+    pub fn address(&self) -> String {
+        match self {
+            ConnectionConfig::Redis(p) => format!("{}:{}", p.host, p.port),
+            ConnectionConfig::Amqp(p) => format!("{}:{}", p.host, p.port),
+            ConnectionConfig::Rabbitmq(p) => format!("{}:{}", p.host, p.port),
+        }
+    }
+
     /// A `host:port[/db|/vhost][ tls]` summary for the connections list.
     pub fn endpoint(&self) -> String {
         match self {

@@ -46,9 +46,11 @@ use crate::theme::Theme;
 
 /// Nominal period of one UI tick, mirroring `crate::TICK_PERIOD`. Used to turn
 /// a configured refresh interval (milliseconds) into a tick count.
-const TICK_PERIOD_MS: u64 = 250;
-/// How many ticks (~250ms each) between automatic dashboard stat refreshes.
-const STATS_REFRESH_TICKS: u32 = 8;
+const TICK_PERIOD_MS: u64 = 33;
+/// How many ticks between automatic dashboard stat refreshes — derived to hold a
+/// ~2s cadence regardless of the (animation-paced) tick period, so the faster
+/// tick doesn't multiply how often the broker is polled for `INFO`.
+const STATS_REFRESH_TICKS: u32 = (2_000 / TICK_PERIOD_MS) as u32;
 /// How long a transient status-bar notification stays before it self-dismisses.
 /// Confirmation prompts (e.g. "Press d again …") are exempt — they live and die
 /// with their key chord, not this timer (see [`Status`] / [`StatusKind`]).

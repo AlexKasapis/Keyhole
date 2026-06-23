@@ -30,8 +30,12 @@ use crate::config::Config;
 use crate::event::AppEvent;
 use crate::tui::Tui;
 
-/// How often the UI ticks (clock, stat refresh, animations).
-const TICK_PERIOD: Duration = Duration::from_millis(250);
+/// How often the UI ticks. This also paces redraws, so it sets the animation
+/// frame rate: ~33 ms ≈ 30 fps, smooth enough for the breathing connection dot.
+/// Data refreshes (stats, key-browser auto-scan) ride this tick but are gated to
+/// their own slower cadences by tick counts, so the faster tick doesn't hammer
+/// the broker. Mirror any change in [`crate::app`]'s `TICK_PERIOD_MS`.
+const TICK_PERIOD: Duration = Duration::from_millis(33);
 /// Capacity of the app-event channel. Bounded so a firehose applies backpressure.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// Smallest gap between full repaints (~60 fps). Under a high-rate feed (e.g.

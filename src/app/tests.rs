@@ -516,14 +516,10 @@ async fn first_scan_starts_with_groups_collapsed() {
 #[test]
 fn refresh_ticks_rounds_up_and_disables_on_zero() {
     assert_eq!(refresh_ticks(0), 0, "zero disables auto-refresh");
-    assert_eq!(refresh_ticks(250), 1, "one tick");
-    assert_eq!(refresh_ticks(5000), 20, "default 5s at 250ms ticks");
-    assert_eq!(
-        refresh_ticks(100),
-        1,
-        "a sub-tick interval still fires once"
-    );
-    assert_eq!(refresh_ticks(600), 3, "rounds up to whole ticks");
+    assert_eq!(refresh_ticks(33), 1, "one tick");
+    assert_eq!(refresh_ticks(5000), 152, "default 5s at ~33ms ticks");
+    assert_eq!(refresh_ticks(10), 1, "a sub-tick interval still fires once");
+    assert_eq!(refresh_ticks(100), 4, "rounds up to whole ticks");
 }
 
 #[tokio::test]
