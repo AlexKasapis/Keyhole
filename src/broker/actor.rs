@@ -28,6 +28,12 @@ use crate::recording::{RecordSink, Recorder, RecordingStatus, FLUSH_EVERY};
 
 /// How often a recording is flushed regardless of volume.
 const FLUSH_INTERVAL: Duration = Duration::from_secs(2);
+/// How often a recording reports its progress (record/byte counters) to the UI
+/// while events stream. Time-based rather than every-N-records so the displayed
+/// count tracks the real total smoothly and shows exact figures, instead of
+/// jumping in coarse multiples of [`FLUSH_EVERY`] (which a high-rate feed makes
+/// very visible). One small `try_send` ~10×/s per recording tail is negligible.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A command sent from the UI to a connection actor.
 #[derive(Debug)]
@@ -239,6 +245,8 @@ async fn run_tail(
     let mut recorder: Option<(Recorder<RecordSink>, PathBuf)> = None;
     let mut flush = tokio::time::interval(FLUSH_INTERVAL);
     flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut progress = tokio::time::interval(PROGRESS_INTERVAL);
+    progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     if *record_rx.borrow_and_update() {
         recorder = open_recorder(&p).await;
@@ -263,21 +271,31 @@ async fn run_tail(
                     let _ = rec.flush();
                 }
             }
+            // Report the live record/byte counters on a timer so the UI's "REC"
+            // figure tracks the real total smoothly, rather than only updating
+            // (in jumps of FLUSH_EVERY) when a flush happens to land.
+            _ = progress.tick() => {
+                if let Some((rec, _)) = &recorder {
+                    let _ = p.events.try_send(AppEvent::RecordingUpdate {
+                        id: p.id,
+                        sub_id: p.sub_id,
+                        status: RecordingStatus::Progress {
+                            records: rec.records(),
+                            bytes: rec.bytes(),
+                        },
+                    });
+                }
+            }
             item = stream.next() => match item {
                 Some(ev) => {
                     if let Some((rec, _)) = &mut recorder {
                         match rec.record(&ev) {
                             Ok(()) => {
+                                // Flush periodically for durability; progress is
+                                // reported on its own timer (above), decoupled
+                                // from the flush cadence.
                                 if rec.records().is_multiple_of(FLUSH_EVERY) {
                                     let _ = rec.flush();
-                                    let _ = p.events.try_send(AppEvent::RecordingUpdate {
-                                        id: p.id,
-                                        sub_id: p.sub_id,
-                                        status: RecordingStatus::Progress {
-                                            records: rec.records(),
-                                            bytes: rec.bytes(),
-                                        },
-                                    });
                                 }
                             }
                             Err(e) => {
@@ -972,6 +990,41 @@ mod tests {
         let content = std::fs::read_to_string(&files[0]).unwrap();
         assert_eq!(content.lines().count(), 3, "one JSONL line per event");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn recording_progress_reports_the_exact_running_count() {
+        // Progress is emitted on a timer carrying the live count, not only at
+        // flush boundaries — so the UI's REC figure tracks the real total and
+        // shows exact figures (e.g. 7), never just coarse multiples of
+        // FLUSH_EVERY. Record 7 events (not a multiple of FLUSH_EVERY) over an
+        // open stream and assert a Progress with that exact count arrives.
+        let dir = temp_dir("progress");
+        let (tx_ev, rx_ev) = mpsc::channel::<BrokerEvent>(64);
+        let mut mock = MockBroker::new(1);
+        mock.sub = Some(SubBehavior::Channel(rx_ev));
+        let (handle, mut rx, _t, _c) = spawn(mock, dir.clone()).await;
+        handle.send(ConnCommand::Subscribe {
+            sub_id: 1,
+            spec: SubSpec::Channel("c".into()),
+            record: true,
+        });
+        for _ in 0..7 {
+            tx_ev.send(ev("c", "x")).await.unwrap();
+        }
+        assert!(
+            wait_for(&mut rx, |e| matches!(
+                e,
+                AppEvent::RecordingUpdate {
+                    status: RecordingStatus::Progress { records: 7, .. },
+                    ..
+                }
+            ))
+            .await,
+            "progress should report the exact count (7), not a multiple of {FLUSH_EVERY}"
+        );
+        drop(tx_ev); // end the stream
         let _ = std::fs::remove_dir_all(&dir);
     }
 

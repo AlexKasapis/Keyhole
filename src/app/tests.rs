@@ -1534,6 +1534,59 @@ async fn drain_events_stops_at_a_quit_event() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drain_events_bounds_the_batch_under_a_sustained_flood() {
+    // A drain that ran "until empty" would never return while a producer keeps
+    // the channel full — the render loop would freeze for the whole burst, then
+    // lurch forward in one jump (the 1–2s "rough" updates). Pin the fix: the
+    // batch is bounded to the backlog present on entry (at most the channel
+    // capacity), so drain returns even under a flood that never stops.
+    const CAP: usize = 256;
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let sub_id = app.connections[0].subs[0].sub_id;
+
+    let (tx, mut rx) = mpsc::channel::<AppEvent>(CAP);
+    // Fill the channel before draining, so the entry snapshot is the full CAP.
+    for _ in 0..CAP {
+        tx.try_send(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event("x"),
+        })
+        .unwrap();
+    }
+    // A producer that keeps topping the channel up from another worker thread,
+    // racing the drain. Finite (so a regression fails instead of hanging) but
+    // far larger than CAP.
+    let flood = tokio::spawn(async move {
+        for _ in 0..(CAP * 50) {
+            if tx
+                .send(AppEvent::Realtime {
+                    id,
+                    sub_id,
+                    event: broker_event("x"),
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    app.drain_events(&mut rx);
+    flood.abort();
+
+    // Bounded to the entry backlog: at most CAP, never the whole flood.
+    assert!(
+        app.connections[0].subs[0].received <= CAP as u64,
+        "drain must bound the batch to the entry backlog ({CAP}), got {}",
+        app.connections[0].subs[0].received
+    );
+}
+
 #[tokio::test]
 async fn sub_started_marks_active() {
     let (mut app, _rx) = test_app();

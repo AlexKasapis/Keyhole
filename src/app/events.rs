@@ -10,22 +10,33 @@ use super::*;
 impl App {
     // -- event handling ------------------------------------------------------
 
-    /// Apply every event already queued in `rx` without blocking, folding a
-    /// burst into one update batch. The render loop calls this after a blocking
-    /// `recv` so a high-rate feed (e.g. redis `MONITOR`) collapses into a single
-    /// redraw instead of one redraw per event — the difference between a
-    /// responsive UI and one pinned re-rendering at the event rate. Returns once
-    /// the queue is momentarily empty, the channel has closed, or a handled
-    /// event requested quit (so the loop exits promptly rather than draining a
-    /// firehose first).
+    /// Apply the events already queued in `rx` without blocking, folding a burst
+    /// into one update batch. The render loop calls this after a blocking `recv`
+    /// so a high-rate feed (e.g. redis `MONITOR`) collapses into a single redraw
+    /// instead of one redraw per event — the difference between a responsive UI
+    /// and one pinned re-rendering at the event rate.
+    ///
+    /// Crucially, it drains only the backlog present *on entry* (a snapshot of
+    /// [`Receiver::len`]), not "until empty": under a sustained firehose the
+    /// producer(s) can refill the channel as fast as we drain it, so a
+    /// drain-until-empty loop would spin for the entire burst and never return to
+    /// draw — the feed visibly freezes for seconds, then lurches forward in one
+    /// giant jump. Bounding the batch to the entry backlog guarantees the loop
+    /// gets to repaint at its frame cadence; events that arrive mid-drain are
+    /// picked up on the next pass. Returns early if a handled event requested
+    /// quit, so the loop exits promptly rather than finishing a firehose first.
     pub fn drain_events(&mut self, rx: &mut Receiver<AppEvent>) {
-        while self.running {
+        // A snapshot, so we don't chase a moving target. `len()` never exceeds
+        // the channel capacity, so this batch is always bounded.
+        let mut budget = rx.len();
+        while self.running && budget > 0 {
             match rx.try_recv() {
                 Ok(event) => self.handle_event(event),
-                // Empty: caught up for now. Disconnected: every sender is gone,
-                // so the loop is about to end anyway. Either way, stop draining.
+                // Empty: caught up early. Disconnected: every sender is gone, so
+                // the loop is about to end anyway. Either way, stop draining.
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
+            budget -= 1;
         }
     }
 
