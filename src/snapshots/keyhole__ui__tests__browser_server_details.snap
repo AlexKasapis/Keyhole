@@ -3,26 +3,26 @@ source: src/ui.rs
 expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
-│ Loading server stats…                                                                  │
-│                                                                                        │
+│ Memory ▕░░░░░░░░░░░░░░░░░░░░░░░░░░░░▏ 0 B  Hit ▕░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░▏ 0.0% │
+│ v7.4.0 · 31 ops/s                                                             412 keys │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ─────────────────────────────────────┐┌ Value ────────────────────────────────────┐
 │  Key             Type    TTL       Size   ││Select a key to inspect its value.         │
-│▶ ▾ session (1)                            ││                                           │
-│    abc           hash    2m 0s     128 B  ││                                           │
-│  ▾ user (1)                               ││                                           │
+│▶ ▾ user (1)                               ││                                           │
 │    1             string  2m 0s     128 B  ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
-│uptime_in_seconds:42                                                                    │
-│                                                                                        │
-│❯ SET k v                                                                               │
-│`SET` is not on the read-only allowlist                                                 │
-│                                                                                        │
-│❯                                                                                       │
+│standalone · master · 120.3k cmds · 42 expired · 0 evicted                              │
+│Ops/sec 31 · peak 31                            Clients (3)                             │
+│    ▃▁▅█                                        web-1                 1m    get         │
+│▁▂▄▇████                                        10.0.0.9:6210         5s    subscribe   │
+│Keys 412                                        cron                  1h    client|list │
+│▇▇▇▇▇▇▇█                                                                                │
 └────────────────────────────────────────────────────────────────────────────────────────┘
   nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·

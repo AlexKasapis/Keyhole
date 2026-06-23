@@ -1380,13 +1380,13 @@ async fn start_subscribe_opens_tail_in_browser_panel() {
     connect(&mut app, 1, "prod", 16).await;
     let next_sub = app.next_sub_id;
     app.start_subscribe(SubSpec::Channel("news".into()));
-    // Pub/sub tails sit after the four leading anchors (Console, Monitor,
-    // Keyspace, Pub/Sub), so the first one's tab is panel index 4.
+    // Pub/sub tails sit after the five leading anchors (Server Details, Console,
+    // Monitor, Keyspace, Pub/Sub), so the first one's tab is panel index 5.
     assert_eq!(app.screen, Screen::Browser);
     let conn = app.active_conn().unwrap();
     assert_eq!(conn.subs.len(), 1);
     assert_eq!(conn.active_panel(), PanelTab::Sub(0));
-    assert_eq!(conn.panel_tab, 4);
+    assert_eq!(conn.panel_tab, 5);
     assert_eq!(
         conn.panel_subscription().map(|s| s.sub_id),
         Some(conn.subs[0].sub_id)
@@ -1631,17 +1631,17 @@ async fn tab_cycles_through_fixed_anchors_and_tails() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.start_subscribe(SubSpec::Channel("a".into()));
-    // Slots: 0 Console, 1 Monitor, 2 Keyspace, 3 Pub/Sub, 4 Sub(a), 5 Tail.
+    // Slots: 0 Details, 1 Console, 2 Monitor, 3 Keyspace, 4 Pub/Sub, 5 Sub(a), 6 Tail.
     assert_eq!(app.screen, Screen::Browser);
-    assert_eq!(app.active_conn().unwrap().panel_tab_count(), 6);
-    // The subscribe focused the pub/sub tail at slot 4.
-    assert_eq!(app.connections[0].panel_tab, 4);
-    app.apply(Action::NextTab); // 5 Tail
+    assert_eq!(app.active_conn().unwrap().panel_tab_count(), 7);
+    // The subscribe focused the pub/sub tail at slot 5.
     assert_eq!(app.connections[0].panel_tab, 5);
-    app.apply(Action::NextTab); // wraps to 0 Console
+    app.apply(Action::NextTab); // 6 Tail
+    assert_eq!(app.connections[0].panel_tab, 6);
+    app.apply(Action::NextTab); // wraps to 0 Server Details
     assert_eq!(app.connections[0].panel_tab, 0, "wraps to the first tab");
-    app.apply(Action::PrevTab); // wraps back past Console to 5 Tail
-    assert_eq!(app.connections[0].panel_tab, 5, "wraps past the first tab");
+    app.apply(Action::PrevTab); // wraps back past Server Details to 6 Tail
+    assert_eq!(app.connections[0].panel_tab, 6, "wraps past the first tab");
 }
 
 #[tokio::test]
@@ -1674,7 +1674,7 @@ async fn tail_selected_key_starts_stream_tail() {
     assert_eq!(app.active_conn().unwrap().subs[0].label, "stream:orders");
     // Stream tails sit after the Tail anchor; the new one's tab is focused.
     assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Sub(0));
-    assert_eq!(app.active_conn().unwrap().panel_tab, 5);
+    assert_eq!(app.active_conn().unwrap().panel_tab, 6);
 }
 
 #[tokio::test]
@@ -2782,13 +2782,24 @@ async fn tab_focuses_bottom_then_cycles_subpanels() {
     assert!(!app.bottom_focused());
 
     // The first Tab drops the keyboard onto the currently shown subpanel
-    // (Console) without advancing.
+    // (Server Details, the leftmost tab) without advancing.
     app.handle_key(key(KeyCode::Tab));
     assert!(app.bottom_focused());
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::ServerDetails
+    );
+    assert_eq!(
+        app.mode,
+        InputMode::Normal,
+        "the Server Details tab is not a text prompt"
+    );
+
+    // Further Tabs cycle the subpanels; the console enters command mode and a
+    // feed tab is normal; Shift-Tab steps back.
+    app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Console);
     assert_eq!(app.mode, InputMode::Command);
-
-    // Further Tabs cycle the subpanels; Shift-Tab steps back.
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Monitor);
     assert_eq!(
@@ -2885,6 +2896,45 @@ async fn feed_focus_controls_the_feed_not_the_key_list() {
         app.connections[0].browser.collapsed, folded,
         "Space does not fold a group from a focused feed"
     );
+}
+
+#[tokio::test]
+async fn server_details_tab_scrolls_its_client_list_without_touching_feeds() {
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod", 16).await;
+    app.screen = Screen::Browser;
+    // The leftmost tab is Server Details; focusing the bottom lands on it and
+    // stays in normal mode (no text prompt, no feed controls).
+    focus_panel(&mut app, PanelTab::ServerDetails);
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::ServerDetails
+    );
+    assert_eq!(app.mode, InputMode::Normal);
+
+    // Navigation scrolls the client list; g/G jump to the ends.
+    app.handle_key(ch('j'));
+    app.handle_key(ch('j'));
+    assert_eq!(app.connections[0].dashboard.details_scroll, 2);
+    app.handle_key(ch('k'));
+    assert_eq!(app.connections[0].dashboard.details_scroll, 1);
+    app.handle_key(ch('g'));
+    assert_eq!(
+        app.connections[0].dashboard.details_scroll, 0,
+        "g jumps to top"
+    );
+    app.handle_key(ch('G'));
+    assert_eq!(
+        app.connections[0].dashboard.details_scroll,
+        u16::MAX,
+        "G jumps to the bottom (render clamps to the list height)"
+    );
+
+    // The feed controls are inert here: there is no subscription to pause, and
+    // `x`/`p` must not create or disturb one.
+    app.handle_key(ch('p'));
+    app.handle_key(ch('x'));
+    assert!(app.connections[0].subs.is_empty(), "no feed touched");
 }
 
 // -- mouse ---------------------------------------------------------------

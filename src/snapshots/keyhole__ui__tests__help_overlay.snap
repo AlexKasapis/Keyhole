@@ -23,7 +23,7 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │  PgUp/PgDn scroll the value pane   keys auto-refresh           │           │
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
-│           │  tabs: Console · Monitor · Keyspace · Pub/Sub · Tail · one per │           │
+│           │  tabs: Details (graphs+clients) · Console · Monitor · Keyspace │           │
 │           │  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends · p play/pause · r re│           │
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │  (empty Tail = selected key · a glob makes a pattern)          │           │

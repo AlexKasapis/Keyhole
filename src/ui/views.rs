@@ -1,12 +1,14 @@
 //! Per-screen rendering. Each function draws one screen (or overlay) from the
 //! current [`App`] state into the given area.
 
+use std::collections::VecDeque;
+
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph, Row, Table,
-    TableState, Wrap,
+    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph,
+    RenderDirection, Row, Sparkline, Table, TableState, Wrap,
 };
 use ratatui::Frame;
 use time::OffsetDateTime;
@@ -16,7 +18,7 @@ use crate::app::{
     App, ConnForm, ConnHealth, Connection, InputMode, PaneFocus, PanelTab, RecordState, Screen,
     SubState, Subscription, ViewRow,
 };
-use crate::broker::{BrokerEvent, BrokerKind, Payload, Ttl, ValueView};
+use crate::broker::{BrokerEvent, BrokerKind, ClientInfo, Payload, ServerStats, Ttl, ValueView};
 use crate::theme::Theme;
 
 /// The merged home area: a single bordered box whose title is the tab strip
@@ -630,6 +632,7 @@ fn panel_band(
     // Content follows the active tab.
     let active = conn.active_panel();
     match active {
+        PanelTab::ServerDetails => server_details_content(frame, conn, theme, content_area),
         PanelTab::Console => console_content(frame, conn, mode, theme, content_area),
         PanelTab::PubSub => anchor_input(
             frame,
@@ -682,6 +685,7 @@ fn tab_spans(
     };
     let mut spans = Vec::new();
     match slot {
+        PanelTab::ServerDetails => spans.push(Span::styled("Details", base)),
         PanelTab::Console => spans.push(Span::styled("Console", base)),
         PanelTab::Monitor => {
             spans.push(Span::styled("Monitor", base));
@@ -1086,6 +1090,245 @@ fn console_content(
     frame.render_widget(Paragraph::new(prompt), prompt_area);
 }
 
+/// The Server Details tab's content: a one-line strip of server facts the
+/// Server band doesn't already carry, two time-series graphs (ops/sec and total
+/// keys) on the left, and the connected-client list on the right. The leftmost
+/// bottom-panel tab; only ever drawn for a broker with a dashboard (Redis).
+fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
+    let Some(stats) = conn.dashboard.stats.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Line::styled("Collecting server details…", theme.dim)),
+            area,
+        );
+        return;
+    };
+
+    // A one-line header of facts, then the body: graphs left, clients right.
+    let [facts_area, body_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    frame.render_widget(Paragraph::new(server_facts_line(stats, theme)), facts_area);
+
+    let [graphs_area, clients_area] =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .areas(body_area);
+    server_graphs(frame, conn, theme, graphs_area);
+    server_clients(
+        frame,
+        &stats.clients,
+        conn.dashboard.details_scroll,
+        theme,
+        clients_area,
+    );
+}
+
+/// A dim one-liner of server facts the Server band up top doesn't already show:
+/// the deployment mode and role, then the lifetime command / expiry / eviction
+/// counters. Values lead in the foreground; their units stay dim.
+fn server_facts_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
+    let raw = |k: &str| stats.raw.get(k).cloned();
+    let num = |k: &str| stats.raw.get(k).and_then(|v| v.parse::<u64>().ok());
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let sep = |spans: &mut Vec<Span<'static>>| {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", theme.dim));
+        }
+    };
+    if let Some(mode) = raw("redis_mode") {
+        spans.push(Span::raw(mode));
+    }
+    if let Some(role) = raw("role") {
+        sep(&mut spans);
+        spans.push(Span::raw(role));
+    }
+    let counter = |spans: &mut Vec<Span<'static>>, key: &str, unit: &'static str| {
+        if let Some(n) = num(key) {
+            sep(spans);
+            spans.push(Span::raw(human_count(n)));
+            spans.push(Span::styled(unit, theme.dim));
+        }
+    };
+    counter(&mut spans, "total_commands_processed", " cmds");
+    counter(&mut spans, "expired_keys", " expired");
+    counter(&mut spans, "evicted_keys", " evicted");
+    if spans.is_empty() {
+        spans.push(Span::styled("server details", theme.dim));
+    }
+    Line::from(spans)
+}
+
+/// The left column of the Server Details tab: an ops/sec graph stacked over a
+/// total-keys graph, each captioned with its current value.
+fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
+    let [ops_area, keys_area] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+
+    let ops_now = conn
+        .dashboard
+        .stats
+        .as_ref()
+        .and_then(|s| s.instantaneous_ops_per_sec)
+        .unwrap_or(0);
+    let ops_peak = conn
+        .dashboard
+        .ops_history
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    server_graph(
+        frame,
+        theme,
+        ops_area,
+        "Ops/sec",
+        &conn.dashboard.ops_history,
+        format!("{ops_now} · peak {ops_peak}"),
+    );
+
+    let keys_now = conn.dashboard.keys_history.back().copied().unwrap_or(0);
+    server_graph(
+        frame,
+        theme,
+        keys_area,
+        "Keys",
+        &conn.dashboard.keys_history,
+        keys_now.to_string(),
+    );
+}
+
+/// One captioned time-series graph: a `label` + current `value` line over a
+/// sparkline of `history` (oldest left, newest right; only the rightmost samples
+/// that fit the width are drawn). Falls back to a dim note before any data lands.
+fn server_graph(
+    frame: &mut Frame,
+    theme: &Theme,
+    area: Rect,
+    label: &str,
+    history: &VecDeque<u64>,
+    value: String,
+) {
+    let [caption_area, bars_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let caption = Line::from(vec![
+        Span::styled(format!("{label} "), theme.dim),
+        Span::styled(value, theme.accent),
+    ]);
+    frame.render_widget(Paragraph::new(caption), caption_area);
+
+    if history.is_empty() || bars_area.height == 0 {
+        frame.render_widget(
+            Paragraph::new(Line::styled("collecting…", theme.dim)),
+            bars_area,
+        );
+        return;
+    }
+    // Keep only the newest samples that fit the bar width, in chronological order.
+    let width = (bars_area.width as usize).max(1);
+    let data: Vec<u64> = history.iter().rev().take(width).rev().copied().collect();
+    let spark = Sparkline::default()
+        .direction(RenderDirection::LeftToRight)
+        .style(theme.gauge)
+        .data(&data);
+    frame.render_widget(spark, bars_area);
+}
+
+/// The right column of the Server Details tab: the connected clients from
+/// `CLIENT LIST`, one per row, vertically scrollable (the offset is `scroll`,
+/// rows from the top, clamped here against the list height).
+fn server_clients(
+    frame: &mut Frame,
+    clients: &[ClientInfo],
+    scroll: u16,
+    theme: &Theme,
+    area: Rect,
+) {
+    let [header_area, list_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("Clients ", theme.heading),
+            Span::styled(format!("({})", clients.len()), theme.dim),
+        ])),
+        header_area,
+    );
+
+    if clients.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled("no client list", theme.dim)),
+            list_area,
+        );
+        return;
+    }
+
+    // Window the list to the visible rows; an over-scroll rests at the bottom.
+    let width = list_area.width as usize;
+    let height = list_area.height as usize;
+    let off = (scroll as usize).min(clients.len().saturating_sub(height));
+    let lines: Vec<Line> = clients
+        .iter()
+        .skip(off)
+        .take(height.max(1))
+        .map(|c| client_line(c, width, theme))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), list_area);
+}
+
+/// One client row: an identity column (the client's name, or its address when it
+/// never set one) that flexes to fill the pane, then fixed dim age and accent
+/// last-command tails.
+fn client_line(client: &ClientInfo, width: usize, theme: &Theme) -> Line<'static> {
+    const AGE_COL: usize = 5;
+    const CMD_COL: usize = 12;
+    let identity = if client.name.is_empty() {
+        client.addr.as_str()
+    } else {
+        client.name.as_str()
+    };
+    let cmd = if client.last_cmd.is_empty() {
+        "—"
+    } else {
+        client.last_cmd.as_str()
+    };
+    // Identity takes whatever's left after the two tails plus their gaps.
+    let name_w = width.saturating_sub(AGE_COL + CMD_COL + 2).max(4);
+    let age = short_duration(client.age);
+    Line::from(vec![
+        Span::raw(pad_end(&truncate(identity, name_w), name_w)),
+        Span::raw(" "),
+        Span::styled(pad_end(&truncate(&age, AGE_COL), AGE_COL), theme.dim),
+        Span::raw(" "),
+        Span::styled(truncate(cmd, CMD_COL), theme.accent),
+    ])
+}
+
+/// A compact, single-unit duration for the client list: `45s`, `12m`, `3h`,
+/// `2d` — the coarsest unit only, so it fits a narrow column.
+fn short_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// A compact decimal count: `1234` → `1.2k`, `2_500_000` → `2.5M`. For the
+/// Server Details lifetime counters, where the scale matters but exact digits
+/// don't.
+fn human_count(n: u64) -> String {
+    if n < 1_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else if n < 1_000_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else {
+        format!("{:.1}B", n as f64 / 1_000_000_000.0)
+    }
+}
+
 /// The add-connection modal overlay.
 pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let Some(form) = app.form.as_ref() else {
@@ -1188,7 +1431,9 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),
         Line::from(""),
         Line::styled("Bottom subpanel (Redis)", theme.heading),
-        Line::from("  tabs: Console · Monitor · Keyspace · Pub/Sub · Tail · one per tail"),
+        Line::from(
+            "  tabs: Details (graphs+clients) · Console · Monitor · Keyspace · Pub/Sub · Tail",
+        ),
         Line::from("  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends · p play/pause · r rec · x close"),
         Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
         Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
@@ -1715,5 +1960,86 @@ mod tests {
             ltext.contains('3') && ltext.contains('4'),
             "offsets 3,4: {ltext:?}"
         );
+    }
+
+    #[test]
+    fn human_count_scales_with_suffixes() {
+        assert_eq!(human_count(0), "0");
+        assert_eq!(human_count(999), "999");
+        assert_eq!(human_count(1_500), "1.5k");
+        assert_eq!(human_count(2_500_000), "2.5M");
+        assert_eq!(human_count(3_200_000_000), "3.2B");
+    }
+
+    #[test]
+    fn short_duration_picks_the_coarsest_single_unit() {
+        assert_eq!(short_duration(0), "0s");
+        assert_eq!(short_duration(59), "59s");
+        assert_eq!(short_duration(60), "1m");
+        assert_eq!(short_duration(3599), "59m");
+        assert_eq!(short_duration(3600), "1h");
+        assert_eq!(short_duration(86_400), "1d");
+    }
+
+    fn client(name: &str, addr: &str, age: u64, cmd: &str) -> ClientInfo {
+        ClientInfo {
+            id: 1,
+            name: name.into(),
+            addr: addr.into(),
+            age,
+            idle: 0,
+            last_cmd: cmd.into(),
+        }
+    }
+
+    #[test]
+    fn client_line_shows_name_or_falls_back_to_address() {
+        let theme = Theme::dark();
+        // A named client leads with its name, its short age, and last command.
+        let named = line_text(&client_line(
+            &client("web-1", "10.0.0.2:5555", 75, "get"),
+            40,
+            &theme,
+        ));
+        assert!(named.contains("web-1"), "name shown: {named:?}");
+        assert!(named.contains("1m"), "compact age shown: {named:?}");
+        assert!(named.contains("get"), "last command shown: {named:?}");
+        // An unnamed client is identified by its address instead.
+        let unnamed = line_text(&client_line(
+            &client("", "10.0.0.9:6666", 0, ""),
+            40,
+            &theme,
+        ));
+        assert!(
+            unnamed.contains("10.0.0.9:6666"),
+            "address fallback: {unnamed:?}"
+        );
+        assert!(
+            unnamed.contains('—'),
+            "missing command em-dash: {unnamed:?}"
+        );
+    }
+
+    #[test]
+    fn server_facts_line_lists_non_band_facts() {
+        let theme = Theme::dark();
+        let mut stats = ServerStats::default();
+        for (k, v) in [
+            ("redis_mode", "standalone"),
+            ("role", "master"),
+            ("total_commands_processed", "12345"),
+            ("expired_keys", "7"),
+            ("evicted_keys", "0"),
+        ] {
+            stats.raw.insert(k.into(), v.into());
+        }
+        let text = line_text(&server_facts_line(&stats, &theme));
+        assert!(text.contains("standalone"), "mode: {text:?}");
+        assert!(text.contains("master"), "role: {text:?}");
+        assert!(text.contains("12.3k cmds"), "command counter: {text:?}");
+        assert!(text.contains("7 expired"), "expiry counter: {text:?}");
+        // With nothing known, it degrades to a placeholder rather than a blank.
+        let empty = line_text(&server_facts_line(&ServerStats::default(), &theme));
+        assert_eq!(empty, "server details");
     }
 }

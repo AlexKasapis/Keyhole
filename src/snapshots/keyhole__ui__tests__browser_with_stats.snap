@@ -15,7 +15,7 @@ expression: "render_lines(&mut app, 90, 20)"
 │                                           ││                                           │
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
-┌ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ─────────────────────────────────────────┐
+┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
 │                                                                                        │
 │Just type a command and press Enter to run. Writes and admin commands are refused.      │
 │Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1               │

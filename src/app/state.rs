@@ -60,7 +60,7 @@ pub enum PaneFocus {
     Bottom,
 }
 
-/// One tab in the Browser's bottom panel. The first five are fixed and always
+/// One tab in the Browser's bottom panel. The first six are fixed and always
 /// present; [`PanelTab::Sub`] is one tab per live pub/sub or stream tail, placed
 /// immediately after its anchor ([`PanelTab::PubSub`] for pub/sub channels and
 /// patterns, [`PanelTab::Tail`] for streams). Every tab is reached only by
@@ -68,6 +68,9 @@ pub enum PaneFocus {
 /// own — they live under their anchor and run only while it is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelTab {
+    /// Server overview: time-series graphs (ops/sec, keys) and the connected
+    /// client list. The leftmost tab; passive (no input, no feed).
+    ServerDetails,
     /// Read-only command console: type a command, Enter to run.
     Console,
     /// Server-wide MONITOR feed; live only while this tab is focused.
@@ -669,12 +672,51 @@ impl ValueInspector {
     }
 }
 
-/// The server-statistics dashboard band for one connection: the latest stats
-/// and the tick counter that paces their refresh.
+/// Maximum samples retained in the Server Details time-series graphs. Stats
+/// refresh every `STATS_REFRESH_TICKS` ticks (~2s), so this holds roughly the
+/// last `STATS_HISTORY × 2s` ≈ 8 minutes of ops/keys history; older samples are
+/// evicted from the front as new ones arrive.
+pub const STATS_HISTORY: usize = 240;
+
+/// The server-statistics state for one connection: the latest stats and the
+/// tick counter that paces their refresh (both feeding the Browser's Server
+/// band), plus the rolling ops/keys history and client-list scroll that drive
+/// the Server Details tab.
 #[derive(Default)]
 pub struct StatsPanel {
     pub stats: Option<ServerStats>,
     pub stat_ticks: u32,
+    /// Instantaneous ops/sec at each refresh, oldest first, capped at
+    /// [`STATS_HISTORY`]. Feeds the Server Details "Ops/sec" graph.
+    pub ops_history: VecDeque<u64>,
+    /// Total key count (summed across DBs) at each refresh, oldest first, capped
+    /// at [`STATS_HISTORY`]. Feeds the Server Details "Keys" graph.
+    pub keys_history: VecDeque<u64>,
+    /// Scroll offset (rows from the top) of the Server Details client list.
+    pub details_scroll: u16,
+}
+
+impl StatsPanel {
+    /// Fold a fresh stats reply into the panel: append its ops/sec and total-key
+    /// count to the rolling history (evicting the oldest once [`STATS_HISTORY`]
+    /// is reached), then store the reply. A metric absent from the reply records
+    /// a `0` sample so the two series stay evenly spaced in time.
+    pub fn record(&mut self, stats: ServerStats) {
+        let ops = stats.instantaneous_ops_per_sec.unwrap_or(0);
+        let keys: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
+        push_capped(&mut self.ops_history, ops);
+        push_capped(&mut self.keys_history, keys);
+        self.stats = Some(stats);
+    }
+}
+
+/// Append `value` to a [`STATS_HISTORY`]-capped ring buffer, evicting the oldest
+/// sample once full.
+fn push_capped(buf: &mut VecDeque<u64>, value: u64) {
+    if buf.len() == STATS_HISTORY {
+        buf.pop_front();
+    }
+    buf.push_back(value);
 }
 
 /// An open connection plus its per-connection browse / inspect / dashboard
@@ -1002,13 +1044,15 @@ impl Connection {
         self.rebuild_view();
     }
 
-    /// The ordered list of bottom-panel tabs: the five fixed anchors plus one
+    /// The ordered list of bottom-panel tabs: the six fixed anchors (Server
+    /// Details leftmost, then Console, Monitor, Keyspace, Pub/Sub, Tail) plus one
     /// tab per pub/sub tail (after the Pub/Sub anchor) and one per stream tail
     /// (after the Tail anchor). MONITOR/keyspace tails are *not* listed — they
     /// render under their anchor — so their focus-driven lifecycle never shifts
     /// the tab indices. [`Self::panel_tab`] indexes into this.
     pub fn panel_slots(&self) -> Vec<PanelTab> {
         let mut slots = vec![
+            PanelTab::ServerDetails,
             PanelTab::Console,
             PanelTab::Monitor,
             PanelTab::Keyspace,
@@ -1028,10 +1072,10 @@ impl Connection {
         slots
     }
 
-    /// Number of tabs in the bottom panel: the five fixed anchors plus one per
+    /// Number of tabs in the bottom panel: the six fixed anchors plus one per
     /// pub/sub or stream tail. (MONITOR/keyspace tails have no tab of their own.)
     pub fn panel_tab_count(&self) -> usize {
-        5 + self
+        6 + self
             .subs
             .iter()
             .filter(|s| {
@@ -1070,7 +1114,7 @@ impl Connection {
             PanelTab::Monitor => self.monitor_sub(),
             PanelTab::Keyspace => self.keyspace_sub(),
             PanelTab::Sub(i) => self.subs.get(i),
-            PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
+            PanelTab::ServerDetails | PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
         }
     }
 
@@ -1087,7 +1131,7 @@ impl Connection {
                 .iter_mut()
                 .find(|s| matches!(s.spec, SubSpec::Keyspace { .. })),
             PanelTab::Sub(i) => self.subs.get_mut(i),
-            PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
+            PanelTab::ServerDetails | PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
         }
     }
 
@@ -1690,6 +1734,51 @@ mod tests {
         let d = StatsPanel::default();
         assert!(d.stats.is_none());
         assert_eq!(d.stat_ticks, 0);
+        assert!(d.ops_history.is_empty() && d.keys_history.is_empty());
+        assert_eq!(d.details_scroll, 0);
+    }
+
+    #[test]
+    fn stats_panel_record_tracks_ops_and_keys_history() {
+        let mut panel = StatsPanel::default();
+        let stats = |ops: u64, k0: u64, k1: u64| ServerStats {
+            instantaneous_ops_per_sec: Some(ops),
+            db_keys: vec![(0, k0), (1, k1)],
+            ..Default::default()
+        };
+        panel.record(stats(7, 10, 5));
+        panel.record(stats(9, 20, 5));
+        // Each sample appends the ops/sec and the across-DB key total, oldest first.
+        assert_eq!(panel.ops_history, [7, 9]);
+        assert_eq!(panel.keys_history, [15, 25]);
+        // The latest reply is retained for the band.
+        assert_eq!(
+            panel.stats.as_ref().unwrap().instantaneous_ops_per_sec,
+            Some(9)
+        );
+
+        // A reply missing the ops metric records a 0 so the series stay aligned.
+        panel.record(ServerStats {
+            db_keys: vec![(0, 30)],
+            ..Default::default()
+        });
+        assert_eq!(panel.ops_history, [7, 9, 0]);
+        assert_eq!(panel.keys_history, [15, 25, 30]);
+    }
+
+    #[test]
+    fn stats_panel_history_is_capped() {
+        let mut panel = StatsPanel::default();
+        for i in 0..(STATS_HISTORY as u64 + 10) {
+            panel.record(ServerStats {
+                instantaneous_ops_per_sec: Some(i),
+                ..Default::default()
+            });
+        }
+        // The ring buffer holds exactly the cap, dropping the oldest samples.
+        assert_eq!(panel.ops_history.len(), STATS_HISTORY);
+        assert_eq!(*panel.ops_history.front().unwrap(), 10);
+        assert_eq!(*panel.ops_history.back().unwrap(), STATS_HISTORY as u64 + 9);
     }
 
     /// Regression: a foreground (live) scan that spans more than one SCAN page

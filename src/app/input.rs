@@ -79,6 +79,9 @@ impl App {
             match self.active_conn().map(|c| c.active_panel()) {
                 Some(PanelTab::Console) => self.handle_command_key(key),
                 Some(PanelTab::PubSub | PanelTab::Tail) => self.handle_subscribe_key(key),
+                // The Server Details tab has no feed: navigation scrolls its
+                // client list, and the feed controls (p/x/r) don't apply.
+                Some(PanelTab::ServerDetails) => self.handle_details_key(key),
                 // A live-feed tab (Monitor / Keyspace / a pub-sub or stream tail):
                 // navigation scrolls the feed and p/x/r control it.
                 _ => self.handle_feed_key(key),
@@ -142,6 +145,27 @@ impl App {
             (false, KeyCode::Char('p')) => self.toggle_play_pause(),
             (false, KeyCode::Char('x')) => self.close_active_tab(),
             (false, KeyCode::Char('r')) => self.toggle_recording(),
+            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
+            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
+            _ => {}
+        }
+    }
+
+    /// Keys while the Server Details tab is focused. The tab is a passive
+    /// overview (graphs + the connected-client list), so the only navigation is
+    /// scrolling the client list; there is no feed to play/pause, close, or
+    /// record. Focus moves are handled upstream in [`Self::handle_browser_key`].
+    fn handle_details_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (false, KeyCode::Char('j') | KeyCode::Down) => self.scroll_details(1),
+            (false, KeyCode::Char('k') | KeyCode::Up) => self.scroll_details(-1),
+            (true, KeyCode::Char('d')) => self.scroll_details(FEED_SCROLL_STEP),
+            (true, KeyCode::Char('u')) => self.scroll_details(-FEED_SCROLL_STEP),
+            (_, KeyCode::PageDown) => self.scroll_details(FEED_SCROLL_STEP),
+            (_, KeyCode::PageUp) => self.scroll_details(-FEED_SCROLL_STEP),
+            (false, KeyCode::Char('g') | KeyCode::Home) => self.scroll_details(i32::MIN),
+            (false, KeyCode::Char('G') | KeyCode::End) => self.scroll_details(i32::MAX),
             (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
             (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
             _ => {}
@@ -470,6 +494,18 @@ impl App {
         if let Some(conn) = self.active_conn_mut() {
             let next = conn.inspector.value_scroll as i32 + delta;
             conn.inspector.value_scroll = next.clamp(0, u16::MAX as i32) as u16;
+        }
+    }
+
+    /// Scroll the Server Details client list by `delta` rows (negative = up).
+    /// `i32::MIN`/`i32::MAX` jump to the top/bottom. The offset is clamped
+    /// against the list height when rendered, so an over-scroll rests at the end.
+    pub(super) fn scroll_details(&mut self, delta: i32) {
+        if let Some(conn) = self.active_conn_mut() {
+            // Saturating: `g`/`G` pass i32::MIN/MAX to jump to the ends, which a
+            // plain add would overflow.
+            let next = (conn.dashboard.details_scroll as i32).saturating_add(delta);
+            conn.dashboard.details_scroll = next.clamp(0, u16::MAX as i32) as u16;
         }
     }
 

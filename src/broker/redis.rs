@@ -285,7 +285,19 @@ impl BrokerConnection for RedisConnection {
     async fn stats(&mut self) -> anyhow::Result<super::ServerStats> {
         let mut conn = self.manager()?;
         let text: String = redis::cmd("INFO").query_async(&mut conn).await?;
-        Ok(info::parse_info(&text))
+        let mut stats = info::parse_info(&text);
+        // Best-effort connected-client roster for the Server Details tab. Some
+        // deployments restrict `CLIENT LIST` (ACL / managed Redis); a failure
+        // there must not sink the whole stats refresh, so it is ignored and the
+        // client list simply stays empty.
+        let list: redis::RedisResult<String> = redis::cmd("CLIENT")
+            .arg("LIST")
+            .query_async(&mut conn)
+            .await;
+        if let Ok(list) = list {
+            stats.clients = info::parse_client_list(&list);
+        }
+        Ok(stats)
     }
 
     async fn subscribe(&mut self, spec: SubSpec) -> anyhow::Result<BrokerEventStream> {

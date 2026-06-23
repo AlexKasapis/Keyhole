@@ -1,7 +1,7 @@
-//! Pure parser for the Redis `INFO` reply. Kept free of I/O so it can be unit
-//! tested with fixtures.
+//! Pure parsers for the Redis `INFO` and `CLIENT LIST` replies. Kept free of
+//! I/O so they can be unit tested with fixtures.
 
-use crate::broker::ServerStats;
+use crate::broker::{ClientInfo, ServerStats};
 
 /// Parse an `INFO` reply into [`ServerStats`].
 ///
@@ -66,6 +66,39 @@ pub fn parse_info(text: &str) -> ServerStats {
     stats
 }
 
+/// Parse a Redis `CLIENT LIST` reply into [`ClientInfo`] rows, one per line.
+///
+/// Each line is a run of space-separated `key=value` fields
+/// (`id=7 addr=127.0.0.1:6379 name=web age=12 idle=0 ... cmd=get`). Only the
+/// fields keyhole surfaces are kept; anything else (and any field that fails to
+/// parse) falls back to its type's default. Blank lines are ignored.
+pub fn parse_client_list(text: &str) -> Vec<ClientInfo> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(parse_client_line)
+        .collect()
+}
+
+/// Parse one `CLIENT LIST` line into a [`ClientInfo`].
+fn parse_client_line(line: &str) -> ClientInfo {
+    let mut client = ClientInfo::default();
+    for field in line.split_ascii_whitespace() {
+        let Some((key, value)) = field.split_once('=') else {
+            continue;
+        };
+        match key {
+            "id" => client.id = value.parse().unwrap_or(0),
+            "name" => client.name = value.to_string(),
+            "addr" => client.addr = value.to_string(),
+            "age" => client.age = value.parse().unwrap_or(0),
+            "idle" => client.idle = value.parse().unwrap_or(0),
+            "cmd" => client.last_cmd = value.to_string(),
+            _ => {}
+        }
+    }
+    client
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,5 +141,36 @@ mod tests {
         assert!(s.sections.is_empty());
         let s = parse_info("not an info reply\nrandom text");
         assert!(s.redis_version.is_none());
+    }
+
+    const CLIENTS: &str = "id=7 addr=127.0.0.1:50912 laddr=127.0.0.1:6379 fd=8 name=web age=42 idle=3 flags=N db=0 sub=0 cmd=get user=default\n\
+id=9 addr=10.0.0.2:33344 laddr=127.0.0.1:6379 fd=12 name= age=5 idle=0 flags=N db=1 sub=1 cmd=client|list user=default\n";
+
+    #[test]
+    fn parses_client_list_fields() {
+        let clients = parse_client_list(CLIENTS);
+        assert_eq!(clients.len(), 2);
+        assert_eq!(clients[0].id, 7);
+        assert_eq!(clients[0].name, "web");
+        assert_eq!(clients[0].addr, "127.0.0.1:50912");
+        assert_eq!(clients[0].age, 42);
+        assert_eq!(clients[0].idle, 3);
+        assert_eq!(clients[0].last_cmd, "get");
+        // An empty `name=` stays empty; multi-word commands keep their `|`.
+        assert_eq!(clients[1].name, "");
+        assert_eq!(clients[1].last_cmd, "client|list");
+    }
+
+    #[test]
+    fn client_list_tolerates_blank_lines_and_missing_fields() {
+        // A trailing/blank line yields no row; a line missing fields fills the
+        // gaps with defaults rather than panicking or being dropped.
+        let clients = parse_client_list("\nid=1 addr=x:1\n\n");
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].id, 1);
+        assert_eq!(clients[0].addr, "x:1");
+        assert_eq!(clients[0].age, 0);
+        assert_eq!(clients[0].name, "");
+        assert!(parse_client_list("").is_empty());
     }
 }

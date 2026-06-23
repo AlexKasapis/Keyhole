@@ -196,7 +196,9 @@ impl App {
 
     pub(super) fn on_stats(&mut self, id: ConnId, stats: ServerStats) {
         if let Some(conn) = self.conn_by_id_mut(id) {
-            conn.dashboard.stats = Some(stats);
+            // Store the reply and extend the ops/keys history that the Server
+            // Details graphs draw from.
+            conn.dashboard.record(stats);
         }
     }
 

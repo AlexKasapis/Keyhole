@@ -607,7 +607,27 @@ pub enum ValueView {
     Missing,
 }
 
-/// Server statistics, parsed from Redis `INFO` (raw plus extracted metrics).
+/// One connected client, parsed from a line of the Redis `CLIENT LIST` reply.
+/// Surfaced in the Browser's Server Details tab; fields keyhole doesn't display
+/// are dropped during parsing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClientInfo {
+    /// Connection id (`id=`).
+    pub id: u64,
+    /// Client-set name (`name=`), empty unless the client ran `CLIENT SETNAME`.
+    pub name: String,
+    /// Peer address `host:port` (`addr=`).
+    pub addr: String,
+    /// Seconds since the connection opened (`age=`).
+    pub age: u64,
+    /// Seconds the connection has been idle (`idle=`).
+    pub idle: u64,
+    /// The last command the client ran (`cmd=`), e.g. `get` or `client|list`.
+    pub last_cmd: String,
+}
+
+/// Server statistics, parsed from Redis `INFO` (raw plus extracted metrics),
+/// plus the connected-client roster from `CLIENT LIST`.
 #[derive(Debug, Clone, Default)]
 pub struct ServerStats {
     /// All sections, preserving order, for the raw view.
@@ -625,6 +645,9 @@ pub struct ServerStats {
     pub keyspace_misses: Option<u64>,
     /// `(db index, key count)` pairs from the keyspace section.
     pub db_keys: Vec<(u32, u64)>,
+    /// Connected clients from `CLIENT LIST`. Empty when the command was not run
+    /// or the server declined it (ACL / managed Redis).
+    pub clients: Vec<ClientInfo>,
 }
 
 impl ServerStats {

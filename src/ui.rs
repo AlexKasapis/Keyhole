@@ -249,8 +249,8 @@ mod tests {
     };
     use crate::broker::actor::mock;
     use crate::broker::{
-        BrokerEvent, EntryMeta, Payload, PayloadEncoding, ServerStats, StreamEntry, SubSpec, Ttl,
-        ValueType, ValueView,
+        BrokerEvent, ClientInfo, EntryMeta, Payload, PayloadEncoding, ServerStats, StreamEntry,
+        SubSpec, Ttl, ValueType, ValueView,
     };
     use crate::config::Config;
     use crate::event::AppEvent;
@@ -360,6 +360,8 @@ mod tests {
         // own focus), which is exactly when the selected tab must not wash out.
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
+        // Select the Console tab (Server Details is the leftmost/default tab now).
+        app.connections[0].panel_tab = 1;
         let theme = app.theme;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
@@ -1263,9 +1265,10 @@ mod tests {
             });
         }
         app.connections[0].subs.push(sub);
-        // Focus the tail's tab: pub/sub tails sit after the four leading anchors
-        // (Console, Monitor, Keyspace, Pub/Sub), so the first one is slot 4.
-        app.connections[0].panel_tab = 4;
+        // Focus the tail's tab: pub/sub tails sit after the five leading anchors
+        // (Server Details, Console, Monitor, Keyspace, Pub/Sub), so the first one
+        // is slot 5.
+        app.connections[0].panel_tab = 5;
         let text = screen_text(&mut app);
         assert!(
             text.contains("pubsub:news"),
@@ -1298,7 +1301,7 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/r.jsonl"),
         };
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 4; // the pub/sub tail tab
+        app.connections[0].panel_tab = 5; // the pub/sub tail tab
         let text = screen_text(&mut app);
         assert!(text.contains("paused"));
         // Paused reads as its own state, never alongside "live".
@@ -1324,7 +1327,7 @@ mod tests {
         sub.follow = false;
         sub.offset = 3;
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 4; // the pub/sub tail tab
+        app.connections[0].panel_tab = 5; // the pub/sub tail tab
         let text = screen_text(&mut app);
         assert!(text.contains("live"));
         assert!(text.contains("scrolled"));
@@ -1339,8 +1342,12 @@ mod tests {
         app.screen = Screen::Browser;
         let sub = Subscription::new(1, SubSpec::Channel("news".into()), 100);
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 0; // Console active
+        app.connections[0].panel_tab = 1; // Console active
         let text = screen_text(&mut app);
+        assert!(
+            text.contains("Details"),
+            "the Server Details anchor is listed"
+        );
         assert!(text.contains("Console"), "the Console anchor is listed");
         assert!(text.contains("Monitor"), "the Monitor anchor is listed");
         assert!(text.contains("Keyspace"), "the Keyspace anchor is listed");
@@ -1357,8 +1364,8 @@ mod tests {
         sub.state = SubState::Active;
         sub.notice = Some("keyspace notifications are disabled".into());
         app.connections[0].subs.push(sub);
-        // The keyspace feed renders under its anchor (slot 2), not its own tab.
-        app.connections[0].panel_tab = 2;
+        // The keyspace feed renders under its anchor (slot 3), not its own tab.
+        app.connections[0].panel_tab = 3;
         let text = screen_text(&mut app);
         assert!(text.contains("Keyspace"), "the Keyspace anchor renders");
         assert!(text.contains("disabled"), "the notice banner renders");
@@ -1368,6 +1375,7 @@ mod tests {
     async fn browser_console_band_renders_prompt_and_entries() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
+        app.connections[0].panel_tab = 1; // the Console tab
         app.connections[0].browser.keys = vec![entry("mykey", ValueType::String)];
         app.connections[0].rebuild_view();
         app.connections[0]
@@ -1390,6 +1398,7 @@ mod tests {
     async fn browser_console_band_empty_state_shows_hint() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
+        app.connections[0].panel_tab = 1; // the Console tab
         let text = screen_text(&mut app);
         assert!(text.contains("Read-only command console"));
         assert!(text.contains("INFO server"), "shows example commands");
@@ -1624,6 +1633,8 @@ mod tests {
         app.connections[0].rebuild_view();
         app.connections[0].browser.complete = true;
         app.connections[0].browser.table.select(Some(0));
+        // Show the Console tab (Server Details is the leftmost/default tab now).
+        app.connections[0].panel_tab = 1;
         app.connections[0]
             .console
             .entries
@@ -1666,6 +1677,9 @@ mod tests {
             text: "alice".into(),
             encoding: PayloadEncoding::Utf8,
         });
+        // Keep the bottom panel on the Console (this snapshot covers the Server
+        // band up top, not the new leftmost Server Details tab).
+        app.connections[0].panel_tab = 1;
         app.connections[0].dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             uptime_seconds: Some(3661),
@@ -1684,8 +1698,8 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_browser_panel_keyspace_notice() {
-        // The keyspace feed focused under its fixed anchor (slot 2), showing the
-        // tab strip (the five anchors) and the advisory notice banner.
+        // The keyspace feed focused under its fixed anchor (slot 3), showing the
+        // tab strip (the six anchors) and the advisory notice banner.
         let (mut app, _rx) = app_with_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
@@ -1698,7 +1712,7 @@ mod tests {
         sub.notice =
             Some("keyspace notifications are disabled (notify-keyspace-events is empty)".into());
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 2;
+        app.connections[0].panel_tab = 3;
         insta::assert_snapshot!(
             "browser_panel_keyspace_notice",
             render_lines(&mut app, 90, 26)
@@ -1738,10 +1752,63 @@ mod tests {
             path: std::path::PathBuf::from("/tmp/orders.jsonl"),
         };
         app.connections[0].subs.push(sub);
-        app.connections[0].panel_tab = 4; // the pub/sub tail tab
+        app.connections[0].panel_tab = 5; // the pub/sub tail tab
         insta::assert_snapshot!(
             "browser_panel_tail_recording",
             render_lines(&mut app, 90, 26)
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_server_details() {
+        // The leftmost bottom-panel tab: a server-facts strip, the ops/keys
+        // time-series graphs, and the connected-client list. Pinned data keeps
+        // the sparklines and rows deterministic.
+        let (mut app, _rx) = app_with_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Browser;
+        app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].rebuild_view();
+        app.connections[0].browser.complete = true;
+        app.connections[0].browser.table.select(Some(0));
+
+        let client = |id, name: &str, addr: &str, age, cmd: &str| ClientInfo {
+            id,
+            name: name.into(),
+            addr: addr.into(),
+            age,
+            idle: 0,
+            last_cmd: cmd.into(),
+        };
+        let mut stats = ServerStats {
+            redis_version: Some("7.4.0".into()),
+            instantaneous_ops_per_sec: Some(31),
+            db_keys: vec![(0, 412)],
+            clients: vec![
+                client(3, "web-1", "10.0.0.2:5051", 75, "get"),
+                client(4, "", "10.0.0.9:6210", 5, "subscribe"),
+                client(5, "cron", "10.0.0.3:4410", 3700, "client|list"),
+            ],
+            ..Default::default()
+        };
+        for (k, v) in [
+            ("redis_mode", "standalone"),
+            ("role", "master"),
+            ("total_commands_processed", "120345"),
+            ("expired_keys", "42"),
+            ("evicted_keys", "0"),
+        ] {
+            stats.raw.insert(k.into(), v.into());
+        }
+        // A short ops/keys history so the sparklines have a visible shape.
+        for ops in [2u64, 5, 9, 14, 22, 18, 27, 31] {
+            app.connections[0].dashboard.ops_history.push_back(ops);
+        }
+        for keys in [400u64, 402, 405, 405, 408, 410, 411, 412] {
+            app.connections[0].dashboard.keys_history.push_back(keys);
+        }
+        app.connections[0].dashboard.stats = Some(stats);
+        // Server Details is the leftmost tab (index 0), selected by default.
+        insta::assert_snapshot!("browser_server_details", render_lines(&mut app, 90, 24));
     }
 }
