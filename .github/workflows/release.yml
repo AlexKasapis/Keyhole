@@ -297,8 +297,14 @@ jobs:
       - name: Sign artifacts (cosign keyless)
         working-directory: artifacts
         run: |
+          # cosign 3.x flips sign-blob's --new-bundle-format default to true,
+          # which ignores --output-signature/--output-certificate and writes a
+          # single .bundle instead. Our verifier (scripts/install.sh) and the
+          # README/SECURITY docs consume the detached .sig + .pem sidecars, so
+          # opt back out to keep emitting them.
           for f in ./*.tar.gz ./*.deb ./*.rpm SHA256SUMS keyhole.cdx.json; do
             cosign sign-blob --yes \
+              --new-bundle-format=false \
               --output-signature "${f}.sig" \
               --output-certificate "${f}.pem" \
               "$f"
