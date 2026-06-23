@@ -7,5 +7,6 @@
 
 # Workflow
 - Ignore other work being simultaneously done in the repo. Do not change, commit or stash it.
-- Be aware that other agents may be working simultaneously in this repo. Use git worktree to work independently.
+- Be aware that other agents may be working simultaneously in this repo.
+- Always perform all work on git worktrees to work independently.
 - At the end of each task, commit your changes to main.
