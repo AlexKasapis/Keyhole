@@ -303,6 +303,17 @@ mod tests {
         frame.buffer.content().iter().map(|c| c.symbol()).collect()
     }
 
+    /// The buffer cell index where `label` first appears as a contiguous run of
+    /// cell symbols. Matches by composed symbols (not string bytes) so multi-byte
+    /// border glyphs don't misalign the result with screen columns. `label` must
+    /// be ASCII (one cell per byte), which the tab labels are.
+    fn find_label(buf: &ratatui::buffer::Buffer, label: &str) -> usize {
+        let syms: Vec<&str> = buf.content().iter().map(|c| c.symbol()).collect();
+        (0..syms.len())
+            .find(|&i| i + label.len() <= syms.len() && syms[i..i + label.len()].concat() == label)
+            .unwrap_or_else(|| panic!("label {label:?} not found in the rendered frame"))
+    }
+
     fn entry(name: &str, vtype: ValueType) -> EntryMeta {
         EntryMeta {
             key: name.into(),
@@ -329,31 +340,56 @@ mod tests {
     }
 
     #[test]
-    fn inactive_subtabs_use_a_readable_foreground_not_the_dim_style() {
-        // The home tab strip's inactive tab ("Recordings", with Connections active
-        // on the default screen) renders with the normal foreground, not the faint
-        // dim style that read as almost no contrast — a guard for the subtab fix.
+    fn home_panel_renders_at_full_brightness() {
+        // The home area is the primary surface: its box border and tab labels use
+        // the main foreground (not the dim border/dim style that made it look
+        // perpetually unfocused). Connections is the active tab and Recordings is
+        // inactive, but neither label uses the muted dim foreground.
         let (mut app, _rx) = test_app();
         let theme = app.theme;
         let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
         let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
-        let buf = &frame.buffer;
-        let w = buf.area.width as usize;
-        // Locate "Recordings" in the top (title) row by cell symbols: the border
-        // glyphs are multi-byte, so a byte-offset string search would misalign
-        // with screen columns.
-        let row0: Vec<&str> = buf.content()[..w].iter().map(|c| c.symbol()).collect();
-        let target: Vec<String> = "Recordings".chars().map(|c| c.to_string()).collect();
-        let start = row0
-            .windows(target.len())
-            .position(|win| win == target.as_slice())
-            .expect("the inactive Recordings tab label renders in the title row");
-        for i in start..start + target.len() {
+        let buf = frame.buffer;
+        // The box border brightened off the dim border colour.
+        assert_eq!(buf.content()[0].symbol(), "┌", "top-left box corner");
+        assert_ne!(
+            buf.content()[0].style().fg,
+            theme.border.fg,
+            "the home box border is no longer the dim border colour"
+        );
+        // The inactive tab label is not the muted dim foreground.
+        let start = find_label(buf, "Recordings");
+        for i in start..start + "Recordings".len() {
             assert_ne!(
                 buf.content()[i].style().fg,
                 theme.dim.fg,
-                "inactive tab char {:?} must not use the dim foreground",
-                buf.content()[i].symbol()
+                "inactive home tab must not use the dim foreground"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_inactive_panel_tab_uses_the_brighter_inactive_style() {
+        // In the Browser's bottom panel the active tab (Console) keeps the only
+        // selection highlight; an inactive tab (Monitor) uses the brighter
+        // `tab_inactive` foreground — readable, and distinct from the dim style.
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        let theme = app.theme;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
+        let buf = frame.buffer;
+        let start = find_label(buf, "Monitor");
+        for i in start..start + "Monitor".len() {
+            assert_eq!(
+                buf.content()[i].style().fg,
+                theme.tab_inactive.fg,
+                "inactive panel tab uses the tab_inactive foreground"
+            );
+            assert_ne!(
+                buf.content()[i].style().fg,
+                theme.dim.fg,
+                "and not the muted dim foreground"
             );
         }
     }

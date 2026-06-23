@@ -16,6 +16,11 @@ pub struct Theme {
     pub status_bar: Style,
     pub heading: Style,
     pub dim: Style,
+    /// Foreground for an inactive (unselected) tab in a tab strip. Brighter than
+    /// [`Self::dim`] so unselected tabs stay legible even while their panel is
+    /// unfocused, while the selected tab's highlight (see [`Self::selected`])
+    /// stays the standout.
+    pub tab_inactive: Style,
     pub selected: Style,
     pub header: Style,
     pub border: Style,
@@ -42,6 +47,8 @@ impl Theme {
             status_bar: Style::new().bg(Color::Indexed(236)).fg(Color::Gray),
             heading: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(Color::DarkGray),
+            // A step brighter than `dim` (DarkGray) so unselected tabs read.
+            tab_inactive: Style::new().fg(Color::Gray),
             // A background highlight (not reverse video) so per-span foreground
             // colours — e.g. a connected row's green status dot — survive on the
             // selected row and read the same whether selected or not.
@@ -67,6 +74,9 @@ impl Theme {
             status_bar: Style::new().bg(Color::Indexed(254)).fg(Color::Indexed(238)),
             heading: Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
             dim: Style::new().fg(Color::Indexed(245)),
+            // Darker (higher contrast on a light bg) than `dim` so unselected
+            // tabs read — the light-theme analogue of the dark palette's Gray.
+            tab_inactive: Style::new().fg(Color::Indexed(238)),
             // Background highlight (see the dark palette) so foreground colours
             // survive on the selected row.
             selected: Style::new()
@@ -94,6 +104,9 @@ impl Theme {
             status_bar: none.add_modifier(Modifier::REVERSED),
             heading: none.add_modifier(Modifier::BOLD),
             dim: none.add_modifier(Modifier::DIM),
+            // No colour under NO_COLOR: an unselected tab is plain text, while the
+            // selected tab's reverse video (see `selected`) does the disambiguating.
+            tab_inactive: none,
             selected: none.add_modifier(Modifier::REVERSED.union(Modifier::BOLD)),
             header: none.add_modifier(Modifier::BOLD.union(Modifier::UNDERLINED)),
             border: none,
@@ -188,6 +201,21 @@ mod tests {
         let plain = Theme::plain();
         assert_eq!(plain.warning.fg, None);
         assert!(plain.warning.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn inactive_tab_foreground_is_distinct_from_dim() {
+        // Unselected tabs use a readable foreground that is brighter/higher-
+        // contrast than the muted `dim`, so they don't wash out — in both
+        // coloured palettes the two differ.
+        let dark = Theme::dark();
+        assert_eq!(dark.tab_inactive.fg, Some(Color::Gray));
+        assert_ne!(dark.tab_inactive.fg, dark.dim.fg);
+        let light = Theme::light();
+        assert_ne!(light.tab_inactive.fg, light.dim.fg);
+        // NO_COLOR: no foreground at all; the selected tab's reverse video carries
+        // the distinction instead.
+        assert_eq!(Theme::plain().tab_inactive.fg, None);
     }
 
     #[test]

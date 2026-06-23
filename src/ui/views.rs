@@ -25,9 +25,10 @@ use crate::theme::Theme;
 /// single-frame treatment as the Browser's bottom panel.
 pub fn home(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let on_recordings = app.screen == Screen::Recordings;
-    // The active tab keeps its highlight (a background fill + bold); inactive tabs
-    // use the normal foreground rather than the dim style, which was too faint to
-    // read against the terminal background.
+    // The home area is the primary surface, so it reads at full brightness: the
+    // box and both tab labels use the main foreground (the dim border/labels made
+    // it look perpetually unfocused). The active tab additionally carries the
+    // selection highlight so it still stands out.
     let tab = |label: &'static str, active: bool| {
         Span::styled(
             label,
@@ -45,7 +46,9 @@ pub fn home(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         tab("Recordings", on_recordings),
         Span::raw(" "),
     ]);
-    let block = Block::bordered().title(title).border_style(theme.border);
+    let block = Block::bordered()
+        .title(title)
+        .border_style(Style::default());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -657,12 +660,13 @@ fn tab_spans(
     active: bool,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
-    // The active tab keeps its highlight; inactive tabs use the normal foreground
-    // (the dim style read too faint), matching the home area's tab strip.
+    // The active tab is the only highlighted one (selection style); inactive tabs
+    // use the brighter `tab_inactive` foreground — readable yet clearly secondary
+    // — so they stay legible even while the whole panel is unfocused.
     let base = if active {
         theme.selected
     } else {
-        Style::default()
+        theme.tab_inactive
     };
     let mut spans = Vec::new();
     match slot {
