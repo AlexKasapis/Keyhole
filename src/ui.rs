@@ -1,9 +1,8 @@
 //! Rendering. [`render`] is a pure function of [`App`] state, called once per
 //! frame by the main loop: the active screen and a footer (hints or the active
-//! text-entry prompt, plus the clock), then modal overlays (connection form,
+//! text-entry prompt), then modal overlays (connection form,
 //! help). There is no top bar — connection health lives with its screen (the
-//! Browser's Server band, the connections list's per-row dots) and the clock sits
-//! at the right edge of the footer.
+//! Browser's Server band, the connections list's per-row dots).
 
 mod views;
 
@@ -59,22 +58,6 @@ pub(crate) fn health_indicator(
 }
 
 fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    // The clock — formerly in the top bar — now rides the footer's right edge,
-    // shown on every screen and in every input mode. Carve a fixed column for it
-    // and let the mode-specific content (hints / prompt) take the rest.
-    let clock_str = format!("{} ", clock(app));
-    let [area, clock_area] = Layout::horizontal([
-        Constraint::Min(0),
-        Constraint::Length(clock_str.len() as u16 + 1),
-    ])
-    .areas(area);
-    frame.render_widget(
-        Paragraph::new(Line::from(clock_str))
-            .alignment(Alignment::Right)
-            .style(theme.status_bar),
-        clock_area,
-    );
-
     match app.mode {
         InputMode::Filter => {
             let line = Line::from(vec![
@@ -254,15 +237,6 @@ fn hint_line(app: &App, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-fn clock(app: &App) -> String {
-    format!(
-        "{:02}:{:02}:{:02} UTC",
-        app.now.hour(),
-        app.now.minute(),
-        app.now.second()
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,9 +300,10 @@ mod tests {
     // -- footer (always drawn) -----------------------------------------------
 
     #[test]
-    fn footer_carries_the_clock_and_there_is_no_top_bar() {
+    fn footer_has_no_clock_and_there_is_no_top_bar() {
         // The top bar is gone: there is no "Keyhole" brand and no active-connection
-        // label up top. The clock that used to live there now rides the footer.
+        // label up top. The clock has been removed entirely — it rides neither a
+        // top bar nor the footer.
         let (mut app, _rx) = test_app();
         let text = screen_text(&mut app);
         assert!(!text.contains("Keyhole"), "the brand label is gone");
@@ -336,7 +311,7 @@ mod tests {
             !text.contains("no connection"),
             "no top-bar connection label"
         );
-        assert!(text.contains("UTC"), "the clock renders in the footer");
+        assert!(!text.contains("UTC"), "the clock no longer renders");
     }
 
     #[test]
@@ -1352,7 +1327,8 @@ mod tests {
         );
     }
 
-    /// A fixed instant so the header clock is stable in snapshots.
+    /// A fixed instant so any time-derived rendering (e.g. status-message
+    /// expiry) is stable in snapshots.
     fn pin_clock(app: &mut App) {
         app.now = time::macros::datetime!(2026 - 06 - 19 12:34:56 UTC);
     }

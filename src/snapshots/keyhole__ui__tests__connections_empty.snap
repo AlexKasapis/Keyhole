@@ -17,4 +17,4 @@ expression: "render_lines(&mut app, 90, 16)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b brow 12:34:56 UTC
+  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app ? he
