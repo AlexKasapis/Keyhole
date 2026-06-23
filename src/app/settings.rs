@@ -58,15 +58,41 @@ impl App {
     // -- settings page -------------------------------------------------------
 
     /// Keys while the settings page is open. It owns the keyboard wholesale:
-    /// ←/→ cycle the theme (applied live), Enter/Esc close, and Ctrl-C quits.
+    /// ↑/↓ move between rows, ←/→ cycle the highlighted row's value (applied
+    /// live), Enter/Esc close, and Ctrl-C quits.
     pub(super) fn handle_settings_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
             (true, KeyCode::Char('c')) => self.running = false,
             (false, KeyCode::Esc | KeyCode::Enter) => self.settings = None,
-            (false, KeyCode::Left | KeyCode::Char('h')) => self.cycle_theme(-1),
-            (false, KeyCode::Right | KeyCode::Char('l')) => self.cycle_theme(1),
+            (false, KeyCode::Up | KeyCode::Char('k')) => self.move_settings(-1),
+            (false, KeyCode::Down | KeyCode::Char('j')) => self.move_settings(1),
+            (false, KeyCode::Left | KeyCode::Char('h')) => self.cycle_setting(-1),
+            (false, KeyCode::Right | KeyCode::Char('l')) => self.cycle_setting(1),
             _ => {}
+        }
+    }
+
+    /// Move the settings highlight by `delta`, clamped to the row list.
+    fn move_settings(&mut self, delta: i32) {
+        if let Some(settings) = &mut self.settings {
+            let len = SettingsRow::all().len();
+            settings.selected = move_selection(Some(settings.selected), len, delta).unwrap_or(0);
+        }
+    }
+
+    /// Cycle the highlighted settings row's value by `delta` (←/→). Dispatches to
+    /// the per-row cycler; each applies live and persists best-effort.
+    fn cycle_setting(&mut self, delta: i32) {
+        let Some(selected) = self.settings.as_ref().map(|s| s.selected) else {
+            return;
+        };
+        let rows = SettingsRow::all();
+        // `selected` is kept in range by `move_settings`, but clamp defensively
+        // so a future longer list can never index out of bounds here.
+        match rows[selected.min(rows.len() - 1)] {
+            SettingsRow::Theme => self.cycle_theme(delta),
+            SettingsRow::Animations => self.cycle_animation(delta),
         }
     }
 
@@ -88,6 +114,31 @@ impl App {
             Ok(()) => self.set_status(format!("Theme: {name}"), false),
             Err(e) => self.set_status(
                 format!("theme set to {name}, but could not save: {e}"),
+                true,
+            ),
+        }
+    }
+
+    /// Step the UI animation speed through [`config::AnimationSpeed::ALL`] by
+    /// `delta` (wrapping). The new speed takes effect on the next tick — the
+    /// dot's breath and the notification fade both read it live — and is
+    /// persisted to the config file. Like [`Self::cycle_theme`], persisting is
+    /// best-effort: a write failure is surfaced as a footer status but the
+    /// in-memory speed still changes, so the switch is never silently lost.
+    pub(super) fn cycle_animation(&mut self, delta: i32) {
+        let all = config::AnimationSpeed::ALL;
+        let cur = all
+            .iter()
+            .position(|&s| s == self.animation_speed())
+            .unwrap_or_default() as i32;
+        let next = (cur + delta).rem_euclid(all.len() as i32) as usize;
+        let speed = all[next];
+        self.config.settings.animation = speed;
+        let label = speed.label();
+        match config::save(&self.config_path, &self.config) {
+            Ok(()) => self.set_status(format!("Animations: {label}"), false),
+            Err(e) => self.set_status(
+                format!("animations set to {label}, but could not save: {e}"),
                 true,
             ),
         }
@@ -196,6 +247,53 @@ mod tests {
         // Esc closes the settings overlay.
         app.handle_key(key(KeyCode::Esc));
         assert!(app.settings.is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_navigates_rows_and_cycles_animation_live_and_persists() {
+        let (mut app, path) = app_with_config_path();
+        app.settings = Some(SettingsState::default());
+        // Default config: a Slow breath, with the highlight on the first row.
+        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Slow);
+        assert_eq!(app.settings.unwrap().selected, 0);
+
+        // Right on the Theme row cycles the theme; the animation is untouched.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.theme_base(), Some("light"));
+        assert_eq!(
+            app.animation_speed(),
+            crate::config::AnimationSpeed::Slow,
+            "the animation row is not cycled while Theme is highlighted"
+        );
+
+        // Down moves the highlight to the Animations row …
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.settings.unwrap().selected, 1);
+        // … where ←/→ now cycle the speed, applied live: slow -> off.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Off);
+        assert_eq!(
+            app.theme_base(),
+            Some("light"),
+            "the theme is left as it was"
+        );
+
+        // The choice is persisted to the config file as it changes.
+        let saved = crate::config::load(&path).expect("config reloads");
+        assert_eq!(saved.settings.animation, crate::config::AnimationSpeed::Off);
+
+        // Left wraps the speed backwards: off -> slow.
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Slow);
+
+        // ↓ clamps at the last row rather than wrapping, so the highlight stays
+        // on Animations.
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.settings.unwrap().selected, 1, "clamped at the last row");
+        // ↑ returns to the Theme row.
+        app.handle_key(key(KeyCode::Up));
+        assert_eq!(app.settings.unwrap().selected, 0);
         let _ = std::fs::remove_file(&path);
     }
 

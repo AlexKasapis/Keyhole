@@ -276,6 +276,11 @@ pub struct Settings {
     /// The refresh is independent of navigation. `0` disables auto-refresh.
     #[serde(default = "default_browse_refresh_ms")]
     pub browse_refresh_ms: u64,
+    /// How fast UI animations play, or whether they play at all — a single knob
+    /// over the connected-dot breathing pulse and the transient-notification
+    /// fade-out. Cycled from the settings page.
+    #[serde(default)]
+    pub animation: AnimationSpeed,
 }
 
 impl Default for Settings {
@@ -285,6 +290,65 @@ impl Default for Settings {
             value_preview_bytes: default_value_preview_bytes(),
             tail_scrollback: default_tail_scrollback(),
             browse_refresh_ms: default_browse_refresh_ms(),
+            animation: AnimationSpeed::default(),
+        }
+    }
+}
+
+/// How fast UI animations play, or whether they play at all. One knob over the
+/// app's "liveliness", applied to every tick-driven effect: the connected-dot
+/// breathing pulse (in the connections list and the Browser's Server band) and
+/// the fade-out of a transient footer notification. `Off` freezes both — the
+/// dot holds a steady connected colour and notifications appear and vanish
+/// without dissolving. The default, `Slow`, is the app's original feel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnimationSpeed {
+    /// A quick breath and a brisk fade.
+    Fast,
+    /// A gentle, unhurried breath and fade (the default).
+    #[default]
+    Slow,
+    /// No animation: a steady dot, notifications that don't dissolve.
+    Off,
+}
+
+impl AnimationSpeed {
+    /// Every speed, in the order the settings page cycles through them.
+    pub const ALL: [AnimationSpeed; 3] = [
+        AnimationSpeed::Fast,
+        AnimationSpeed::Slow,
+        AnimationSpeed::Off,
+    ];
+
+    /// The lower-case label shown for this speed on the settings page (and how
+    /// it is written to the config file).
+    pub fn label(self) -> &'static str {
+        match self {
+            AnimationSpeed::Fast => "fast",
+            AnimationSpeed::Slow => "slow",
+            AnimationSpeed::Off => "off",
+        }
+    }
+
+    /// The period of one connected-dot breath, in milliseconds, or `None` when
+    /// animation is off (the dot holds a steady colour rather than breathing).
+    pub fn pulse_period_ms(self) -> Option<u64> {
+        match self {
+            AnimationSpeed::Fast => Some(1000),
+            AnimationSpeed::Slow => Some(2000),
+            AnimationSpeed::Off => None,
+        }
+    }
+
+    /// How long a transient notification takes to dissolve as it expires, in
+    /// milliseconds, or `None` when animation is off (it vanishes outright
+    /// without fading).
+    pub fn fade_ms(self) -> Option<u64> {
+        match self {
+            AnimationSpeed::Fast => Some(500),
+            AnimationSpeed::Slow => Some(1000),
+            AnimationSpeed::Off => None,
         }
     }
 }
@@ -409,6 +473,37 @@ mod tests {
         assert_eq!(cfg.settings.browse_refresh_ms, 1500);
         // Other settings still fall back to their defaults.
         assert_eq!(cfg.settings.scan_count, 500);
+    }
+
+    #[test]
+    fn animation_speed_defaults_to_slow_and_parses_each_value() {
+        // Absent setting defaults to the original feel.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.settings.animation, AnimationSpeed::Slow);
+
+        // Each value parses from its lower-case label …
+        for (label, speed) in [
+            ("fast", AnimationSpeed::Fast),
+            ("slow", AnimationSpeed::Slow),
+            ("off", AnimationSpeed::Off),
+        ] {
+            let text = format!("[settings]\nanimation = \"{label}\"\n");
+            let cfg: Config = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.settings.animation, speed, "parsing {label}");
+            // … and round-trips back to the same label on save.
+            let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.settings.animation, speed);
+            assert_eq!(speed.label(), label);
+        }
+
+        // Off disables both effects; the others give a pulse period and a fade.
+        assert_eq!(AnimationSpeed::Off.pulse_period_ms(), None);
+        assert_eq!(AnimationSpeed::Off.fade_ms(), None);
+        assert!(
+            AnimationSpeed::Fast.pulse_period_ms().unwrap()
+                < AnimationSpeed::Slow.pulse_period_ms().unwrap()
+        );
+        assert!(AnimationSpeed::Fast.fade_ms().unwrap() < AnimationSpeed::Slow.fade_ms().unwrap());
     }
 
     #[test]

@@ -9,30 +9,35 @@
 //!   background. Notifications that don't self-dismiss never fade (their opacity
 //!   stays `1.0`): a confirmation prompt, or a message replaced by a newer one,
 //!   simply appears or disappears outright.
+//!
+//! Both effects are scaled by the configured [`AnimationSpeed`]: it sets the
+//! breath's period (via [`pulse`]) and the fade's window (via [`fade_window`],
+//! read by [`crate::app::App::status_fade`]), and `Off` disables both outright.
 
 use ratatui::style::{Color, Modifier, Style};
 use time::OffsetDateTime;
 
+use crate::config::AnimationSpeed;
 use crate::theme::Theme;
-
-/// One full breath of the connected-dot pulse, in milliseconds. At the ~33 ms
-/// tick this is ~60 frames per cycle — a smooth, 30 fps breath rather than the
-/// stepped one a coarser tick produced.
-const PULSE_PERIOD_MS: u64 = 2000;
 
 /// The dimmest the breath fades to, as a fraction of the dot's full-colour
 /// luminance. Kept well above zero so a connected dot never reads as off, only
 /// as resting.
 const PULSE_FLOOR: f32 = 0.4;
 
-/// Apply the connection "breathing" pulse to a status dot's base style. The
-/// brightness eases continuously up and down over [`PULSE_PERIOD_MS`]: with a
-/// resolvable colour the dot's luminance is interpolated between [`PULSE_FLOOR`]
-/// and full, so the 30 fps breath is smooth; with no colour to scale (e.g.
-/// `NO_COLOR`) it falls back to stepped DIM/BOLD modifiers so the pulse still
-/// reads.
-pub(crate) fn pulse(base: Style, now: OffsetDateTime) -> Style {
-    let tri = pulse_phase(now);
+/// Apply the connection "breathing" pulse to a status dot's base style, at the
+/// configured `speed`. The brightness eases continuously up and down over one
+/// breath (whose period `speed` sets): with a resolvable colour the dot's
+/// luminance is interpolated between [`PULSE_FLOOR`] and full, so the 30 fps
+/// breath is smooth; with no colour to scale (e.g. `NO_COLOR`) it falls back to
+/// stepped DIM/BOLD modifiers so the pulse still reads. When `speed` is
+/// [`AnimationSpeed::Off`] the dot is returned unchanged — a steady, full-colour
+/// connected dot that reads as live without breathing.
+pub(crate) fn pulse(base: Style, now: OffsetDateTime, speed: AnimationSpeed) -> Style {
+    let Some(period) = speed.pulse_period_ms() else {
+        return base;
+    };
+    let tri = pulse_phase(now, period);
     match base.fg.and_then(resolve_rgb) {
         // Breathe the dot's luminance between the floor and its full colour.
         Some(fg) => base.fg(lerp_rgb(scale_rgb(fg, PULSE_FLOOR), fg, tri)),
@@ -43,11 +48,21 @@ pub(crate) fn pulse(base: Style, now: OffsetDateTime) -> Style {
     }
 }
 
+/// How long a transient notification takes to dissolve as it expires under
+/// `speed`, or `None` when animation is off (it stays solid, then vanishes).
+/// Read by [`crate::app::App::status_fade`] to size the fade window against the
+/// notification's lifetime.
+pub(crate) fn fade_window(speed: AnimationSpeed) -> Option<time::Duration> {
+    speed
+        .fade_ms()
+        .map(|ms| time::Duration::milliseconds(ms as i64))
+}
+
 /// The breath's brightness for an instant, as a fraction in `[0, 1]`: a triangle
-/// wave over the period — 0 at the period's ends, 1 at its midpoint — so the dot
+/// wave over `period_ms` — 0 at the period's ends, 1 at its midpoint — so the dot
 /// eases dim → bright → dim across each breath rather than snapping.
-fn pulse_phase(now: OffsetDateTime) -> f32 {
-    let phase = cycle_phase(now, PULSE_PERIOD_MS);
+fn pulse_phase(now: OffsetDateTime, period_ms: u64) -> f32 {
+    let phase = cycle_phase(now, period_ms);
     1.0 - (2.0 * phase - 1.0).abs()
 }
 
@@ -170,10 +185,10 @@ mod tests {
         OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000).unwrap()
     }
 
-    /// The green channel of a pulsed style, asserting the dot stays pure green
-    /// (only its brightness moves).
+    /// The green channel of a `Slow`-pulsed style, asserting the dot stays pure
+    /// green (only its brightness moves).
     fn pulse_green(now: OffsetDateTime) -> u8 {
-        match pulse(Style::new().fg(Color::Green), now).fg {
+        match pulse(Style::new().fg(Color::Green), now, AnimationSpeed::Slow).fg {
             Some(Color::Rgb(r, g, b)) => {
                 assert_eq!((r, b), (0, 0), "the dot stays green; only brightness moves");
                 g
@@ -185,7 +200,7 @@ mod tests {
     #[test]
     fn pulse_breathes_brightness_over_the_cycle() {
         // The breath eases the dot's luminance: darkest at the period's start,
-        // brightest one second in (the midpoint), and partway between at the
+        // brightest one second in (the slow midpoint), and partway between at the
         // quarter point — the triangle the eye reads as breathing.
         let trough = pulse_green(at(0));
         let quarter = pulse_green(at(500));
@@ -195,8 +210,34 @@ mod tests {
             "dim → mid → bright across the breath ({trough} < {quarter} < {peak})"
         );
         // It repeats every period, regardless of which cycle we're in.
-        assert_eq!(pulse_green(at(PULSE_PERIOD_MS as i128)), trough);
-        assert_eq!(pulse_green(at(PULSE_PERIOD_MS as i128 + 1000)), peak);
+        let period = AnimationSpeed::Slow.pulse_period_ms().unwrap() as i128;
+        assert_eq!(pulse_green(at(period)), trough);
+        assert_eq!(pulse_green(at(period + 1000)), peak);
+    }
+
+    #[test]
+    fn pulse_speed_sets_the_breath_period() {
+        let green = |now, speed| match pulse(Style::new().fg(Color::Green), now, speed).fg {
+            Some(Color::Rgb(_, g, _)) => g,
+            other => panic!("expected an RGB green, got {other:?}"),
+        };
+        // The fast breath peaks at its 500 ms midpoint, where the slow breath
+        // (twice the period) is only partway up — so fast is brighter there.
+        assert!(
+            green(at(500), AnimationSpeed::Fast) > green(at(500), AnimationSpeed::Slow),
+            "the faster breath reaches its peak sooner"
+        );
+        // Fast troughs (period ends) at 1000 ms, where the slow breath peaks.
+        assert!(green(at(1000), AnimationSpeed::Fast) < green(at(1000), AnimationSpeed::Slow));
+    }
+
+    #[test]
+    fn pulse_off_holds_the_dot_steady() {
+        // Off disables the breath entirely: the dot keeps its base style, so a
+        // connected dot reads as a steady, full-colour green.
+        let base = Style::new().fg(Color::Green);
+        assert_eq!(pulse(base, at(0), AnimationSpeed::Off), base);
+        assert_eq!(pulse(base, at(700), AnimationSpeed::Off), base);
     }
 
     #[test]
@@ -204,12 +245,27 @@ mod tests {
         // With no colour to scale (a NO_COLOR / Reset foreground, or none at all)
         // the breath steps DIM → normal → BOLD so it still reads.
         let base = Style::new().fg(Color::Reset);
-        assert!(pulse(base, at(0)).add_modifier.contains(Modifier::DIM));
-        assert!(pulse(base, at(1000)).add_modifier.contains(Modifier::BOLD));
-        assert_eq!(pulse(base, at(500)).add_modifier, Modifier::empty());
-        assert!(pulse(Style::new(), at(0))
+        let slow = AnimationSpeed::Slow;
+        assert!(pulse(base, at(0), slow)
             .add_modifier
             .contains(Modifier::DIM));
+        assert!(pulse(base, at(1000), slow)
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert_eq!(pulse(base, at(500), slow).add_modifier, Modifier::empty());
+        assert!(pulse(Style::new(), at(0), slow)
+            .add_modifier
+            .contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn fade_window_scales_with_speed_and_is_absent_when_off() {
+        // Off has no fade window (the notification vanishes without dissolving);
+        // a faster speed dissolves over a shorter window than a slower one.
+        assert_eq!(fade_window(AnimationSpeed::Off), None);
+        let fast = fade_window(AnimationSpeed::Fast).unwrap();
+        let slow = fade_window(AnimationSpeed::Slow).unwrap();
+        assert!(fast < slow, "the faster fade has a shorter window");
     }
 
     #[test]

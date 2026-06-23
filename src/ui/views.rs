@@ -16,9 +16,10 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     App, ConnForm, ConnHealth, Connection, InputMode, PaletteCommand, PaneFocus, PanelTab,
-    RecordState, Screen, SubState, Subscription, ViewRow,
+    RecordState, Screen, SettingsRow, SubState, Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerKind, ClientInfo, Payload, ServerStats, Ttl, ValueView};
+use crate::config::AnimationSpeed;
 use crate::theme::Theme;
 
 /// The merged home area: a single bordered box whose title is the tab strip
@@ -85,8 +86,12 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
     for p in &app.profiles {
         let conn = app.connections.iter().find(|c| c.name == p.name());
         let (dot, dot_style) = if app.is_connected(p.name()) {
-            // A live connection's dot breathes so the row reads as alive.
-            ("●", crate::ui::anim::pulse(theme.success, app.now))
+            // A live connection's dot breathes so the row reads as alive (at the
+            // configured speed; steady when animation is off).
+            (
+                "●",
+                crate::ui::anim::pulse(theme.success, app.now, app.animation_speed()),
+            )
         } else {
             ("○", theme.dim)
         };
@@ -196,8 +201,10 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // borrow of the active connection below.
     let health = app.conn_health();
     // The Server band's connected dot pulses on the tick clock; capture `now`
-    // before the `&mut` borrow of the active connection below.
+    // and the configured animation speed before the `&mut` borrow of the active
+    // connection below.
     let now = app.now;
+    let anim_speed = app.animation_speed();
     let panel_h = panel_band_height(frame.area().height);
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
@@ -241,7 +248,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let panel_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
 
     if let Some(band_area) = band_area {
-        server_stats_band(frame, conn, health, now, theme, band_area);
+        server_stats_band(frame, conn, health, now, anim_speed, theme, band_area);
     }
 
     let [table_area, value_area] =
@@ -427,6 +434,7 @@ fn server_stats_band(
     conn: &Connection,
     health: ConnHealth,
     now: OffsetDateTime,
+    anim_speed: AnimationSpeed,
     theme: &Theme,
     area: Rect,
 ) {
@@ -435,9 +443,10 @@ fn server_stats_band(
     // The connection-health indicator (the former top-right header dot) rides in
     // the title here, beside the "Server" label.
     let (dot, hlabel, dot_style) = crate::ui::health_indicator(health, theme);
-    // A connected dot breathes; transitional/offline states hold steady.
+    // A connected dot breathes (at the configured speed; steady when animation
+    // is off); transitional/offline states always hold steady.
     let dot_style = if health == ConnHealth::Connected {
-        crate::ui::anim::pulse(dot_style, now)
+        crate::ui::anim::pulse(dot_style, now, anim_speed)
     } else {
         dot_style
     };
@@ -1450,14 +1459,16 @@ pub fn command_palette(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
 }
 
 /// The settings-page overlay (reached from the command palette): a small centred
-/// page of options. It hosts one option today — the colour theme — shown as the
-/// current base bracketed by `‹ ›` and cycled with ←/→. The theme switch applies
-/// live, so the overlay itself is repainted in the just-picked palette.
+/// page of options, one per [`SettingsRow`]. Each shows its current value
+/// bracketed by `‹ ›`; ↑/↓ move the highlight (marked with `▶`) between rows and
+/// ←/→ cycle the highlighted row's value. Changes apply live, so the overlay
+/// itself is repainted in the just-picked theme.
 pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    if app.settings.is_none() {
+    let Some(settings) = app.settings.as_ref() else {
         return;
-    }
-    let rect = centered(area, 46, 8);
+    };
+    let rows = SettingsRow::all();
+    let rect = centered(area, 50, rows.len() as u16 + 6);
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
         .title(" Settings ")
@@ -1466,18 +1477,33 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let current = crate::theme::THEME_BASES[crate::theme::theme_base_index(app.theme_base())];
-    let lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("  Theme   ", theme.accent),
+    let theme_name = crate::theme::THEME_BASES[crate::theme::theme_base_index(app.theme_base())];
+    let mut lines = vec![Line::from("")];
+    for (i, row) in rows.iter().enumerate() {
+        let value = match row {
+            SettingsRow::Theme => theme_name.to_string(),
+            SettingsRow::Animations => app.animation_speed().label().to_string(),
+        };
+        let selected = i == settings.selected.min(rows.len().saturating_sub(1));
+        // The highlighted row gets the `▶` marker and the accent tint; the rest
+        // sit dim, so the cursor row stands out without moving the columns.
+        let (marker, label_style) = if selected {
+            ("▶ ", theme.accent)
+        } else {
+            ("  ", theme.dim)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{marker}{:<12}", row.label()), label_style),
             Span::styled("‹ ", theme.dim),
-            Span::raw(current.to_string()),
+            Span::raw(value),
             Span::styled(" ›", theme.dim),
-        ]),
-        Line::from(""),
-        Line::styled("  ←/→ change theme · Enter/Esc close", theme.dim),
-    ];
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  ↑/↓ row · ←/→ change · Enter/Esc close",
+        theme.dim,
+    ));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

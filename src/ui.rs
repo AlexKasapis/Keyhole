@@ -5,7 +5,7 @@
 //! lives with its screen (the Browser's Server band, the connections list's
 //! per-row dots).
 
-mod anim;
+pub(crate) mod anim;
 mod views;
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
@@ -774,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_overlay_renders_the_theme_option() {
+    fn settings_overlay_renders_the_theme_and_animation_options() {
         let (mut app, _rx) = test_app();
         app.settings = Some(crate::app::SettingsState::default());
         let text = screen_text(&mut app);
@@ -782,6 +782,9 @@ mod tests {
         assert!(text.contains("Theme"), "the theme option renders");
         // The default (unset) base reads as the first cycle entry, "dark".
         assert!(text.contains("dark"), "current theme shown");
+        // The animation option renders alongside it, at its default speed.
+        assert!(text.contains("Animations"), "the animation option renders");
+        assert!(text.contains("slow"), "current animation speed shown");
     }
 
     #[test]

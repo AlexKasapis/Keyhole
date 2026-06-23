@@ -63,12 +63,37 @@ pub struct PaletteState {
     pub selected: usize,
 }
 
-/// The settings-page overlay's state. It hosts one option today — the colour
-/// theme, cycled with ←/→ — so `selected` (the highlighted row) is always `0`;
-/// it is kept so adding rows later is a local change.
+/// A row on the settings page, in display order. ↑/↓ move the highlight between
+/// rows ([`SettingsState::selected`]); ←/→ cycle the highlighted row's value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsRow {
+    /// The colour theme base (`dark` / `light` / `gruvbox`).
+    Theme,
+    /// The UI animation speed (`fast` / `slow` / `off`).
+    Animations,
+}
+
+impl SettingsRow {
+    /// Every row, in the order shown on the settings page.
+    pub fn all() -> &'static [SettingsRow] {
+        &[SettingsRow::Theme, SettingsRow::Animations]
+    }
+
+    /// The label shown in this row's left column.
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsRow::Theme => "Theme",
+            SettingsRow::Animations => "Animations",
+        }
+    }
+}
+
+/// The settings-page overlay's state: which row is highlighted. The rows are
+/// fixed ([`SettingsRow::all`]); only the cursor moves. ↑/↓ move it, ←/→ cycle
+/// the highlighted row's value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SettingsState {
-    /// Index of the highlighted settings row.
+    /// Index of the highlighted row in [`SettingsRow::all`].
     pub selected: usize,
 }
 
