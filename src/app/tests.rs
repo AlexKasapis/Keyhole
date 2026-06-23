@@ -1330,28 +1330,26 @@ async fn play_pause_toggles_focused_feed_view() {
     connect(&mut app, 1, "prod", 16).await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     assert!(
-        app.active_conn()
-            .unwrap()
-            .panel_subscription()
-            .unwrap()
-            .follow
-    );
-    app.toggle_play_pause(); // pause: freeze the view
-    assert!(
         !app.active_conn()
             .unwrap()
             .panel_subscription()
             .unwrap()
-            .follow
+            .paused
     );
-    app.toggle_play_pause(); // resume: follow the newest again
+    app.toggle_play_pause(); // pause: stop tracking events
     assert!(
         app.active_conn()
             .unwrap()
             .panel_subscription()
             .unwrap()
-            .follow
+            .paused
     );
+    app.toggle_play_pause(); // resume: track and follow the newest again
+    let sub = app.active_conn().unwrap();
+    let sub = sub.panel_subscription().unwrap();
+    assert!(!sub.paused);
+    assert!(sub.follow);
+    assert_eq!(sub.offset, 0);
 }
 
 #[tokio::test]
@@ -1436,6 +1434,36 @@ async fn realtime_event_marks_tail_active_and_buffers() {
     });
     let sub = &app.connections[0].subs[0];
     assert_eq!(sub.state, SubState::Active);
+    assert_eq!(sub.received, 1);
+    assert_eq!(sub.events.len(), 1);
+}
+
+#[tokio::test]
+async fn paused_feed_marks_active_but_drops_events() {
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let sub_id = app.connections[0].subs[0].sub_id;
+    app.toggle_play_pause(); // pause the focused feed
+    app.handle_event(AppEvent::Realtime {
+        id,
+        sub_id,
+        event: broker_event("dropped"),
+    });
+    let sub = &app.connections[0].subs[0];
+    // The event still confirms the tail is live, but is not tracked.
+    assert_eq!(sub.state, SubState::Active);
+    assert_eq!(sub.received, 0);
+    assert!(sub.events.is_empty());
+
+    // Resuming begins tracking again.
+    app.toggle_play_pause();
+    app.handle_event(AppEvent::Realtime {
+        id,
+        sub_id,
+        event: broker_event("kept"),
+    });
+    let sub = &app.connections[0].subs[0];
     assert_eq!(sub.received, 1);
     assert_eq!(sub.events.len(), 1);
 }
@@ -2362,6 +2390,27 @@ async fn focusing_monitor_tab_starts_a_monitor_feed() {
     assert_eq!(conn.subs[0].label, "monitor");
     // The MONITOR feed lives under its anchor, not as its own Sub tab.
     assert_eq!(conn.active_panel(), PanelTab::Monitor);
+    // It starts paused so focusing the tab doesn't immediately track the stream.
+    assert!(conn.subs[0].paused);
+}
+
+#[tokio::test]
+async fn focus_scoped_feeds_start_paused_and_drop_events() {
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    focus_panel(&mut app, PanelTab::Keyspace);
+    let sub_id = app.active_conn().unwrap().keyspace_sub().unwrap().sub_id;
+    assert!(app.active_conn().unwrap().keyspace_sub().unwrap().paused);
+    // Events arriving while paused are dropped, not tracked.
+    app.handle_event(AppEvent::Realtime {
+        id,
+        sub_id,
+        event: broker_event("evt"),
+    });
+    let sub = app.active_conn().unwrap();
+    let sub = sub.keyspace_sub().unwrap();
+    assert_eq!(sub.received, 0);
+    assert!(sub.events.is_empty());
 }
 
 #[tokio::test]
@@ -2782,19 +2831,19 @@ async fn feed_focus_controls_the_feed_not_the_key_list() {
 
     // `p` pauses the focused feed; Space is inert on the key list.
     assert!(
-        app.active_conn()
-            .unwrap()
-            .panel_subscription()
-            .unwrap()
-            .follow
-    );
-    app.handle_key(ch('p'));
-    assert!(
         !app.active_conn()
             .unwrap()
             .panel_subscription()
             .unwrap()
-            .follow
+            .paused
+    );
+    app.handle_key(ch('p'));
+    assert!(
+        app.active_conn()
+            .unwrap()
+            .panel_subscription()
+            .unwrap()
+            .paused
     );
     let folded = app.connections[0].browser.collapsed.clone();
     app.handle_key(ch(' '));

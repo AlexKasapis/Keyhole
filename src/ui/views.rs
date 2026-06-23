@@ -668,13 +668,14 @@ fn tab_spans(
     spans
 }
 
-/// Append a fixed-anchor feed's recording (●) and paused (⏸) marks when it is live.
+/// Append a fixed-anchor feed's recording (●) and paused (⏸) marks. The pause
+/// mark tracks the explicit pause state, not a scrolled-up viewport.
 fn push_feed_marks(spans: &mut Vec<Span<'static>>, sub: Option<&Subscription>, theme: &Theme) {
     if let Some(sub) = sub {
         if sub.recording.is_on() {
             spans.push(Span::styled(" ●", theme.error));
         }
-        if !sub.follow {
+        if sub.paused {
             spans.push(Span::styled(" ⏸", theme.accent));
         }
     }
@@ -733,6 +734,9 @@ fn tail_content(frame: &mut Frame, sub: &Subscription, theme: &Theme, area: Rect
 
     let state_span = match &sub.state {
         SubState::Connecting => Span::styled("connecting…", theme.dim),
+        // A paused feed is still connected but isn't tracking events, so it reads
+        // as "paused" rather than "live" — they never show together.
+        SubState::Active if sub.paused => Span::styled("paused", theme.accent),
         SubState::Active => Span::styled("live", theme.success),
         SubState::Ended(reason) => Span::styled(
             format!(
@@ -768,11 +772,13 @@ fn tail_content(frame: &mut Frame, sub: &Subscription, theme: &Theme, area: Rect
             theme.error,
         ));
     }
-    if !sub.follow {
+    // A scrolled-up viewport (still live, events flowing into the buffer) is a
+    // distinct state from an explicit pause: flag it without claiming "paused".
+    if !sub.follow && !sub.paused {
         if !right.is_empty() {
             right.push(Span::styled(" · ", theme.dim));
         }
-        right.push(Span::styled("⏸ paused", theme.accent));
+        right.push(Span::styled("↑ scrolled", theme.accent));
     }
     if !right.is_empty() {
         right.push(Span::raw(" "));

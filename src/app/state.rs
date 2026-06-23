@@ -160,8 +160,15 @@ pub struct Subscription {
     /// Total events received (including ones evicted from the ring).
     pub received: u64,
     pub recording: RecordState,
-    /// Stick to the newest event; disabled while the user scrolls up.
+    /// Stick to the newest event; disabled while the user scrolls up. Purely a
+    /// viewport concern — events keep accumulating while scrolled up (see
+    /// [`Subscription::push`]). Distinct from [`Self::paused`].
     pub follow: bool,
+    /// Explicitly paused (the `p` key). While paused the tail stays subscribed
+    /// at the broker, but incoming events are dropped instead of tracked, so the
+    /// scrollback and the `received` tally freeze. Unlike [`Self::follow`], this
+    /// stops collection, not just the viewport.
+    pub paused: bool,
     /// How many events back from the newest the viewport bottom sits
     /// (`0` == following the newest event).
     pub offset: usize,
@@ -183,6 +190,7 @@ impl Subscription {
             received: 0,
             recording: RecordState::Off,
             follow: true,
+            paused: false,
             offset: 0,
             notice: None,
         }

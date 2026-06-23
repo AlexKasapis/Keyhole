@@ -9,11 +9,16 @@ impl App {
     pub(super) fn on_realtime(&mut self, id: ConnId, sub_id: u32, event: BrokerEvent) {
         if let Some(conn) = self.conn_by_id_mut(id) {
             if let Some(sub) = conn.sub_by_id_mut(sub_id) {
-                // First event implicitly confirms the tail is live.
+                // First event implicitly confirms the tail is live (even while
+                // paused — the broker keeps streaming; we just stop tracking).
                 if sub.state == SubState::Connecting {
                     sub.state = SubState::Active;
                 }
-                sub.push(event);
+                // While paused, drop the event instead of buffering it so the
+                // scrollback and the received tally stay frozen.
+                if !sub.paused {
+                    sub.push(event);
+                }
             }
         }
     }
@@ -236,9 +241,9 @@ impl App {
 
     /// Start a focus-scoped feed (MONITOR / keyspace) without changing the
     /// focused tab — these render under their fixed anchor, not as a `Sub` tab.
-    /// They start *paused* (frozen view): the feed accumulates from the moment it
-    /// opens, but the user presses `p` to begin following, so simply focusing the
-    /// tab doesn't immediately flood the panel with a live MONITOR stream.
+    /// They start *paused*: the feed subscribes at the broker but drops events
+    /// until the user presses `p` to begin following, so simply focusing the tab
+    /// doesn't immediately flood the panel with a live MONITOR stream.
     pub(super) fn start_feed(&mut self, spec: SubSpec) {
         let Some(id) = self.active_id() else {
             return;
@@ -253,7 +258,7 @@ impl App {
                 record: false,
             });
             let mut sub = Subscription::new(sub_id, spec, capacity);
-            sub.follow = false;
+            sub.paused = true;
             conn.subs.push(sub);
         }
     }
@@ -269,13 +274,14 @@ impl App {
         }
     }
 
-    /// Play/pause the focused live feed by freezing or resuming its view
-    /// (resuming snaps back to the newest event). Only acts on a feed tab.
+    /// Play/pause the focused live feed: pausing stops tracking incoming events
+    /// (they are dropped, not buffered), resuming snaps the viewport back to the
+    /// newest event and follows again. Only acts on a feed tab.
     pub(super) fn toggle_play_pause(&mut self) {
         if self.screen != Screen::Browser {
             return;
         }
-        let following = {
+        let paused = {
             let Some(sub) = self
                 .active_conn_mut()
                 .and_then(|c| c.panel_subscription_mut())
@@ -283,16 +289,17 @@ impl App {
                 self.set_status("no live feed on this tab to pause".to_string(), true);
                 return;
             };
-            sub.follow = !sub.follow;
-            if sub.follow {
+            sub.paused = !sub.paused;
+            if !sub.paused {
+                sub.follow = true;
                 sub.offset = 0;
             }
-            sub.follow
+            sub.paused
         };
-        let msg = if following {
-            "feed resumed"
-        } else {
+        let msg = if paused {
             "feed paused"
+        } else {
+            "feed resumed"
         };
         self.set_status(msg.to_string(), false);
     }

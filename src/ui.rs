@@ -1107,7 +1107,8 @@ mod tests {
                 meta: Vec::new(),
             });
         }
-        // Paused (scrolled off newest) with recording on.
+        // Explicitly paused (scrolled into history) with recording on.
+        sub.paused = true;
         sub.follow = false;
         sub.offset = 3;
         sub.recording = RecordState::On {
@@ -1119,7 +1120,34 @@ mod tests {
         app.connections[0].panel_tab = 4; // the pub/sub tail tab
         let text = screen_text(&mut app);
         assert!(text.contains("paused"));
+        // Paused reads as its own state, never alongside "live".
+        assert!(!text.contains("live"));
         assert!(text.contains("REC"));
+    }
+
+    #[tokio::test]
+    async fn panel_tail_renders_scrolled_cue_while_live() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        let mut sub = Subscription::new(1, SubSpec::Channel("c".into()), 100);
+        sub.state = SubState::Active;
+        for i in 0..10 {
+            sub.push(BrokerEvent {
+                ts: time::OffsetDateTime::UNIX_EPOCH,
+                source: "c".into(),
+                payload: Payload::Utf8(format!("m{i}")),
+                meta: Vec::new(),
+            });
+        }
+        // Scrolled up but still live (not paused): events keep flowing.
+        sub.follow = false;
+        sub.offset = 3;
+        app.connections[0].subs.push(sub);
+        app.connections[0].panel_tab = 4; // the pub/sub tail tab
+        let text = screen_text(&mut app);
+        assert!(text.contains("live"));
+        assert!(text.contains("scrolled"));
+        assert!(!text.contains("paused"));
     }
 
     #[tokio::test]
@@ -1517,7 +1545,9 @@ mod tests {
                 meta: Vec::new(),
             });
         }
-        // Paused (scrolled off newest) with recording active → paused + REC show.
+        // Explicitly paused (scrolled into history) with recording active →
+        // the status reads "paused" (never "live") and REC shows.
+        sub.paused = true;
         sub.follow = false;
         sub.offset = 2;
         sub.recording = RecordState::On {
