@@ -112,7 +112,10 @@ impl BrokerKind {
 #[derive(Debug, Clone)]
 pub struct Capabilities {
     pub kind: BrokerKind,
-    /// Number of selectable databases (Redis); 1 when not applicable.
+    /// Number of databases the server reports (Redis `CONFIG GET databases`); 1
+    /// when not applicable. Discovered on connect and surfaced for reference; no
+    /// in-app database switcher consumes it (the `[`/`]` switcher was removed).
+    #[allow(dead_code)]
     pub databases: u32,
     /// Key/destination browser (Browser screen).
     pub can_browse: bool,
@@ -146,7 +149,7 @@ impl Capabilities {
     /// plane AMQP 1.0 lacks; deferred to the RabbitMQ phase). `can_browse` is true
     /// so the broker lands on the Browser screen, but [`Self::uses_key_scan`] is
     /// false: the browse list is curated, not scanned, so the Redis SCAN cadence
-    /// (auto-refresh, db switching) never runs for it.
+    /// (auto-refresh) never runs for it.
     pub fn amqp() -> Self {
         Self {
             kind: BrokerKind::Amqp,
@@ -179,7 +182,7 @@ impl Capabilities {
     /// periodic auto-refresh, per-database scoping). True only for Redis; AMQP's
     /// browse list is a curated set of destinations, so the SCAN cadence must not
     /// run for it. Gates the scan-specific code paths (initial scan on connect,
-    /// auto-refresh, db switching, key navigation).
+    /// auto-refresh, key navigation).
     pub fn uses_key_scan(&self) -> bool {
         matches!(self.kind, BrokerKind::Redis)
     }

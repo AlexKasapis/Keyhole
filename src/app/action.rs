@@ -52,8 +52,6 @@ pub enum Action {
     /// cannot be closed); on the Connections tab, disconnect the selected
     /// profile's live session. Both are "close the focused thing".
     CloseTab,
-    DbPrev,
-    DbNext,
     /// Cycle the key-list sort column (Browser).
     CycleSort,
     /// Flip the key-list sort direction (Browser).
@@ -98,8 +96,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Tab) => Some(Action::NextTab),
         (false, BackTab) => Some(Action::PrevTab),
         (false, Char('/')) => Some(Action::StartFilter),
-        (false, Char('[')) => Some(Action::DbPrev),
-        (false, Char(']')) => Some(Action::DbNext),
         (false, Char('o')) => Some(Action::CycleSort),
         (false, Char('O')) => Some(Action::ToggleSortDir),
         (false, Char('z')) => Some(Action::ToggleAllGroups),
@@ -176,8 +172,6 @@ mod tests {
         assert_eq!(plain(Tab), Some(Action::NextTab));
         assert_eq!(plain(BackTab), Some(Action::PrevTab));
         assert_eq!(plain(Char('/')), Some(Action::StartFilter));
-        assert_eq!(plain(Char('[')), Some(Action::DbPrev));
-        assert_eq!(plain(Char(']')), Some(Action::DbNext));
         assert_eq!(plain(Char('o')), Some(Action::CycleSort));
         assert_eq!(plain(Char('O')), Some(Action::ToggleSortDir));
         assert_eq!(plain(Char('z')), Some(Action::ToggleAllGroups));
@@ -217,6 +211,9 @@ mod tests {
         assert_eq!(ctrl(Char('q')), None, "Ctrl-q is not a binding");
         assert_eq!(ctrl(Char('a')), None);
         assert_eq!(plain(F(1)), None);
+        // `[` / `]` once stepped the Redis database; that switcher is gone.
+        assert_eq!(plain(Char('[')), None, "'[' is unbound: no DB switcher");
+        assert_eq!(plain(Char(']')), None, "']' is unbound: no DB switcher");
         // `:` opens the command palette (see `colon_opens_palette_*`), so it is
         // deliberately *not* unbound here.
         // `w` opened the standalone Realtime screen, which is gone: tails now

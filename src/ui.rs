@@ -208,7 +208,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
             ("Esc Esc", "quit"),
         ]),
         // The footer follows the focused pane: the key list keeps its grouping /
-        // sort / db controls, while a focused bottom subpanel shows its own keys.
+        // sort controls, while a focused bottom subpanel shows its own keys.
         // (Pub/Sub & Tail anchors render the Subscribe prompt instead — see
         // `render_footer` — so only Console and the feed tabs reach this arm.)
         Screen::Browser => {
@@ -292,7 +292,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 };
                 vec![
                     ("↑↓", "keys".to_string()),
-                    ("[ ]", "db".to_string()),
                     ("⏎/Space", "collapse".to_string()),
                     ("z", "all".to_string()),
                     ("/", filter),
@@ -704,11 +703,7 @@ mod tests {
                 " ↑↓ move · Enter connect · a add",
                 "Esc Esc quit",
             ),
-            (
-                Screen::Browser,
-                " ↑↓ keys · [ ] db · ⏎/Space collapse",
-                "Esc back",
-            ),
+            (Screen::Browser, " ↑↓ keys · ⏎/Space collapse", "Esc back"),
             (
                 Screen::Recordings,
                 " ↑↓ move · PgUp/PgDn scroll",

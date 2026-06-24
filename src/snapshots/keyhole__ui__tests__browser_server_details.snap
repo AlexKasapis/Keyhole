@@ -31,4 +31,4 @@ expression: "render_lines(&mut app, 90, 30)"
 │ Net 12.0 KiB/s in · 4.0 KiB/s out              10.0.0.9:6210        5s    subscribe    │
 │  ▁▂▄▂▅▄█                                       cron                 1h    client|list  │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ keys · [ ] db · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-
+ ↑↓ keys · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-↓ panel ·

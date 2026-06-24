@@ -1837,7 +1837,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Ctrl-↑ focus keys · Ctrl-↓ focus bottom · Esc steps focus back"),
         Line::from(""),
         Line::styled("Keys pane", theme.heading),
-        Line::from("  / filter   [ ] change DB   o sort column   O direction"),
+        Line::from("  / filter   o sort column   O direction"),
         Line::from("  keys nest into collapsible groups by each ':' (start folded)"),
         Line::from("  Enter/Space collapse/expand group   z fold/unfold all"),
         Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),

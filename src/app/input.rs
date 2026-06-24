@@ -624,9 +624,6 @@ impl App {
                 Screen::Home => self.disconnect_selected_profile(),
                 _ => self.close_active_tab(),
             },
-            // `[`/`]` change DB in the Browser.
-            Action::DbPrev => self.change_db(-1),
-            Action::DbNext => self.change_db(1),
             // Browser key-list ordering and grouping. Each mutates the active
             // connection's view and reports the new state in the status bar.
             Action::CycleSort => self.browser_view(|c| {
@@ -896,29 +893,6 @@ impl App {
     pub(super) fn scroll_recording(&mut self, delta: i32) {
         let next = self.recordings_scroll as i32 + delta;
         self.recordings_scroll = next.clamp(0, u16::MAX as i32) as u16;
-    }
-
-    pub(super) fn change_db(&mut self, delta: i32) {
-        if self.screen != Screen::Browser {
-            return;
-        }
-        let Some(idx) = self.active else { return };
-        let conn = &mut self.connections[idx];
-        // Only Redis is database-scoped; AMQP has a single logical space.
-        if !conn.caps.uses_key_scan() {
-            return;
-        }
-        let max = conn.caps.databases.saturating_sub(1) as i32;
-        let new_db = (conn.db as i32 + delta).clamp(0, max) as u32;
-        if new_db == conn.db {
-            return;
-        }
-        conn.db = new_db;
-        let id = conn.id;
-        self.set_status(format!("Switched to db{new_db}"), false);
-        self.start_scan(id, true);
-        // A focused keyspace feed is db-scoped, so restart it on the new db.
-        self.sync_panel_focus();
     }
 
     /// Apply a view-setting mutation to the active connection while on the

@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ keys · [ ] db · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-
+ ↑↓ keys · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-↓ panel ·

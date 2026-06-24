@@ -187,8 +187,8 @@ impl App {
             _ => {}
         }
 
-        // The keyspace feed runs only while focused and tracks the active db, so
-        // a db change while focused restarts it on the new db.
+        // The keyspace feed runs only while focused and is scoped to the
+        // connection's db; if a running feed targets a different db it restarts.
         let keyspace = self.feed_id_if(
             |s| matches!(s, SubSpec::Keyspace { .. }),
             |s| matches!(s, SubSpec::Keyspace { db: d } if *d == db),

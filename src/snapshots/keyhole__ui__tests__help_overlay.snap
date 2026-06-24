@@ -18,7 +18,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │  Ctrl-↑ focus keys · Ctrl-↓ focus bottom · Esc steps focus back│           │
 │           │                                                                │           │
 │           │Keys pane                                                       │           │
-│           │  / filter   [ ] change DB   o sort column   O direction        │           │
+│           │  / filter   o sort column   O direction                        │           │
 │           │  keys nest into collapsible groups by each ':' (start folded)  │           │
 │           │  Enter/Space collapse/expand group   z fold/unfold all         │           │
 │           │  PgUp/PgDn scroll the value pane   keys auto-refresh           │           │

@@ -384,7 +384,7 @@ async fn keys_page_from_stale_db_is_ignored() {
     app.handle_event(AppEvent::KeysPage {
         id,
         page: BrowsePage {
-            db: 0, // stale: connection has since switched to db1
+            db: 0, // stale: tagged for a different db than the connection's (1)
             entries: vec![stream_entry("k", ValueType::String)],
             next_cursor: 0,
             epoch,
@@ -1129,30 +1129,6 @@ async fn browser_resort_keeps_highlight_on_same_key() {
     assert_eq!(view_keys(&app.connections[0]), ["b", "a"]);
     assert_eq!(app.connections[0].selected().unwrap().key, "a");
     assert_eq!(app.connections[0].browser.table.selected(), Some(2));
-}
-
-// -- change_db -----------------------------------------------------------
-
-#[tokio::test]
-async fn change_db_clamps_to_capabilities() {
-    let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 4).await; // databases 0..=3
-    assert_eq!(app.screen, Screen::Browser);
-    app.change_db(1);
-    assert_eq!(app.connections[0].db, 1);
-    app.change_db(100);
-    assert_eq!(app.connections[0].db, 3, "clamped to the last database");
-    app.change_db(-100);
-    assert_eq!(app.connections[0].db, 0, "clamped to the first database");
-}
-
-#[tokio::test]
-async fn change_db_only_acts_in_browser() {
-    let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 4).await;
-    app.screen = Screen::Home;
-    app.change_db(1);
-    assert_eq!(app.connections[0].db, 0, "no DB change outside the Browser");
 }
 
 // -- filter --------------------------------------------------------------
@@ -2919,7 +2895,7 @@ async fn leaving_monitor_tab_stops_the_feed() {
 }
 
 #[tokio::test]
-async fn keyspace_feed_uses_active_db_and_restarts_on_db_change() {
+async fn keyspace_feed_uses_active_db() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.connections[0].db = 3;
@@ -2927,12 +2903,6 @@ async fn keyspace_feed_uses_active_db_and_restarts_on_db_change() {
     assert_eq!(
         app.active_conn().unwrap().keyspace_sub().unwrap().spec,
         SubSpec::Keyspace { db: 3 }
-    );
-    // A db change while focused restarts the keyspace feed on the new db.
-    app.change_db(1);
-    assert_eq!(
-        app.active_conn().unwrap().keyspace_sub().unwrap().spec,
-        SubSpec::Keyspace { db: 4 }
     );
 }
 
@@ -3016,8 +2986,7 @@ async fn amqp_capabilities_browse_and_tail_but_no_dashboard_or_console() {
     app.screen = Screen::Home;
     app.apply(Action::GotoBrowser);
     assert_eq!(app.screen, Screen::Browser);
-    // AMQP isn't database-scoped: a db step is a no-op (stays on db 0).
-    app.change_db(1);
+    // AMQP isn't database-scoped: it stays on db 0.
     assert_eq!(app.active_conn().unwrap().db, 0);
 }
 
