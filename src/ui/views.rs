@@ -1612,19 +1612,20 @@ fn server_graph(
     frame.render_widget(spark, bars_area);
 }
 
-/// Fixed widths for the client table's address, idle, and command tail columns;
-/// the leading name column flexes to fill whatever the pane has left. The four
-/// columns are separated by single spaces (three gaps).
-const CLIENT_ADDR_COL: usize = 15;
+/// Fixed widths for the client table's name, idle, and command columns; the
+/// address column flexes to fill whatever the pane has left, since addresses
+/// vary most in length and clients often set no name at all. The four columns
+/// are separated by single spaces (three gaps).
+const CLIENT_NAME_COL: usize = 6;
 const CLIENT_IDLE_COL: usize = 4;
-const CLIENT_CMD_COL: usize = 11;
+const CLIENT_CMD_COL: usize = 13;
 
-/// The flexing name column's width for a client table `width` columns wide: the
-/// pane minus the fixed tails and the three inter-column gaps, never below room
-/// for the `Name` header itself.
-fn client_name_col(width: usize) -> usize {
+/// The flexing address column's width for a client table `width` columns wide:
+/// the pane minus the fixed columns and the three inter-column gaps, never below
+/// room for the `Addr` header itself.
+fn client_addr_col(width: usize) -> usize {
     width
-        .saturating_sub(CLIENT_ADDR_COL + CLIENT_IDLE_COL + CLIENT_CMD_COL + 3)
+        .saturating_sub(CLIENT_NAME_COL + CLIENT_IDLE_COL + CLIENT_CMD_COL + 3)
         .max(4)
 }
 
@@ -1662,12 +1663,12 @@ fn server_clients(
     }
 
     // The column header, aligned to the data rows below it via the same widths.
-    let name_w = client_name_col(columns_area.width as usize);
+    let addr_w = client_addr_col(columns_area.width as usize);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(pad_end("Name", name_w), theme.header),
+            Span::styled(pad_end("Name", CLIENT_NAME_COL), theme.header),
             Span::raw(" "),
-            Span::styled(pad_end("Addr", CLIENT_ADDR_COL), theme.header),
+            Span::styled(pad_end("Addr", addr_w), theme.header),
             Span::raw(" "),
             Span::styled(pad_end("Idle", CLIENT_IDLE_COL), theme.header),
             Span::raw(" "),
@@ -1695,7 +1696,7 @@ fn server_clients(
 /// `cmd=NULL`, which — like an empty command — renders as an em-dash rather than
 /// the literal word.
 fn client_line(client: &ClientInfo, width: usize, theme: &Theme) -> Line<'static> {
-    let name_w = client_name_col(width);
+    let addr_w = client_addr_col(width);
     let name = if client.name.is_empty() {
         "—"
     } else {
@@ -1708,12 +1709,9 @@ fn client_line(client: &ClientInfo, width: usize, theme: &Theme) -> Line<'static
     };
     let idle = short_duration(client.idle);
     Line::from(vec![
-        Span::raw(pad_end(&truncate(name, name_w), name_w)),
+        Span::raw(pad_end(&truncate(name, CLIENT_NAME_COL), CLIENT_NAME_COL)),
         Span::raw(" "),
-        Span::styled(
-            pad_end(&truncate(&client.addr, CLIENT_ADDR_COL), CLIENT_ADDR_COL),
-            theme.dim,
-        ),
+        Span::styled(pad_end(&truncate(&client.addr, addr_w), addr_w), theme.dim),
         Span::raw(" "),
         Span::styled(
             pad_end(&truncate(&idle, CLIENT_IDLE_COL), CLIENT_IDLE_COL),
