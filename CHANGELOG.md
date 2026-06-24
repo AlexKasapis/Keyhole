@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Add / edit connection form** now moves between fields with the **↑/↓ arrow
+  keys** instead of Tab / Shift-Tab. ←/→ still toggle the focused TLS / Kind
+  control, and the Tab keys are no longer bound in the form.
+
 ### Fixed
 
 - **AMQP 1.0 connections without credentials** now negotiate SASL ANONYMOUS

@@ -1529,7 +1529,7 @@ impl ConnForm {
     pub const LABELS: [&'static str; Self::FIELD_COUNT] =
         ["Name", "Host", "Port", "DB", "Username", "Password"];
 
-    /// The order focus moves through (Tab / Shift-Tab) and the order the rows
+    /// The order focus moves through (↑/↓) and the order the rows
     /// are rendered. Kind sits directly under Name — it drives the other
     /// fields' defaults, so it reads first — while TLS stays at the end. The
     /// values are the focus indices (text-field slots plus the two synthetic
@@ -2089,7 +2089,7 @@ mod tests {
 
     #[test]
     fn connform_focus_order_places_kind_directly_after_name() {
-        // Tab order mirrors the rendered layout: Name → Kind → Host → … → TLS,
+        // Focus order mirrors the rendered layout: Name → Kind → Host → … → TLS,
         // wrapping back to Name.
         let mut form = ConnForm::new();
         assert_eq!(form.focus, 0, "starts on Name");
@@ -2098,12 +2098,12 @@ mod tests {
         form.focus_next();
         assert_eq!(form.focus, 1, "Host follows Kind");
 
-        // Shift-Tab from Name wraps to the last row (TLS).
+        // Stepping back (Up) from Name wraps to the last row (TLS).
         form.focus = 0;
         form.focus_prev();
         assert_eq!(form.focus, ConnForm::TLS_FOCUS, "wrap back to TLS");
 
-        // And Shift-Tab from Kind lands back on Name.
+        // And stepping back from Kind lands back on Name.
         form.focus = ConnForm::KIND_FOCUS;
         form.focus_prev();
         assert_eq!(form.focus, 0, "Kind steps back to Name");
@@ -2149,17 +2149,14 @@ mod tests {
         form.cycle_kind(true); // -> AMQP, where slot 3 (DB) is hidden
         assert_eq!(form.kind, BrokerKind::Amqp);
 
-        // Forward: Port (2) → Username (4), hopping over the hidden DB slot (3).
+        // Down: Port (2) → Username (4), hopping over the hidden DB slot (3).
         form.focus = 2;
         form.focus_next();
-        assert_eq!(form.focus, 4, "Tab skips the hidden DB row going forward");
+        assert_eq!(form.focus, 4, "Down skips the hidden DB row going forward");
 
-        // Backward: Username (4) → Port (2), again hopping over slot 3.
+        // Up: Username (4) → Port (2), again hopping over slot 3.
         form.focus_prev();
-        assert_eq!(
-            form.focus, 2,
-            "Shift-Tab skips the hidden DB row going back"
-        );
+        assert_eq!(form.focus, 2, "Up skips the hidden DB row going back");
     }
 
     #[test]

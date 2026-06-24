@@ -1812,7 +1812,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     ]);
 
     // Kind sits directly under Name (it drives the other fields' defaults), then
-    // the connection details, with TLS last — matching the Tab order in
+    // the connection details, with TLS last — matching the ↑/↓ focus order in
     // `ConnForm::FOCUS_ORDER`. Slot 3 is shared: a Redis DB index or a RabbitMQ
     // vhost, relabelled to suit; AMQP is not database-scoped, so the row is
     // omitted entirely.
@@ -1851,9 +1851,9 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::styled(
         if editing {
-            "Tab/Shift-Tab move · Enter save · Ctrl-D delete · Esc cancel"
+            "↑/↓ move · Enter save · Ctrl-D delete · Esc cancel"
         } else {
-            "Tab/Shift-Tab move · Enter save & connect · Esc cancel"
+            "↑/↓ move · Enter save & connect · Esc cancel"
         },
         theme.dim,
     ));

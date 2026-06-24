@@ -81,7 +81,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         InputMode::Form => {
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    " editing connection — Tab move · ←/→ toggle · Enter save · Esc cancel ",
+                    " editing connection — ↑/↓ move · ←/→ toggle · Enter save · Esc cancel ",
                     theme.dim,
                 ))
                 .style(theme.status_bar),

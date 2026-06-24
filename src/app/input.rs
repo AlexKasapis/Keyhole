@@ -698,14 +698,16 @@ impl App {
                 self.mode = InputMode::Normal;
             }
             KeyCode::Enter => self.submit_form(),
-            // Tab / Shift-Tab are the sole field-movement keys; the arrow keys
-            // were duplicate bindings and have been dropped.
-            KeyCode::Tab => {
+            // ↑/↓ are the sole field-movement keys: the form is a vertical
+            // stack, so Down steps to the next row and Up to the previous,
+            // wrapping at the ends (see `ConnForm::step_focus`). The Tab keys
+            // are intentionally not bound here.
+            KeyCode::Down => {
                 if let Some(form) = &mut self.form {
                     form.focus_next();
                 }
             }
-            KeyCode::BackTab => {
+            KeyCode::Up => {
                 if let Some(form) = &mut self.form {
                     form.focus_prev();
                 }

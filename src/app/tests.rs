@@ -1827,16 +1827,21 @@ fn form_typing_and_backspace_edit_focused_field() {
 }
 
 #[test]
-fn form_tab_moves_focus_and_arrows_toggle_tls() {
+fn form_up_down_move_focus_and_arrows_toggle_tls() {
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
-    // Kind sits directly under Name, so Tab steps Name → Kind first.
-    app.handle_key(key(KeyCode::Tab));
+    // The form is a vertical stack: Kind sits directly under Name, so Down
+    // steps Name → Kind, and Up steps back.
+    app.handle_key(key(KeyCode::Down));
     assert_eq!(app.form.as_ref().unwrap().focus, ConnForm::KIND_FOCUS);
-    app.handle_key(key(KeyCode::BackTab));
+    app.handle_key(key(KeyCode::Up));
     assert_eq!(app.form.as_ref().unwrap().focus, 0);
+    // Up from the first row wraps to the last (TLS).
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.form.as_ref().unwrap().focus, ConnForm::TLS_FOCUS);
 
-    // ←/→ flip the TLS toggle when it is focused (Space no longer does — see
+    // ←/→ flip the TLS toggle when it is focused — vertical field movement and
+    // the horizontal toggle never collide (Space no longer toggles either — see
     // `form_space_types_into_fields_and_no_longer_toggles`).
     app.form.as_mut().unwrap().focus = ConnForm::TLS_FOCUS;
     app.handle_key(key(KeyCode::Right));
@@ -1846,17 +1851,18 @@ fn form_tab_moves_focus_and_arrows_toggle_tls() {
 }
 
 #[test]
-fn form_arrow_keys_no_longer_navigate() {
-    // Up/Down duplicated Tab/Shift-Tab and were removed: only Tab moves focus.
+fn form_tab_keys_no_longer_navigate() {
+    // Field movement moved from Tab/Shift-Tab to ↑/↓; the Tab keys are now
+    // inert in the form, so this can't be silently "fixed" back.
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
     assert_eq!(app.form.as_ref().unwrap().focus, 0);
-    app.handle_key(key(KeyCode::Down));
-    app.handle_key(key(KeyCode::Up));
+    app.handle_key(key(KeyCode::Tab));
+    app.handle_key(key(KeyCode::BackTab));
     assert_eq!(
         app.form.as_ref().unwrap().focus,
         0,
-        "arrow keys are no longer bound in the form"
+        "Tab / Shift-Tab no longer move focus in the form"
     );
 }
 
