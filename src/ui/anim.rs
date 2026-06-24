@@ -10,9 +10,10 @@
 //!   stays `1.0`): a confirmation prompt, or a message replaced by a newer one,
 //!   simply appears or disappears outright.
 //!
-//! Both effects are scaled by the configured [`AnimationSpeed`]: it sets the
-//! breath's period (via [`pulse`]) and the fade's window (via [`fade_window`],
-//! read by [`crate::app::App::status_fade`]), and `Off` disables both outright.
+//! Both effects are gated by the configured [`AnimationSpeed`]: `On` gives the
+//! breath its period (via [`pulse`]) and the fade its window (via
+//! [`fade_window`], read by [`crate::app::App::status_fade`]), and `Off`
+//! disables both outright.
 
 use ratatui::style::{Color, Modifier, Style};
 use time::OffsetDateTime;
@@ -25,14 +26,14 @@ use crate::theme::Theme;
 /// as resting.
 const PULSE_FLOOR: f32 = 0.4;
 
-/// Apply the connection "breathing" pulse to a status dot's base style, at the
-/// configured `speed`. The brightness eases continuously up and down over one
-/// breath (whose period `speed` sets): with a resolvable colour the dot's
-/// luminance is interpolated between [`PULSE_FLOOR`] and full, so the 30 fps
-/// breath is smooth; with no colour to scale (e.g. `NO_COLOR`) it falls back to
-/// stepped DIM/BOLD modifiers so the pulse still reads. When `speed` is
-/// [`AnimationSpeed::Off`] the dot is returned unchanged — a steady, full-colour
-/// connected dot that reads as live without breathing.
+/// Apply the connection "breathing" pulse to a status dot's base style, when the
+/// configured `speed` has animation on. The brightness eases continuously up and
+/// down over one breath: with a resolvable colour the dot's luminance is
+/// interpolated between [`PULSE_FLOOR`] and full, so the 30 fps breath is smooth;
+/// with no colour to scale (e.g. `NO_COLOR`) it falls back to stepped DIM/BOLD
+/// modifiers so the pulse still reads. When `speed` is [`AnimationSpeed::Off`]
+/// the dot is returned unchanged — a steady, full-colour connected dot that
+/// reads as live without breathing.
 pub(crate) fn pulse(base: Style, now: OffsetDateTime, speed: AnimationSpeed) -> Style {
     let Some(period) = speed.pulse_period_ms() else {
         return base;
@@ -185,10 +186,10 @@ mod tests {
         OffsetDateTime::from_unix_timestamp_nanos(ms * 1_000_000).unwrap()
     }
 
-    /// The green channel of a `Slow`-pulsed style, asserting the dot stays pure
+    /// The green channel of an `On`-pulsed style, asserting the dot stays pure
     /// green (only its brightness moves).
     fn pulse_green(now: OffsetDateTime) -> u8 {
-        match pulse(Style::new().fg(Color::Green), now, AnimationSpeed::Slow).fg {
+        match pulse(Style::new().fg(Color::Green), now, AnimationSpeed::On).fg {
             Some(Color::Rgb(r, g, b)) => {
                 assert_eq!((r, b), (0, 0), "the dot stays green; only brightness moves");
                 g
@@ -199,8 +200,8 @@ mod tests {
 
     #[test]
     fn pulse_breathes_brightness_over_the_cycle() {
-        // The breath eases the dot's luminance: darkest at the period's start,
-        // brightest one second in (the slow midpoint), and partway between at the
+        // The breath eases the dot's luminance: darkest at the start of the 2 s
+        // breath, brightest at its 1 s midpoint, and partway between at the
         // quarter point — the triangle the eye reads as breathing.
         let trough = pulse_green(at(0));
         let quarter = pulse_green(at(500));
@@ -210,25 +211,9 @@ mod tests {
             "dim → mid → bright across the breath ({trough} < {quarter} < {peak})"
         );
         // It repeats every period, regardless of which cycle we're in.
-        let period = AnimationSpeed::Slow.pulse_period_ms().unwrap() as i128;
+        let period = AnimationSpeed::On.pulse_period_ms().unwrap() as i128;
         assert_eq!(pulse_green(at(period)), trough);
         assert_eq!(pulse_green(at(period + 1000)), peak);
-    }
-
-    #[test]
-    fn pulse_speed_sets_the_breath_period() {
-        let green = |now, speed| match pulse(Style::new().fg(Color::Green), now, speed).fg {
-            Some(Color::Rgb(_, g, _)) => g,
-            other => panic!("expected an RGB green, got {other:?}"),
-        };
-        // The fast breath peaks at its 500 ms midpoint, where the slow breath
-        // (twice the period) is only partway up — so fast is brighter there.
-        assert!(
-            green(at(500), AnimationSpeed::Fast) > green(at(500), AnimationSpeed::Slow),
-            "the faster breath reaches its peak sooner"
-        );
-        // Fast troughs (period ends) at 1000 ms, where the slow breath peaks.
-        assert!(green(at(1000), AnimationSpeed::Fast) < green(at(1000), AnimationSpeed::Slow));
     }
 
     #[test]
@@ -245,27 +230,23 @@ mod tests {
         // With no colour to scale (a NO_COLOR / Reset foreground, or none at all)
         // the breath steps DIM → normal → BOLD so it still reads.
         let base = Style::new().fg(Color::Reset);
-        let slow = AnimationSpeed::Slow;
-        assert!(pulse(base, at(0), slow)
-            .add_modifier
-            .contains(Modifier::DIM));
-        assert!(pulse(base, at(1000), slow)
+        let on = AnimationSpeed::On;
+        assert!(pulse(base, at(0), on).add_modifier.contains(Modifier::DIM));
+        assert!(pulse(base, at(1000), on)
             .add_modifier
             .contains(Modifier::BOLD));
-        assert_eq!(pulse(base, at(500), slow).add_modifier, Modifier::empty());
-        assert!(pulse(Style::new(), at(0), slow)
+        assert_eq!(pulse(base, at(500), on).add_modifier, Modifier::empty());
+        assert!(pulse(Style::new(), at(0), on)
             .add_modifier
             .contains(Modifier::DIM));
     }
 
     #[test]
-    fn fade_window_scales_with_speed_and_is_absent_when_off() {
+    fn fade_window_present_when_on_and_absent_when_off() {
         // Off has no fade window (the notification vanishes without dissolving);
-        // a faster speed dissolves over a shorter window than a slower one.
+        // On dissolves over a positive window.
         assert_eq!(fade_window(AnimationSpeed::Off), None);
-        let fast = fade_window(AnimationSpeed::Fast).unwrap();
-        let slow = fade_window(AnimationSpeed::Slow).unwrap();
-        assert!(fast < slow, "the faster fade has a shorter window");
+        assert!(fade_window(AnimationSpeed::On).unwrap() > time::Duration::ZERO);
     }
 
     #[test]

@@ -69,7 +69,7 @@ pub struct PaletteState {
 pub enum SettingsRow {
     /// The colour theme base (`dark` / `light` / `gruvbox`).
     Theme,
-    /// The UI animation speed (`fast` / `slow` / `off`).
+    /// Whether UI animations play (`on` / `off`).
     Animations,
 }
 

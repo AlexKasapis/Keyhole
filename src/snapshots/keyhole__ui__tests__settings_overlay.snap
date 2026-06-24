@@ -9,7 +9,7 @@ expression: "render_lines(&mut app, 90, 16)"
 │                   ┌ Settings ──────────────────────────────────────┐                   │
 │                   │                                                │                   │
 │                   │▶ Theme       ‹ dark ›                          │                   │
-│                   │  Animations  ‹ slow ›                          │                   │
+│                   │  Animations  ‹ on ›                            │                   │
 │                   │                                                │                   │
 │                   │  ↑/↓ row · ←/→ change · Enter/Esc close        │                   │
 │                   │                                                │                   │

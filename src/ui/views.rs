@@ -86,8 +86,8 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
     for p in &app.profiles {
         let conn = app.connections.iter().find(|c| c.name == p.name());
         let (dot, dot_style) = if app.is_connected(p.name()) {
-            // A live connection's dot breathes so the row reads as alive (at the
-            // configured speed; steady when animation is off).
+            // A live connection's dot breathes so the row reads as alive (when
+            // animation is on; steady when off).
             (
                 "●",
                 crate::ui::anim::pulse(theme.success, app.now, app.animation_speed()),
@@ -201,7 +201,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // borrow of the active connection below.
     let health = app.conn_health();
     // The Server band's connected dot pulses on the tick clock; capture `now`
-    // and the configured animation speed before the `&mut` borrow of the active
+    // and the animation setting before the `&mut` borrow of the active
     // connection below.
     let now = app.now;
     let anim_speed = app.animation_speed();
@@ -443,8 +443,8 @@ fn server_stats_band(
     // The connection-health indicator (the former top-right header dot) rides in
     // the title here, beside the "Server" label.
     let (dot, hlabel, dot_style) = crate::ui::health_indicator(health, theme);
-    // A connected dot breathes (at the configured speed; steady when animation
-    // is off); transitional/offline states always hold steady.
+    // A connected dot breathes (when animation is on; steady when off);
+    // transitional/offline states always hold steady.
     let dot_style = if health == ConnHealth::Connected {
         crate::ui::anim::pulse(dot_style, now, anim_speed)
     } else {

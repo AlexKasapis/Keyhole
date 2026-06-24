@@ -119,12 +119,13 @@ impl App {
         }
     }
 
-    /// Step the UI animation speed through [`config::AnimationSpeed::ALL`] by
-    /// `delta` (wrapping). The new speed takes effect on the next tick — the
-    /// dot's breath and the notification fade both read it live — and is
-    /// persisted to the config file. Like [`Self::cycle_theme`], persisting is
-    /// best-effort: a write failure is surfaced as a footer status but the
-    /// in-memory speed still changes, so the switch is never silently lost.
+    /// Step the UI animation setting through [`config::AnimationSpeed::ALL`] by
+    /// `delta` (wrapping, so it toggles on/off). The new setting takes effect on
+    /// the next tick — the dot's breath and the notification fade both read it
+    /// live — and is persisted to the config file. Like [`Self::cycle_theme`],
+    /// persisting is best-effort: a write failure is surfaced as a footer status
+    /// but the in-memory setting still changes, so the switch is never silently
+    /// lost.
     pub(super) fn cycle_animation(&mut self, delta: i32) {
         let all = config::AnimationSpeed::ALL;
         let cur = all
@@ -254,8 +255,8 @@ mod tests {
     fn settings_navigates_rows_and_cycles_animation_live_and_persists() {
         let (mut app, path) = app_with_config_path();
         app.settings = Some(SettingsState::default());
-        // Default config: a Slow breath, with the highlight on the first row.
-        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Slow);
+        // Default config: animation on, with the highlight on the first row.
+        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::On);
         assert_eq!(app.settings.unwrap().selected, 0);
 
         // Right on the Theme row cycles the theme; the animation is untouched.
@@ -263,14 +264,14 @@ mod tests {
         assert_eq!(app.theme_base(), Some("light"));
         assert_eq!(
             app.animation_speed(),
-            crate::config::AnimationSpeed::Slow,
+            crate::config::AnimationSpeed::On,
             "the animation row is not cycled while Theme is highlighted"
         );
 
         // Down moves the highlight to the Animations row …
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.settings.unwrap().selected, 1);
-        // … where ←/→ now cycle the speed, applied live: slow -> off.
+        // … where ←/→ now toggle it, applied live: on -> off.
         app.handle_key(key(KeyCode::Right));
         assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Off);
         assert_eq!(
@@ -283,9 +284,9 @@ mod tests {
         let saved = crate::config::load(&path).expect("config reloads");
         assert_eq!(saved.settings.animation, crate::config::AnimationSpeed::Off);
 
-        // Left wraps the speed backwards: off -> slow.
+        // Left wraps the toggle backwards: off -> on.
         app.handle_key(key(KeyCode::Left));
-        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Slow);
+        assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::On);
 
         // ↓ clamps at the last row rather than wrapping, so the highlight stays
         // on Animations.

@@ -782,9 +782,9 @@ mod tests {
         assert!(text.contains("Theme"), "the theme option renders");
         // The default (unset) base reads as the first cycle entry, "dark".
         assert!(text.contains("dark"), "current theme shown");
-        // The animation option renders alongside it, at its default speed.
+        // The animation option renders alongside it, at its default (on).
         assert!(text.contains("Animations"), "the animation option renders");
-        assert!(text.contains("slow"), "current animation speed shown");
+        assert!(text.contains("‹ on ›"), "current animation setting shown");
     }
 
     #[test]
