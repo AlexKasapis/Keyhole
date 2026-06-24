@@ -108,7 +108,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
                 Span::styled(
-                    format!("   {hint}   Enter start · Tab tabs · Esc keys"),
+                    format!("   {hint}   Enter start · Ctrl-↑↓ Tab nav"),
                     theme.dim,
                 ),
             ]);
@@ -216,29 +216,37 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 .map(|c| c.focus == PaneFocus::Bottom)
                 .unwrap_or(false);
             if bottom {
-                let console = matches!(
-                    app.active_conn().map(|c| c.active_panel()),
-                    Some(PanelTab::Console)
-                );
-                if console {
-                    owned(&[
+                // The footer follows the focused bottom tab. A shared focus-nav
+                // hint leads every tab (Ctrl-↑↓ moves between the keys pane and
+                // the bottom subpanel, Tab cycles the tabs); nothing pages, and
+                // Esc no longer steps back to the keys pane.
+                match app.active_conn().map(|c| c.active_panel()) {
+                    Some(PanelTab::Console) => owned(&[
                         ("Enter", "run"),
                         ("↑↓ / Ctrl-P/N", "history"),
                         ("Ctrl-L", "clear"),
-                        ("PgUp/PgDn", "scroll"),
-                        ("Tab", "tabs"),
-                        ("Ctrl-↑/Esc", "keys"),
-                    ])
-                } else {
-                    owned(&[
-                        ("↑↓", "line"),
-                        ("PgUp/PgDn", "page"),
-                        ("p", "play/pause"),
-                        ("r", "rec"),
-                        ("x", "close"),
-                        ("Tab", "tabs"),
-                        ("Ctrl-↑/Esc", "keys"),
-                    ])
+                        ("Ctrl-↑↓ Tab", "nav"),
+                    ]),
+                    // The Server Details tab is a passive overview: ↑↓ scroll its
+                    // client list — there is no feed to play/pause, record, close.
+                    Some(PanelTab::ServerDetails) => {
+                        owned(&[("Ctrl-↑↓ Tab", "nav"), ("↑↓", "scroll"), ("?", "help")])
+                    }
+                    // A live-feed tab (Monitor / Keyspace / a pub-sub or stream
+                    // tail): it follows newest (not scrollable). p/r play-pause /
+                    // record it; only a runtime tail (`Sub`) can be closed with x.
+                    panel => {
+                        let mut pairs = vec![
+                            ("Ctrl-↑↓ Tab", "nav".to_string()),
+                            ("p", "play/pause".to_string()),
+                            ("r", "rec".to_string()),
+                        ];
+                        if matches!(panel, Some(PanelTab::Sub(_))) {
+                            pairs.push(("x", "close".to_string()));
+                        }
+                        pairs.push(("?", "help".to_string()));
+                        pairs
+                    }
                 }
             } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
                 // The AMQP keys pane is the curated destination list, not a key
@@ -249,7 +257,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 match peek {
                     Some((true, true)) => owned(&[
                         ("↑↓", "scroll"),
-                        ("PgUp/PgDn", "page"),
                         ("Esc/←", "list"),
                         (":", "palette"),
                         ("?", "help"),
@@ -299,7 +306,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
         }
         Screen::Recordings => owned(&[
             ("↑↓", "move"),
-            ("PgUp/PgDn", "scroll"),
             ("r", "rename"),
             ("dd", "delete"),
             ("Tab", "connections"),
@@ -697,11 +703,7 @@ mod tests {
                 "Esc Esc quit",
             ),
             (Screen::Browser, " ↑↓→ nav · z all", "Esc back"),
-            (
-                Screen::Recordings,
-                " ↑↓ move · PgUp/PgDn scroll",
-                "Esc back",
-            ),
+            (Screen::Recordings, " ↑↓ move · r rename", "Esc back"),
         ];
         for (screen, head, tail) in cases {
             let (mut app, _rx) = test_app();
@@ -838,6 +840,83 @@ mod tests {
         assert!(
             text.contains("Tab/Ctrl-↓ panel"),
             "browser footer advertises Tab/Ctrl-↓ to focus the panel"
+        );
+    }
+
+    #[tokio::test]
+    async fn bottom_panel_footer_shows_nav_and_only_relevant_tab_keys() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        app.connections[0].focus = PaneFocus::Bottom;
+        // A live pub/sub tail gives a closeable `Sub` tab. It sits at index 5 —
+        // after the five fixed anchors, a Channel tail follows the Pub/Sub anchor.
+        let mut sub = Subscription::new(1, SubSpec::Channel("c".into()), 100);
+        sub.state = SubState::Active;
+        app.connections[0].subs.push(sub);
+
+        let has = |pairs: &[(&'static str, String)], key: &str, action: &str| {
+            pairs.iter().any(|(k, a)| *k == key && a == action)
+        };
+
+        // Every bottom tab leads with the combined focus-nav hint, and none of
+        // them page or advertise the old Esc-to-keys step.
+        for tab in [0usize, 1, 2, 5] {
+            app.connections[0].panel_tab = tab;
+            let pairs = hint_sections(&app);
+            assert!(
+                has(&pairs, "Ctrl-↑↓ Tab", "nav"),
+                "tab {tab} footer carries the nav hint: {pairs:?}"
+            );
+            assert!(
+                !pairs.iter().any(|(k, _)| k.contains("PgUp")),
+                "tab {tab} footer drops PgUp/PgDn: {pairs:?}"
+            );
+            assert!(
+                !pairs.iter().any(|(_, a)| a == "keys"),
+                "tab {tab} footer drops the Esc-keys hint: {pairs:?}"
+            );
+        }
+
+        // Server Details (tab 0): scrolls its client list, no feed controls.
+        app.connections[0].panel_tab = 0;
+        let details = hint_sections(&app);
+        assert!(
+            has(&details, "↑↓", "scroll"),
+            "details scrolls: {details:?}"
+        );
+        for (k, a) in [("p", "play/pause"), ("r", "rec"), ("x", "close")] {
+            assert!(!has(&details, k, a), "details hides `{k} {a}`: {details:?}");
+        }
+
+        // Console (tab 1): runs commands, no p/r/x.
+        app.connections[0].panel_tab = 1;
+        let console = hint_sections(&app);
+        assert!(has(&console, "Enter", "run"), "console runs: {console:?}");
+        for (k, a) in [("p", "play/pause"), ("r", "rec"), ("x", "close")] {
+            assert!(!has(&console, k, a), "console hides `{k} {a}`: {console:?}");
+        }
+
+        // Monitor (tab 2): a fixed live feed — play/pause + record, not closeable.
+        app.connections[0].panel_tab = 2;
+        let monitor = hint_sections(&app);
+        assert!(
+            has(&monitor, "p", "play/pause"),
+            "monitor pauses: {monitor:?}"
+        );
+        assert!(has(&monitor, "r", "rec"), "monitor records: {monitor:?}");
+        assert!(
+            !has(&monitor, "x", "close"),
+            "a fixed anchor is not closeable: {monitor:?}"
+        );
+
+        // The pub/sub tail (tab 5): a live feed that can also be closed.
+        app.connections[0].panel_tab = 5;
+        let tail = hint_sections(&app);
+        assert!(has(&tail, "p", "play/pause"), "tail pauses: {tail:?}");
+        assert!(has(&tail, "r", "rec"), "tail records: {tail:?}");
+        assert!(
+            has(&tail, "x", "close"),
+            "a runtime tail is closeable: {tail:?}"
         );
     }
 

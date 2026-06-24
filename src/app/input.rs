@@ -75,16 +75,15 @@ impl App {
                 self.focus_or_cycle_panel(-1);
                 return;
             }
-            // Esc steps the keyboard back to the keys pane; from the keys pane it
-            // leaves the Browser (the global "back").
+            // Esc leaves the Browser (the global "back"). While a bottom subpanel
+            // is focused it is inert — focus moves are Ctrl-↑↓ / Tab now, so Esc
+            // no longer steps back to the keys pane.
             (false, KeyCode::Esc) => {
-                if self.bottom_focused() {
-                    self.set_pane_focus(PaneFocus::Keys);
-                } else if self.peek_focused() {
+                if self.peek_focused() {
                     // The AMQP message pane: Esc closes the detail view, then
                     // steps back to the destination list — not out of the Browser.
                     self.handle_message_key(key);
-                } else {
+                } else if !self.bottom_focused() {
                     self.apply(Action::Back);
                 }
                 return;
@@ -122,8 +121,7 @@ impl App {
     /// Keys while the AMQP destination list (left pane) is focused: navigate the
     /// list, Enter to open the selection (peek a queue / tail a topic), `a` to add
     /// a destination, `x`/`d` to remove one, `t` to tail it, `P` to publish.
-    /// `l`/`→` steps into the message pane; PageUp/Down scroll it (the right
-    /// pane), mirroring the Redis keys-pane value scroll.
+    /// `l`/`→` steps into the message pane.
     ///
     /// When the message pane holds the keyboard the keys drive that pane instead
     /// (see [`Self::handle_message_key`]).
@@ -137,8 +135,6 @@ impl App {
             (false, KeyCode::Up) => self.nav(-1),
             (false, KeyCode::Home) => self.nav_edge(true),
             (false, KeyCode::End) => self.nav_edge(false),
-            (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
-            (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
             (false, KeyCode::Enter) => self.open_selected_destination(),
             (false, KeyCode::Char('l') | KeyCode::Right) => self.focus_messages(),
             (false, KeyCode::Char('a')) => self.begin_add_destination(),
@@ -164,8 +160,6 @@ impl App {
                 (_, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
                 | (false, KeyCode::Char('h'))
                 | (_, KeyCode::Left) => self.close_detail(),
-                (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
-                (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
                 (false, KeyCode::Down) => self.scroll_peek(1),
                 (false, KeyCode::Up) => self.scroll_peek(-1),
                 (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
@@ -452,19 +446,12 @@ impl App {
     }
 
     /// Keys while a Browser live-feed tab (Monitor / Keyspace / a pub-sub or
-    /// stream tail) is focused: navigation scrolls the feed's scrollback, and
-    /// p/x/r play-pause / close / record it. Focus moves are handled upstream.
+    /// stream tail) is focused: the feed always follows the newest event (it is
+    /// not scrollable), so the only keys are p/x/r — play-pause / close / record.
+    /// Focus moves are handled upstream.
     fn handle_feed_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
-            (false, KeyCode::Down) => self.scroll_feed(-1),
-            (false, KeyCode::Up) => self.scroll_feed(1),
-            (true, KeyCode::Char('d')) => self.scroll_feed(-FEED_SCROLL_STEP),
-            (true, KeyCode::Char('u')) => self.scroll_feed(FEED_SCROLL_STEP),
-            (_, KeyCode::PageDown) => self.scroll_feed(-FEED_SCROLL_STEP),
-            (_, KeyCode::PageUp) => self.scroll_feed(FEED_SCROLL_STEP),
-            (false, KeyCode::Home) => self.feed_to_edge(true),
-            (false, KeyCode::End) => self.feed_to_edge(false),
             (false, KeyCode::Char('p')) => self.toggle_play_pause(),
             (false, KeyCode::Char('x')) => self.close_active_tab(),
             (false, KeyCode::Char('r')) => self.toggle_recording(),
@@ -483,10 +470,6 @@ impl App {
         match (ctrl, key.code) {
             (false, KeyCode::Down) => self.scroll_details(1),
             (false, KeyCode::Up) => self.scroll_details(-1),
-            (true, KeyCode::Char('d')) => self.scroll_details(FEED_SCROLL_STEP),
-            (true, KeyCode::Char('u')) => self.scroll_details(-FEED_SCROLL_STEP),
-            (_, KeyCode::PageDown) => self.scroll_details(FEED_SCROLL_STEP),
-            (_, KeyCode::PageUp) => self.scroll_details(-FEED_SCROLL_STEP),
             (false, KeyCode::Home) => self.scroll_details(i32::MIN),
             (false, KeyCode::End) => self.scroll_details(i32::MAX),
             (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
@@ -555,19 +538,6 @@ impl App {
             }
             Action::Up => self.nav(-1),
             Action::Down => self.nav(1),
-            // In the Browser these page the focused value pane and on the
-            // Recordings tab the focused recording viewer (both list-navigated
-            // with ↑↓ / g / G); on the Connections tab they page the list.
-            Action::PageUp => match self.screen {
-                Screen::Browser => self.scroll_value(-VALUE_SCROLL_STEP),
-                Screen::Recordings => self.scroll_recording(-VALUE_SCROLL_STEP),
-                Screen::Home => self.nav(-10),
-            },
-            Action::PageDown => match self.screen {
-                Screen::Browser => self.scroll_value(VALUE_SCROLL_STEP),
-                Screen::Recordings => self.scroll_recording(VALUE_SCROLL_STEP),
-                Screen::Home => self.nav(10),
-            },
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
             Action::Enter => {
@@ -869,34 +839,16 @@ impl App {
         }
     }
 
-    /// Scroll the Browser value pane by `delta` logical lines (negative = up).
-    /// The offset is clamped against the value's height when rendered, so an
-    /// over-scroll just rests at the bottom.
-    pub(super) fn scroll_value(&mut self, delta: i32) {
-        if let Some(conn) = self.active_conn_mut() {
-            let next = conn.inspector.value_scroll as i32 + delta;
-            conn.inspector.value_scroll = next.clamp(0, u16::MAX as i32) as u16;
-        }
-    }
-
     /// Scroll the Server Details client list by `delta` rows (negative = up).
     /// `i32::MIN`/`i32::MAX` jump to the top/bottom. The offset is clamped
     /// against the list height when rendered, so an over-scroll rests at the end.
     pub(super) fn scroll_details(&mut self, delta: i32) {
         if let Some(conn) = self.active_conn_mut() {
-            // Saturating: `g`/`G` pass i32::MIN/MAX to jump to the ends, which a
+            // Saturating: Home/End pass i32::MIN/MAX to jump to the ends, which a
             // plain add would overflow.
             let next = (conn.dashboard.details_scroll as i32).saturating_add(delta);
             conn.dashboard.details_scroll = next.clamp(0, u16::MAX as i32) as u16;
         }
-    }
-
-    /// Scroll the Recordings viewer pane by `delta` logical lines (negative =
-    /// up). Clamped against the content height when rendered, so an over-scroll
-    /// just rests at the bottom.
-    pub(super) fn scroll_recording(&mut self, delta: i32) {
-        let next = self.recordings_scroll as i32 + delta;
-        self.recordings_scroll = next.clamp(0, u16::MAX as i32) as u16;
     }
 
     /// Apply a view-setting mutation to the active connection while on the

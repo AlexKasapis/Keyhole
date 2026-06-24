@@ -1096,9 +1096,9 @@ fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
 }
 
 /// The right pane: a metadata header plus every record of the selected
-/// recording, vertically scrollable (PgUp/PgDn). A single left border rules it
-/// off from the list. Not a bounded preview — the whole file is loaded, so the
-/// record count is exact and any record can be scrolled to.
+/// recording. A single left border rules it off from the list. Not a bounded
+/// preview — the whole file is loaded, so the record count is exact (it shows
+/// what fits the pane; selecting another recording re-targets the viewer).
 fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::LEFT)
@@ -1864,41 +1864,39 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
     let lines = vec![
         Line::styled("Navigation", theme.heading),
-        Line::from("  ↑ ↓ move   Home/End top/bottom   Ctrl-u/d page   mouse wheel scrolls"),
+        Line::from("  ↑ ↓ move   Home/End top/bottom   mouse wheel moves"),
         Line::from("  Enter connect (Connections)   Esc step back / quit"),
         Line::from(""),
         Line::styled("Home (Connections / Recordings tabs)", theme.heading),
         Line::from("  Tab / Shift-Tab switch tabs   b jump to last-viewed browser"),
         Line::from("  Connections: Enter connect · a add · e edit/delete · x disconnect"),
-        Line::from("  Recordings: ↑↓ select · PgUp/PgDn scroll · r rename · dd delete"),
+        Line::from("  Recordings: ↑↓ select · r rename · dd delete"),
         Line::from(""),
         Line::styled("Browser — focus follows the pane", theme.heading),
         Line::from("  the focused pane has a highlighted border; the footer lists its keys"),
         Line::from("  Tab / Shift-Tab focus & cycle the bottom subpanels"),
-        Line::from("  Ctrl-↑ focus keys · Ctrl-↓ focus bottom · Esc steps focus back"),
+        Line::from("  Ctrl-↑ focus keys · Ctrl-↓ focus bottom"),
         Line::from(""),
         Line::styled("Keys pane", theme.heading),
         Line::from("  / filter   o sort column   O direction"),
         Line::from("  keys nest into collapsible groups by each ':' (start folded)"),
         Line::from("  →/l collapse/expand group   z fold/unfold all"),
-        Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),
+        Line::from("  keys auto-refresh"),
         Line::from(""),
         Line::styled("Bottom subpanel (Redis)", theme.heading),
         Line::from(
             "  tabs: Details (graphs+clients) · Console · Monitor · Keyspace · Pub/Sub · Tail",
         ),
-        Line::from(
-            "  feed tab: ↑↓/PgUp/PgDn scroll · Home/End ends (not Monitor) · p play/pause · r rec · x close",
-        ),
+        Line::from("  feed tab: follows live · p play/pause · r rec · x close (tails)"),
         Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
         Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
         Line::from("  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history"),
-        Line::from("  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused"),
+        Line::from("  Ctrl-L clear · writes/admin refused"),
         Line::from(""),
         Line::styled("AMQP browser", theme.heading),
         Line::from("  destinations are curated (AMQP 1.0 can't enumerate them)"),
         Line::from("  a add · x/d remove · Enter open (queue → peek, topic → tail) · t tail"),
-        Line::from("  PgUp/PgDn scroll the peek pane · Tail tab: type topic:/queue: then Enter"),
+        Line::from("  ↑↓ scroll an open message · Tail tab: type topic:/queue: then Enter"),
         Line::from("  peek mode (browse / skip / destructive) is set in : → Settings"),
         Line::from(""),
         Line::styled("General", theme.heading),

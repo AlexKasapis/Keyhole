@@ -63,13 +63,6 @@ const VALUE_LIMIT: usize = 200;
 /// mid-scan rebuilds are coalesced to ~this cadence. The final page always
 /// rebuilds regardless, so the finished list is exact.
 const VIEW_REBUILD_INTERVAL: Duration = Duration::from_millis(100);
-/// Lines the Browser value pane scrolls per PageUp/PageDown.
-const VALUE_SCROLL_STEP: i32 = 10;
-/// Lines the Browser console band scrolls per PageUp/PageDown while focused —
-/// roughly one band's worth of output rows (see `CONSOLE_BAND_HEIGHT` in `ui`).
-const CONSOLE_SCROLL_STEP: i32 = 4;
-/// Events a focused live-feed tab scrolls per PageUp/PageDown (or Ctrl-U/D).
-const FEED_SCROLL_STEP: i32 = 10;
 /// Live events the Monitor feed reveals into its scrollback per drawn frame. It
 /// counts every event (the tally reflects true throughput) but stores at most
 /// this many for display each frame, so under a firehose the feed scrolls at a

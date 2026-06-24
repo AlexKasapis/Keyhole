@@ -328,48 +328,6 @@ impl App {
         self.set_status(msg.to_string(), false);
     }
 
-    /// Scroll the focused feed's scrollback by `delta` events (positive = toward
-    /// older). Scrolling off the newest event disables follow; returning to it
-    /// re-enables it. No-op without a focused feed. `offset` is measured back from
-    /// the newest event, so older = larger offset (see [`Subscription::push`]).
-    pub(super) fn scroll_feed(&mut self, delta: i32) {
-        if let Some(sub) = self
-            .active_conn_mut()
-            .and_then(|c| c.panel_subscription_mut())
-        {
-            // The Monitor feed has no manual scrollback — it always follows the
-            // newest event (a paced firehose sample isn't meaningfully
-            // scrollable), so scroll keys are inert there.
-            if matches!(sub.spec, SubSpec::Monitor) {
-                return;
-            }
-            let max = sub.events.len().saturating_sub(1) as i32;
-            sub.offset = (sub.offset as i32 + delta).clamp(0, max) as usize;
-            sub.follow = sub.offset == 0;
-        }
-    }
-
-    /// Jump the focused feed to its oldest (`top`) or newest event. Newest
-    /// resumes follow; oldest freezes the view there.
-    pub(super) fn feed_to_edge(&mut self, top: bool) {
-        if let Some(sub) = self
-            .active_conn_mut()
-            .and_then(|c| c.panel_subscription_mut())
-        {
-            // The Monitor feed always follows newest; jump-to-edge is inert.
-            if matches!(sub.spec, SubSpec::Monitor) {
-                return;
-            }
-            if top {
-                sub.offset = sub.events.len().saturating_sub(1);
-                sub.follow = false;
-            } else {
-                sub.offset = 0;
-                sub.follow = true;
-            }
-        }
-    }
-
     /// Whether the active connection can open realtime tails. Tails live in the
     /// Browser's bottom panel, hosted by Redis (alongside its console) and AMQP
     /// (its only panel). See [`Capabilities::can_tail`].

@@ -249,36 +249,32 @@ async fn conn_health_keeps_green_when_one_of_several_drops() {
 }
 
 #[tokio::test]
-async fn page_keys_scroll_value_pane_in_browser() {
+async fn value_pane_is_not_scrollable() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.screen = Screen::Browser;
     assert_eq!(app.active_conn().unwrap().inspector.value_scroll, 0);
-    // PageDown scrolls the value pane down; repeated PageUp clamps at the top.
-    app.apply(Action::PageDown);
-    assert!(
-        app.active_conn().unwrap().inspector.value_scroll > 0,
-        "PageDown scrolls the Browser value pane"
-    );
-    app.apply(Action::PageUp);
-    app.apply(Action::PageUp);
+    // The value pane no longer scrolls: the Page keys are unbound on the keys
+    // pane, so the offset never leaves the top.
+    app.handle_key(key(KeyCode::PageDown));
+    app.handle_key(key(KeyCode::PageUp));
     assert_eq!(
         app.active_conn().unwrap().inspector.value_scroll,
         0,
-        "PageUp clamps at the top"
+        "the Browser value pane does not scroll"
     );
 }
 
 #[test]
-fn page_keys_navigate_list_outside_browser() {
-    // On non-Browser screens the page keys still page the focused list.
+fn page_keys_are_inert_on_the_connections_list() {
+    // The Page keys no longer page any list — only the arrows move the cursor.
     let (mut app, _rx) = build_app(config_with(&["a", "b", "c"]), unique_config_path(), None);
     assert_eq!(app.profile_state.selected(), Some(0));
-    app.apply(Action::PageDown);
+    app.handle_key(key(KeyCode::PageDown));
     assert_eq!(
         app.profile_state.selected(),
-        Some(2),
-        "PageDown pages the connections list (clamped to the last profile)"
+        Some(0),
+        "PageDown does not move the connections selection"
     );
 }
 
@@ -914,12 +910,8 @@ fn profile_navigation_moves_and_clamps() {
     app.apply(Action::Down);
     assert_eq!(app.profile_state.selected(), Some(1));
     app.apply(Action::Bottom);
-    assert_eq!(app.profile_state.selected(), Some(2));
-    app.apply(Action::PageDown);
     assert_eq!(app.profile_state.selected(), Some(2), "clamped at the end");
     app.apply(Action::Top);
-    assert_eq!(app.profile_state.selected(), Some(0));
-    app.apply(Action::PageUp);
     assert_eq!(
         app.profile_state.selected(),
         Some(0),
@@ -2662,7 +2654,7 @@ fn recordings_view_loads_for_the_selected_file() {
 }
 
 #[test]
-fn recordings_view_follows_the_selection_and_resets_scroll() {
+fn recordings_view_follows_the_selection() {
     let (mut app, _rx) = test_app();
     let dir = open_recordings(
         &mut app,
@@ -2677,19 +2669,15 @@ fn recordings_view_follows_the_selection_and_resets_scroll() {
         app.recording_view.as_ref().unwrap().0,
         app.recordings[0].name
     );
-    // Scroll the viewer, then move the selection — scroll resets to the top.
-    app.scroll_recording(20);
-    assert!(app.recordings_scroll > 0);
+    // Moving the selection re-targets the viewer at the newly selected
+    // recording; the viewer itself is not scrollable.
     app.apply(Action::Down);
     assert_eq!(
         app.recording_view.as_ref().unwrap().0,
         app.recordings[1].name,
         "the viewer tracks the selected recording"
     );
-    assert_eq!(
-        app.recordings_scroll, 0,
-        "a new recording resets the scroll"
-    );
+    assert_eq!(app.recordings_scroll, 0, "the viewer is not scrollable");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -2817,32 +2805,10 @@ async fn non_monitor_feed_ignores_the_reveal_budget() {
 }
 
 #[tokio::test]
-async fn monitor_feed_ignores_scroll_keys() {
-    // The monitor tab has no manual scrollback — it always follows newest, so
-    // scroll-up and jump-to-top are inert.
-    let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
-    let sub_id = live_monitor(&mut app);
-    for _ in 0..MONITOR_REVEAL_PER_FRAME {
-        app.begin_frame();
-        app.handle_event(AppEvent::Realtime {
-            id,
-            sub_id,
-            event: broker_event("x"),
-        });
-    }
-
-    app.scroll_feed(5);
-    app.feed_to_edge(true);
-    let sub = app.active_conn().unwrap().monitor_sub().unwrap();
-    assert!(sub.follow, "monitor always follows the newest event");
-    assert_eq!(sub.offset, 0, "monitor offset never moves");
-}
-
-#[tokio::test]
-async fn non_monitor_feed_still_scrolls() {
-    // Removing scroll is monitor-only: pub/sub and stream tails still scroll
-    // back through their history.
+async fn feeds_are_not_scrollable() {
+    // Live feeds always follow the newest event now — there are no scroll keys,
+    // so every former scroll key is inert on a focused feed and it keeps
+    // following from the bottom.
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
     app.start_subscribe(SubSpec::Channel("c".into()));
@@ -2855,11 +2821,25 @@ async fn non_monitor_feed_still_scrolls() {
             event: broker_event("x"),
         });
     }
-
-    app.scroll_feed(3);
+    // Focus the tail's tab, then press every key that used to scroll a feed.
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert!(matches!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::Sub(0)
+    ));
+    for code in [
+        KeyCode::Up,
+        KeyCode::Down,
+        KeyCode::PageUp,
+        KeyCode::PageDown,
+        KeyCode::Home,
+        KeyCode::End,
+    ] {
+        app.handle_key(key(code));
+    }
     let sub = &app.active_conn().unwrap().subs[0];
-    assert_eq!(sub.offset, 3, "non-monitor feeds still scroll");
-    assert!(!sub.follow, "scrolling up disables follow");
+    assert_eq!(sub.offset, 0, "the feed never scrolls off the newest event");
+    assert!(sub.follow, "the feed keeps following");
 }
 
 #[tokio::test]
@@ -3242,11 +3222,16 @@ async fn console_typing_and_submit_records_command() {
     assert_eq!(console.history, vec!["GET k"]);
     assert!(console.input.is_empty(), "input cleared after submit");
     assert_eq!(app.mode, InputMode::Command, "stays in command mode");
-    // Esc steps the keyboard back to the keys pane (still on the Browser); a
-    // second Esc from the keys pane then leaves the Browser.
+    // Esc is inert while the console is focused now (focus moves are Ctrl-↑↓ /
+    // Tab); Ctrl-↑ steps back to the keys pane, and Esc from there leaves.
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.screen, Screen::Browser);
-    assert!(!app.bottom_focused(), "focus returned to the keys pane");
+    assert!(
+        app.bottom_focused(),
+        "Esc does not move focus off the console"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert!(!app.bottom_focused(), "Ctrl-↑ returns to the keys pane");
     assert_eq!(app.mode, InputMode::Normal);
     app.handle_key(key(KeyCode::Esc));
     assert_eq!(app.screen, Screen::Home);
@@ -3308,22 +3293,20 @@ async fn clear_console_empties_output() {
 }
 
 #[tokio::test]
-async fn console_scroll_via_pageup_pagedown() {
+async fn console_is_not_scrollable() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
-    // The console band scrolls with PageUp/PageDown while focused (command
-    // mode); ↑↓ and Ctrl-P/N recall history.
+    // The console band always shows the newest output — it no longer scrolls,
+    // so the Page keys are inert while it is focused (command mode). ↑↓ and
+    // Ctrl-P/N still recall history.
     app.screen = Screen::Browser;
     focus_panel(&mut app, PanelTab::Console);
-    app.handle_key(key(KeyCode::PageUp)); // scroll back a page
+    app.handle_key(key(KeyCode::PageUp));
+    app.handle_key(key(KeyCode::PageDown));
     assert_eq!(
-        app.connections[0].console.scroll,
-        CONSOLE_SCROLL_STEP as u16
+        app.connections[0].console.scroll, 0,
+        "the console output band does not scroll"
     );
-    app.handle_key(key(KeyCode::PageDown)); // toward the newest output
-    assert_eq!(app.connections[0].console.scroll, 0);
-    app.handle_key(key(KeyCode::PageDown)); // clamped at the bottom
-    assert_eq!(app.connections[0].console.scroll, 0);
 }
 
 // -- pane focus ----------------------------------------------------------
@@ -3412,17 +3395,25 @@ async fn ctrl_arrows_move_focus_between_panes() {
 }
 
 #[tokio::test]
-async fn esc_steps_focus_back_to_keys_before_leaving() {
+async fn esc_is_inert_on_the_bottom_panel_then_leaves_from_the_keys_pane() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.screen = Screen::Browser;
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
     assert!(app.bottom_focused());
+    // Esc no longer steps focus back to the keys pane — it is inert while a
+    // bottom subpanel is focused (focus moves are Ctrl-↑↓ / Tab now).
     app.handle_key(key(KeyCode::Esc));
-    assert!(!app.bottom_focused(), "Esc returns focus to the keys pane");
+    assert!(
+        app.bottom_focused(),
+        "Esc does not move focus off the bottom panel"
+    );
     assert_eq!(app.screen, Screen::Browser, "still on the Browser");
+    // Ctrl-↑ returns to the keys pane; from there Esc is the global back.
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert!(!app.bottom_focused());
     app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Home, "Esc from keys leaves");
+    assert_eq!(app.screen, Screen::Home, "Esc from the keys pane leaves");
 }
 
 #[tokio::test]

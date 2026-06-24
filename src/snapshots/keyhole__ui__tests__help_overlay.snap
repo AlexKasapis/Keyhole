@@ -1,40 +1,41 @@
 ---
 source: src/ui.rs
+assertion_line: 1935
 expression: "render_lines(&mut app, 90, 40)"
 ---
 ┌ Connection┌ Help ──────────────────────────────────────────────────────────┐───────────┐
 │           │Navigation                                                      │           │
-│           │  ↑ ↓ move   Home/End top/bottom   Ctrl-u/d page   mouse wheel s│           │
+│           │  ↑ ↓ move   Home/End top/bottom   mouse wheel moves            │           │
 │           │  Enter connect (Connections)   Esc step back / quit            │           │
 │           │                                                                │           │
 │           │Home (Connections / Recordings tabs)                            │           │
 │           │  Tab / Shift-Tab switch tabs   b jump to last-viewed browser   │           │
 │           │  Connections: Enter connect · a add · e edit/delete · x disconn│           │
-│           │  Recordings: ↑↓ select · PgUp/PgDn scroll · r rename · dd delet│           │
+│           │  Recordings: ↑↓ select · r rename · dd delete                  │           │
 │           │                                                                │           │
 │           │Browser — focus follows the pane                                │           │
 │           │  the focused pane has a highlighted border; the footer lists it│           │
 │           │  Tab / Shift-Tab focus & cycle the bottom subpanels            │           │
-│           │  Ctrl-↑ focus keys · Ctrl-↓ focus bottom · Esc steps focus back│           │
+│           │  Ctrl-↑ focus keys · Ctrl-↓ focus bottom                       │           │
 │           │                                                                │           │
 │           │Keys pane                                                       │           │
 │           │  / filter   o sort column   O direction                        │           │
 │           │  keys nest into collapsible groups by each ':' (start folded)  │           │
 │           │  →/l collapse/expand group   z fold/unfold all                 │           │
-│           │  PgUp/PgDn scroll the value pane   keys auto-refresh           │           │
+│           │  keys auto-refresh                                             │           │
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
 │           │  tabs: Details (graphs+clients) · Console · Monitor · Keyspace │           │
-│           │  feed tab: ↑↓/PgUp/PgDn scroll · Home/End ends (not Monitor) · │           │
+│           │  feed tab: follows live · p play/pause · r rec · x close (tails│           │
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │  (empty Tail = selected key · a glob makes a pattern)          │           │
 │           │  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history  │           │
-│           │  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused        │           │
+│           │  Ctrl-L clear · writes/admin refused                           │           │
 │           │                                                                │           │
 │           │AMQP browser                                                    │           │
 │           │  destinations are curated (AMQP 1.0 can't enumerate them)      │           │
 │           │  a add · x/d remove · Enter open (queue → peek, topic → tail) ·│           │
-│           │  PgUp/PgDn scroll the peek pane · Tail tab: type topic:/queue: │           │
+│           │  ↑↓ scroll an open message · Tail tab: type topic:/queue: then │           │
 │           │  peek mode (browse / skip / destructive) is set in : → Settings│           │
 │           │                                                                │           │
 │           │General                                                         │           │

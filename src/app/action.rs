@@ -20,8 +20,6 @@ pub enum Action {
     Back,
     Up,
     Down,
-    PageUp,
-    PageDown,
     Top,
     Bottom,
     /// Context action: connect (connections screen) / no-op elsewhere.
@@ -80,10 +78,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (true, Char('c')) => Some(Action::Quit),
         (false, Down) => Some(Action::Down),
         (false, Up) => Some(Action::Up),
-        (true, Char('d')) => Some(Action::PageDown),
-        (true, Char('u')) => Some(Action::PageUp),
-        (_, PageDown) => Some(Action::PageDown),
-        (_, PageUp) => Some(Action::PageUp),
         (false, Home) => Some(Action::Top),
         (false, End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
@@ -193,18 +187,20 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_paging_is_distinct_from_plain_letters() {
-        assert_eq!(ctrl(Char('d')), Some(Action::PageDown));
+    fn page_keys_and_ctrl_d_u_are_unbound() {
+        // Paging is gone — no pane scrolls — so the Page keys and Ctrl-d/Ctrl-u
+        // no longer map to anything, while plain 'd' still deletes a recording.
+        assert_eq!(ctrl(Char('d')), None, "Ctrl-d no longer pages");
         assert_eq!(
             plain(Char('d')),
             Some(Action::DeleteRecording),
-            "plain 'd' deletes a recording; Ctrl-d still pages"
+            "plain 'd' deletes a recording"
         );
-        assert_eq!(ctrl(Char('u')), Some(Action::PageUp));
+        assert_eq!(ctrl(Char('u')), None, "Ctrl-u no longer pages");
         assert_eq!(plain(Char('u')), None, "plain 'u' is unbound");
-        // The physical Page keys page too (regardless of modifiers).
-        assert_eq!(plain(PageDown), Some(Action::PageDown));
-        assert_eq!(plain(PageUp), Some(Action::PageUp));
+        // The physical Page keys are unbound now too.
+        assert_eq!(plain(PageDown), None, "PageDown no longer pages");
+        assert_eq!(plain(PageUp), None, "PageUp no longer pages");
     }
 
     #[test]
@@ -218,8 +214,8 @@ mod tests {
         assert_eq!(plain(Char(']')), None, "']' is unbound: no DB switcher");
         // Space once folded the selected group; folding is now Right / `l`.
         assert_eq!(plain(Char(' ')), None, "Space is unbound: fold with Right");
-        // The vim-style movement keys are gone: arrows / Home / End (and the Page
-        // keys) are the only navigation now.
+        // The vim-style movement keys are gone: arrows / Home / End are the only
+        // navigation now (the Page keys no longer page — nothing scrolls).
         for c in ['j', 'k', 'g', 'G'] {
             assert_eq!(plain(Char(c)), None, "'{c}' is unbound: no vim movement");
         }

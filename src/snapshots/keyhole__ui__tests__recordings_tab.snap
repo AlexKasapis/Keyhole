@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 1866
 expression: "render_lines(&mut app, 100, 14)"
 ---
 ┌ Connections │ Recordings ────────────────────────────────────────────────────────────────────────┐
@@ -15,4 +16,4 @@ expression: "render_lines(&mut app, 100, 14)"
 │                                            │                                                     │
 │                                            │                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ move · PgUp/PgDn scroll · r rename · dd delete · Tab connections · b browser · : palette · ? hel
+ ↑↓ move · r rename · dd delete · Tab connections · b browser · : palette · ? help · Esc back

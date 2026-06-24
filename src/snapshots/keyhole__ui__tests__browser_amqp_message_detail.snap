@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 2022
 expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Destinations ─────────────────────────────┐┌ queue:orders · message 2/2 ───────────────┐
@@ -25,4 +26,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter tails it · topic = live multicast · queue = non-destructive browse                │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ scroll · PgUp/PgDn page · Esc/← list · : palette · ? help
+ ↑↓ scroll · Esc/← list · : palette · ? help
