@@ -86,7 +86,7 @@ pub struct ConnId(pub u32);
 
 /// Which broker a connection talks to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrokerKind {
+pub enum BrokerType {
     Redis,
     /// AMQP 1.0 (ActiveMQ / Amazon MQ / RabbitMQ 4.x).
     Amqp,
@@ -94,15 +94,15 @@ pub enum BrokerKind {
     Rabbitmq,
 }
 
-impl BrokerKind {
+impl BrokerType {
     /// A compact one-line hint of the source specs this broker accepts, shown in
     /// the subscribe prompt so the user knows what to type. The brokers tail
     /// different kinds of destination, so the hint is broker-specific.
     pub fn sub_spec_hint(self) -> &'static str {
         match self {
-            BrokerKind::Redis => "pubsub:ch · psub:ch.* · stream:key · keyspace · monitor",
-            BrokerKind::Amqp => "topic:name · queue:name",
-            BrokerKind::Rabbitmq => "exchange:name · exchange:name/binding-key",
+            BrokerType::Redis => "pubsub:ch · psub:ch.* · stream:key · keyspace · monitor",
+            BrokerType::Amqp => "topic:name · queue:name",
+            BrokerType::Rabbitmq => "exchange:name · exchange:name/binding-key",
         }
     }
 }
@@ -111,7 +111,7 @@ impl BrokerKind {
 /// broker that lacks a key browser or dashboard simply doesn't surface them.
 #[derive(Debug, Clone)]
 pub struct Capabilities {
-    pub kind: BrokerKind,
+    pub r#type: BrokerType,
     /// Number of databases the server reports (Redis `CONFIG GET databases`); 1
     /// when not applicable. Discovered on connect and surfaced for reference; no
     /// in-app database switcher consumes it (the `[`/`]` switcher was removed).
@@ -134,7 +134,7 @@ impl Capabilities {
     /// Redis: full browse + dashboard + console over `databases` databases.
     pub fn redis(databases: u32) -> Self {
         Self {
-            kind: BrokerKind::Redis,
+            r#type: BrokerType::Redis,
             databases,
             can_browse: true,
             can_dashboard: true,
@@ -152,7 +152,7 @@ impl Capabilities {
     /// (auto-refresh) never runs for it.
     pub fn amqp() -> Self {
         Self {
-            kind: BrokerKind::Amqp,
+            r#type: BrokerType::Amqp,
             databases: 1,
             can_browse: true,
             can_dashboard: false,
@@ -169,7 +169,7 @@ impl Capabilities {
     /// deferred to the RabbitMQ phase, so it stays on the Connections list.
     pub fn rabbitmq() -> Self {
         Self {
-            kind: BrokerKind::Rabbitmq,
+            r#type: BrokerType::Rabbitmq,
             databases: 1,
             can_browse: false,
             can_dashboard: false,
@@ -184,14 +184,14 @@ impl Capabilities {
     /// run for it. Gates the scan-specific code paths (initial scan on connect,
     /// auto-refresh, key navigation).
     pub fn uses_key_scan(&self) -> bool {
-        matches!(self.kind, BrokerKind::Redis)
+        matches!(self.r#type, BrokerType::Redis)
     }
 
     /// Whether the broker offers a live-tail bottom panel. Redis surfaces it
     /// alongside its console; AMQP has tails without a console, so it qualifies
-    /// on broker kind rather than [`Self::can_console`].
+    /// on broker type rather than [`Self::can_console`].
     pub fn can_tail(&self) -> bool {
-        self.can_console || matches!(self.kind, BrokerKind::Amqp)
+        self.can_console || matches!(self.r#type, BrokerType::Amqp)
     }
 }
 
@@ -574,22 +574,22 @@ impl SubSpec {
         }
     }
 
-    /// The broker kind this source spec targets. Each spec belongs to exactly
+    /// The broker type this source spec targets. Each spec belongs to exactly
     /// one broker, so a spec typed for the wrong broker can be rejected up front
     /// (with a clear message) instead of failing later at subscribe time.
     ///
     /// Exercised only by tests now that the headless `record` command (its sole
     /// caller) is gone; retained for the pending TUI realtime rework.
     #[allow(dead_code)]
-    pub fn supported_kind(&self) -> BrokerKind {
+    pub fn supported_type(&self) -> BrokerType {
         match self {
             SubSpec::Channel(_)
             | SubSpec::Pattern(_)
             | SubSpec::Stream { .. }
             | SubSpec::Keyspace { .. }
-            | SubSpec::Monitor => BrokerKind::Redis,
-            SubSpec::Topic(_) | SubSpec::Queue(_) => BrokerKind::Amqp,
-            SubSpec::Exchange { .. } => BrokerKind::Rabbitmq,
+            | SubSpec::Monitor => BrokerType::Redis,
+            SubSpec::Topic(_) | SubSpec::Queue(_) => BrokerType::Amqp,
+            SubSpec::Exchange { .. } => BrokerType::Rabbitmq,
         }
     }
 }
@@ -937,29 +937,29 @@ mod tests {
     #[test]
     fn sub_spec_supported_kind_maps_each_spec_to_its_broker() {
         assert_eq!(
-            SubSpec::Channel("c".into()).supported_kind(),
-            BrokerKind::Redis
+            SubSpec::Channel("c".into()).supported_type(),
+            BrokerType::Redis
         );
-        assert_eq!(SubSpec::Monitor.supported_kind(), BrokerKind::Redis);
+        assert_eq!(SubSpec::Monitor.supported_type(), BrokerType::Redis);
         assert_eq!(
-            SubSpec::Keyspace { db: 0 }.supported_kind(),
-            BrokerKind::Redis
-        );
-        assert_eq!(
-            SubSpec::Topic("t".into()).supported_kind(),
-            BrokerKind::Amqp
+            SubSpec::Keyspace { db: 0 }.supported_type(),
+            BrokerType::Redis
         );
         assert_eq!(
-            SubSpec::Queue("q".into()).supported_kind(),
-            BrokerKind::Amqp
+            SubSpec::Topic("t".into()).supported_type(),
+            BrokerType::Amqp
+        );
+        assert_eq!(
+            SubSpec::Queue("q".into()).supported_type(),
+            BrokerType::Amqp
         );
         assert_eq!(
             SubSpec::Exchange {
                 exchange: "e".into(),
                 binding_key: "#".into()
             }
-            .supported_kind(),
-            BrokerKind::Rabbitmq
+            .supported_type(),
+            BrokerType::Rabbitmq
         );
     }
 
@@ -1000,14 +1000,14 @@ mod tests {
     #[test]
     fn capabilities_constructors() {
         let r = Capabilities::redis(16);
-        assert_eq!(r.kind, BrokerKind::Redis);
+        assert_eq!(r.r#type, BrokerType::Redis);
         assert_eq!(r.databases, 16);
         assert!(r.can_browse && r.can_dashboard && r.can_console);
         // Redis browses via SCAN and tails alongside its console.
         assert!(r.uses_key_scan() && r.can_tail());
 
         let a = Capabilities::amqp();
-        assert_eq!(a.kind, BrokerKind::Amqp);
+        assert_eq!(a.r#type, BrokerType::Amqp);
         assert_eq!(a.databases, 1);
         // AMQP has a (curated) destination browser and tails, but no dashboard
         // or console — and it never runs the Redis SCAN cadence.
@@ -1018,7 +1018,7 @@ mod tests {
         // RabbitMQ is tail + record only for now — its browser is deferred to the
         // RabbitMQ phase, so it stays off the Browser screen.
         let rmq = Capabilities::rabbitmq();
-        assert_eq!(rmq.kind, BrokerKind::Rabbitmq);
+        assert_eq!(rmq.r#type, BrokerType::Rabbitmq);
         assert_eq!(rmq.databases, 1);
         assert!(!rmq.can_browse && !rmq.can_dashboard && !rmq.can_console);
         assert!(!rmq.uses_key_scan());
@@ -1026,9 +1026,9 @@ mod tests {
 
     #[test]
     fn sub_spec_hint_is_broker_specific() {
-        assert!(BrokerKind::Redis.sub_spec_hint().contains("pubsub:"));
-        assert!(BrokerKind::Amqp.sub_spec_hint().contains("topic:"));
-        let rmq = BrokerKind::Rabbitmq.sub_spec_hint();
+        assert!(BrokerType::Redis.sub_spec_hint().contains("pubsub:"));
+        assert!(BrokerType::Amqp.sub_spec_hint().contains("topic:"));
+        let rmq = BrokerType::Rabbitmq.sub_spec_hint();
         assert!(rmq.contains("exchange:"));
         assert!(rmq.contains("binding-key"));
     }

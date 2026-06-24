@@ -141,8 +141,8 @@ impl App {
         // `Some(idx)` edits the existing profile at that index; `None` adds a new one.
         let editing = form.editing;
 
-        let profile = match form.kind {
-            BrokerKind::Redis => {
+        let profile = match form.r#type {
+            BrokerType::Redis => {
                 let db: u32 = match form.fields[3].trim().parse() {
                     Ok(d) => d,
                     Err(_) => return self.form_error("db must be a number"),
@@ -157,7 +157,7 @@ impl App {
                     tls,
                 })
             }
-            BrokerKind::Amqp => ConnectionConfig::Amqp(AmqpProfile {
+            BrokerType::Amqp => ConnectionConfig::Amqp(AmqpProfile {
                 name,
                 host,
                 port,
@@ -168,7 +168,7 @@ impl App {
                 // adds them from the browser.
                 destinations: Vec::new(),
             }),
-            BrokerKind::Rabbitmq => {
+            BrokerType::Rabbitmq => {
                 // The DB slot is relabelled "Vhost" for RabbitMQ; empty → default "/".
                 let vhost = {
                     let v = form.fields[3].trim();

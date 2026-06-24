@@ -18,7 +18,7 @@ use crate::app::{
     App, ConnForm, ConnHealth, Connection, DestKind, InputMode, PaletteCommand, PaneFocus,
     PanelTab, RecordState, Screen, SettingsRow, SubState, Subscription, ViewRow,
 };
-use crate::broker::{BrokerEvent, BrokerKind, ClientInfo, Payload, ServerStats, Ttl, ValueView};
+use crate::broker::{BrokerEvent, BrokerType, ClientInfo, Payload, ServerStats, Ttl, ValueView};
 use crate::config::AnimationSpeed;
 use crate::theme::Theme;
 
@@ -106,7 +106,7 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
         rows.push(Row::new(vec![
             Cell::from(Span::styled(dot, dot_style)),
             Cell::from(Span::raw(p.name().to_string())),
-            Cell::from(Span::styled(p.kind_label(), theme.dim)),
+            Cell::from(Span::styled(p.type_label(), theme.dim)),
             Cell::from(Span::styled(endpoint, theme.dim)),
             Cell::from(Span::styled(info, info_style)),
         ]));
@@ -118,12 +118,12 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
     let widths = [
         Constraint::Length(1),  // status dot
         Constraint::Length(18), // name
-        Constraint::Length(8),  // kind
+        Constraint::Length(8),  // type
         Constraint::Length(26), // endpoint
         Constraint::Min(16),    // info
     ];
     let table = Table::new(rows, widths)
-        .header(Row::new(["", "NAME", "KIND", "ENDPOINT", "INFO"]).style(theme.header))
+        .header(Row::new(["", "NAME", "TYPE", "ENDPOINT", "INFO"]).style(theme.header))
         .column_spacing(2)
         .row_highlight_style(theme.selected)
         .highlight_symbol("▶ ")
@@ -136,8 +136,8 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
 /// throughput, memory); the AMQP brokers have no such endpoint, so they report
 /// liveness plus how many tails are open. Kept short so the row stays readable.
 fn connection_info(conn: &Connection) -> String {
-    match conn.caps.kind {
-        BrokerKind::Redis => {
+    match conn.caps.r#type {
+        BrokerType::Redis => {
             let mut parts: Vec<String> = Vec::new();
             if let Some(stats) = &conn.dashboard.stats {
                 if let Some(version) = &stats.redis_version {
@@ -162,7 +162,7 @@ fn connection_info(conn: &Connection) -> String {
                 parts.join(" · ")
             }
         }
-        BrokerKind::Amqp | BrokerKind::Rabbitmq => match conn.subs.len() {
+        BrokerType::Amqp | BrokerType::Rabbitmq => match conn.subs.len() {
             0 => "live".to_string(),
             1 => "live · 1 tail".to_string(),
             n => format!("live · {n} tails"),
@@ -1783,22 +1783,22 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ])
     };
 
-    let kind = match form.kind {
-        BrokerKind::Redis => "redis",
-        BrokerKind::Amqp => "amqp",
-        BrokerKind::Rabbitmq => "rabbitmq",
+    let r#type = match form.r#type {
+        BrokerType::Redis => "redis",
+        BrokerType::Amqp => "amqp",
+        BrokerType::Rabbitmq => "rabbitmq",
     };
-    let kind_focused = form.focus == ConnForm::KIND_FOCUS;
-    let kind_row = Line::from(vec![
+    let type_focused = form.focus == ConnForm::TYPE_FOCUS;
+    let type_row = Line::from(vec![
         Span::styled(
-            format!("{:>9}: ", "Kind"),
-            if kind_focused {
+            format!("{:>9}: ", "Type"),
+            if type_focused {
                 theme.accent
             } else {
                 theme.dim
             },
         ),
-        Span::raw(format!("[{kind}]")),
+        Span::raw(format!("[{}]", r#type)),
         Span::styled("  (←/→ cycles)", theme.dim),
     ]);
     let tls_focused = form.focus == ConnForm::TLS_FOCUS;
@@ -1811,21 +1811,21 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("  (←/→ toggles)", theme.dim),
     ]);
 
-    // Kind sits directly under Name (it drives the other fields' defaults), then
+    // Type sits directly under Name (it drives the other fields' defaults), then
     // the connection details, with TLS last — matching the ↑/↓ focus order in
     // `ConnForm::FOCUS_ORDER`. Slot 3 is shared: a Redis DB index or a RabbitMQ
     // vhost, relabelled to suit; AMQP is not database-scoped, so the row is
     // omitted entirely.
     let mut lines: Vec<Line> = vec![
         field_row(0, ConnForm::LABELS[0]), // Name
-        kind_row,
+        type_row,
         field_row(1, ConnForm::LABELS[1]), // Host
         field_row(2, ConnForm::LABELS[2]), // Port
     ];
-    if ConnForm::slot3_shown(form.kind) {
+    if ConnForm::slot3_shown(form.r#type) {
         lines.push(field_row(
             ConnForm::SLOT3_FIELD,
-            ConnForm::slot3_label(form.kind),
+            ConnForm::slot3_label(form.r#type),
         ));
     }
     lines.push(field_row(4, ConnForm::LABELS[4])); // Username
@@ -1833,8 +1833,8 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     lines.push(tls_row);
 
     lines.push(Line::from(""));
-    // One consolidated per-kind note (defined alongside each kind's defaults).
-    lines.push(Line::styled(ConnForm::kind_note(form.kind), theme.dim));
+    // One consolidated per-type note (defined alongside each type's defaults).
+    lines.push(Line::styled(ConnForm::type_note(form.r#type), theme.dim));
     lines.push(Line::styled(
         "Password: env:VAR · keyring · prompt · or a literal (session only)",
         theme.dim,

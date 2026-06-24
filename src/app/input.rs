@@ -114,7 +114,7 @@ impl App {
     /// browser rather than a Redis key scan).
     pub(super) fn active_is_amqp(&self) -> bool {
         self.active_conn()
-            .map(|c| c.caps.kind == BrokerKind::Amqp)
+            .map(|c| c.caps.r#type == BrokerType::Amqp)
             .unwrap_or(false)
     }
 
@@ -713,7 +713,7 @@ impl App {
                 }
             }
             // ←/→ act on the focused boolean/choice field: TLS flips either way,
-            // while Kind cycles in the arrow's direction (← back, → forward).
+            // while Type cycles in the arrow's direction (← back, → forward).
             // Space is no longer a toggle — it types a literal space into the
             // text fields, matching every other text-entry surface.
             KeyCode::Left | KeyCode::Right => {
@@ -721,7 +721,7 @@ impl App {
                 if let Some(form) = &mut self.form {
                     match form.focus {
                         ConnForm::TLS_FOCUS => form.tls = !form.tls,
-                        ConnForm::KIND_FOCUS => form.cycle_kind(forward),
+                        ConnForm::TYPE_FOCUS => form.cycle_type(forward),
                         _ => {}
                     }
                 }

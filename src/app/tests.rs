@@ -1830,10 +1830,10 @@ fn form_typing_and_backspace_edit_focused_field() {
 fn form_up_down_move_focus_and_arrows_toggle_tls() {
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
-    // The form is a vertical stack: Kind sits directly under Name, so Down
-    // steps Name → Kind, and Up steps back.
+    // The form is a vertical stack: Type sits directly under Name, so Down
+    // steps Name → Type, and Up steps back.
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.form.as_ref().unwrap().focus, ConnForm::KIND_FOCUS);
+    assert_eq!(app.form.as_ref().unwrap().focus, ConnForm::TYPE_FOCUS);
     app.handle_key(key(KeyCode::Up));
     assert_eq!(app.form.as_ref().unwrap().focus, 0);
     // Up from the first row wraps to the last (TLS).
@@ -1868,7 +1868,7 @@ fn form_tab_keys_no_longer_navigate() {
 
 #[test]
 fn form_space_types_into_fields_and_no_longer_toggles() {
-    // Regression: Space used to flip the TLS/Kind toggles even while typing a
+    // Regression: Space used to flip the TLS/Type toggles even while typing a
     // text field. Now it types a literal space into the focused text field, and
     // the booleans flip with ←/→ only.
     let (mut app, _rx) = test_app();
@@ -1985,8 +1985,8 @@ async fn form_submit_builds_rabbitmq_profile_with_vhost() {
     app.apply(Action::AddConnection);
     {
         let form = app.form.as_mut().unwrap();
-        form.cycle_kind(true); // Redis -> AMQP
-        form.cycle_kind(true); // AMQP  -> RabbitMQ
+        form.cycle_type(true); // Redis -> AMQP
+        form.cycle_type(true); // AMQP  -> RabbitMQ
         form.fields[0] = "rmq".into(); // name
         form.fields[1] = "rabbit.local".into(); // host
         form.fields[2] = "5672".into(); // port
@@ -2018,8 +2018,8 @@ async fn form_submit_rabbitmq_blank_vhost_defaults_to_root() {
     app.apply(Action::AddConnection);
     {
         let form = app.form.as_mut().unwrap();
-        form.cycle_kind(true); // -> AMQP
-        form.cycle_kind(true); // -> RabbitMQ
+        form.cycle_type(true); // -> AMQP
+        form.cycle_type(true); // -> RabbitMQ
         form.fields[0] = "rmq2".into();
         form.fields[3] = "   ".into(); // whitespace-only vhost
     }

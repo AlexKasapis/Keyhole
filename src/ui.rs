@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::{App, ConnHealth, InputMode, PaneFocus, PanelTab, Screen};
-use crate::broker::BrokerKind;
+use crate::broker::BrokerType;
 use crate::theme::Theme;
 
 /// Draw one frame from the current application state.
@@ -98,12 +98,12 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }
         InputMode::Subscribe => {
             // The accepted source specs depend on the active broker, so the
-            // prompt's hint follows its kind (falling back to Redis if somehow
+            // prompt's hint follows its type (falling back to Redis if somehow
             // there is no active connection).
             let hint = app
                 .active_conn()
-                .map(|c| c.caps.kind.sub_spec_hint())
-                .unwrap_or_else(|| BrokerKind::Redis.sub_spec_hint());
+                .map(|c| c.caps.r#type.sub_spec_hint())
+                .unwrap_or_else(|| BrokerType::Redis.sub_spec_hint());
             let line = Line::from(vec![
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
@@ -998,7 +998,7 @@ mod tests {
         let text = screen_text(&mut app);
         assert!(text.contains("Add connection"));
         assert!(text.contains("Password"));
-        assert!(text.contains("Kind"), "the broker-kind toggle renders");
+        assert!(text.contains("Type"), "the broker-type toggle renders");
         // Redis is database-scoped, so its DB row and consolidated note show.
         assert!(text.contains("DB:"), "the Redis DB row renders");
         assert!(
@@ -1057,12 +1057,12 @@ mod tests {
     fn connection_form_amqp_omits_db_row_and_shows_note() {
         let (mut app, _rx) = test_app();
         let mut form = ConnForm::new();
-        form.cycle_kind(true); // -> AMQP
+        form.cycle_type(true); // -> AMQP
         app.form = Some(form);
         app.mode = InputMode::Form;
         let text = screen_text(&mut app);
         assert!(text.contains("[amqp]"));
-        // The consolidated note replaces the per-kind blurb …
+        // The consolidated note replaces the per-type blurb …
         assert!(
             text.contains("not database-scoped"),
             "consolidated AMQP note shown"
@@ -1075,8 +1075,8 @@ mod tests {
     fn connection_form_shows_rabbitmq_hint_and_vhost_label() {
         let (mut app, _rx) = test_app();
         let mut form = ConnForm::new();
-        form.cycle_kind(true); // Redis -> AMQP
-        form.cycle_kind(true); // AMQP  -> RabbitMQ
+        form.cycle_type(true); // Redis -> AMQP
+        form.cycle_type(true); // AMQP  -> RabbitMQ
         app.form = Some(form);
         app.mode = InputMode::Form;
         let text = screen_text(&mut app);
@@ -1140,10 +1140,10 @@ mod tests {
         let text = screen_text(&mut app);
         // The connections screen is a column table with a header row …
         assert!(text.contains("NAME"));
-        assert!(text.contains("KIND"));
+        assert!(text.contains("TYPE"));
         assert!(text.contains("ENDPOINT"));
         assert!(text.contains("INFO"));
-        // … and the broker kind is its own (unbracketed) column value.
+        // … and the broker type is its own (unbracketed) column value.
         assert!(text.contains("redis"));
         assert!(text.contains("amqp"));
         assert!(text.contains("cache"));

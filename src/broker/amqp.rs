@@ -894,7 +894,7 @@ mod integration_tests {
         };
         let mut conn = AmqpConnection::new(profile, Some("admin".to_string()));
         let caps = conn.connect().await.expect("connect to test ActiveMQ");
-        assert_eq!(caps.kind, crate::broker::BrokerKind::Amqp);
+        assert_eq!(caps.r#type, crate::broker::BrokerType::Amqp);
         conn
     }
 
@@ -919,7 +919,7 @@ mod integration_tests {
             .connect()
             .await
             .expect("a credential-less connect must negotiate SASL ANONYMOUS");
-        assert_eq!(caps.kind, crate::broker::BrokerKind::Amqp);
+        assert_eq!(caps.r#type, crate::broker::BrokerType::Amqp);
         // The connection is live enough to round-trip a session (begin/end).
         conn.ping()
             .await

@@ -3,7 +3,7 @@ source: src/ui.rs
 expression: "render_lines(&mut app, 120, 12)"
 ---
 ┌ Connections │ Recordings ────────────────────────────────────────────────────────────────────────────────────────────┐
-│     NAME                KIND      ENDPOINT                    INFO                                                   │
+│     NAME                TYPE      ENDPOINT                    INFO                                                   │
 │▶ ●  cache               redis     admin@127.0.0.1:6379        v7.4.0 · 49 keys · 7 clients · 120 ops/s · 1.0 MiB     │
 │  ○  events              amqp      broker:5671 tls             offline                                                │
 │  ○  rabbit              rabbitmq  rabbit:5672/prod            offline                                                │

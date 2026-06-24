@@ -345,7 +345,7 @@ impl App {
         let raw = self.subscribe_buf.trim().to_string();
         self.subscribe_buf.clear();
         let (panel, db, is_amqp) = match self.active_conn() {
-            Some(c) => (c.active_panel(), c.db, c.caps.kind == BrokerKind::Amqp),
+            Some(c) => (c.active_panel(), c.db, c.caps.r#type == BrokerType::Amqp),
             None => return,
         };
         // AMQP's single Tail anchor accepts a full source spec (topic:name /

@@ -427,7 +427,7 @@ mod integration_tests {
     async fn connected() -> RabbitmqConnection {
         let mut conn = RabbitmqConnection::new(test_profile(), Some("keyhole".to_string()));
         let caps = conn.connect().await.expect("connect to test RabbitMQ");
-        assert_eq!(caps.kind, crate::broker::BrokerKind::Rabbitmq);
+        assert_eq!(caps.r#type, crate::broker::BrokerType::Rabbitmq);
         conn
     }
 

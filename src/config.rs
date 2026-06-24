@@ -77,8 +77,8 @@ impl ConnectionConfig {
         }
     }
 
-    /// Lowercase broker-kind tag for the connections list.
-    pub fn kind_label(&self) -> &'static str {
+    /// Lowercase broker-type tag for the connections list.
+    pub fn type_label(&self) -> &'static str {
         match self {
             ConnectionConfig::Redis(_) => "redis",
             ConnectionConfig::Amqp(_) => "amqp",
@@ -135,17 +135,17 @@ impl ConnectionConfig {
         }
     }
 
-    /// The broker kind this profile connects to.
+    /// The broker type this profile connects to.
     ///
     /// Exercised only by tests now that the headless `record` command (its sole
     /// caller) is gone; retained for the pending TUI realtime rework.
     #[allow(dead_code)]
-    pub fn broker_kind(&self) -> crate::broker::BrokerKind {
-        use crate::broker::BrokerKind;
+    pub fn broker_type(&self) -> crate::broker::BrokerType {
+        use crate::broker::BrokerType;
         match self {
-            ConnectionConfig::Redis(_) => BrokerKind::Redis,
-            ConnectionConfig::Amqp(_) => BrokerKind::Amqp,
-            ConnectionConfig::Rabbitmq(_) => BrokerKind::Rabbitmq,
+            ConnectionConfig::Redis(_) => BrokerType::Redis,
+            ConnectionConfig::Amqp(_) => BrokerType::Amqp,
+            ConnectionConfig::Rabbitmq(_) => BrokerType::Rabbitmq,
         }
     }
 
@@ -604,7 +604,7 @@ mod tests {
         assert_eq!(p.password_spec(), SecretSpec::Env("MQ_PW".into()));
         // A profile with no curated destinations defaults to an empty list.
         assert!(p.destinations.is_empty());
-        assert_eq!(cfg.connections[0].kind_label(), "amqp");
+        assert_eq!(cfg.connections[0].type_label(), "amqp");
         assert_eq!(
             cfg.connections[0].endpoint(),
             "b-x.mq.eu-west-1.amazonaws.com:5671 tls"
@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(p.vhost, "prod");
         assert!(p.tls);
         assert_eq!(p.password_spec(), SecretSpec::Env("RABBIT_PW".into()));
-        assert_eq!(cfg.connections[0].kind_label(), "rabbitmq");
+        assert_eq!(cfg.connections[0].type_label(), "rabbitmq");
         // A non-default vhost is shown in the endpoint summary.
         assert_eq!(
             cfg.connections[0].endpoint(),

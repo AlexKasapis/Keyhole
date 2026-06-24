@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 
 use crate::broker::actor::ConnHandle;
 use crate::broker::{
-    BrokerEvent, BrokerKind, BrowsePage, BrowseReq, Capabilities, ConnId, EntryMeta, ServerStats,
+    BrokerEvent, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId, EntryMeta, ServerStats,
     SubSpec, Ttl, ValueType, ValueView,
 };
 use crate::config::ConnectionConfig;
@@ -1481,17 +1481,17 @@ impl Connection {
     }
 }
 
-/// The kind-dependent defaults for the connection form's variable fields, kept
-/// in one table (see [`ConnForm::kind_defaults`]) so each broker's row is
+/// The type-dependent defaults for the connection form's variable fields, kept
+/// in one table (see [`ConnForm::type_defaults`]) so each broker's row is
 /// defined once rather than spread across parallel per-field matches.
-struct KindDefaults {
+struct TypeDefaults {
     /// Prefilled Port field.
     port: &'static str,
     /// Prefilled slot-3 value (Redis DB index / RabbitMQ vhost / unused).
     slot3: &'static str,
     /// Label shown for the slot-3 field.
     slot3_label: &'static str,
-    /// One-line note shown beneath the form to describe this broker kind.
+    /// One-line note shown beneath the form to describe this broker type.
     note: &'static str,
 }
 
@@ -1501,8 +1501,8 @@ struct KindDefaults {
 pub struct ConnForm {
     pub fields: [String; ConnForm::FIELD_COUNT],
     pub tls: bool,
-    /// Which broker the new connection talks to (cycled with the Kind toggle).
-    pub kind: BrokerKind,
+    /// Which broker the new connection talks to (cycled with the Type toggle).
+    pub r#type: BrokerType,
     pub focus: usize,
     pub error: Option<String>,
     /// When `Some(idx)`, the form edits the existing profile at that index in
@@ -1517,26 +1517,26 @@ pub struct ConnForm {
 impl ConnForm {
     pub const FIELD_COUNT: usize = 6;
     /// Index of the shared slot that carries a Redis DB index or a RabbitMQ
-    /// vhost, relabelled per kind (see [`Self::slot3_label`]).
+    /// vhost, relabelled per type (see [`Self::slot3_label`]).
     pub const SLOT3_FIELD: usize = 3;
     /// Index of the synthetic "TLS toggle" focus position.
     pub const TLS_FOCUS: usize = Self::FIELD_COUNT;
-    /// Index of the synthetic "broker kind toggle" focus position.
-    pub const KIND_FOCUS: usize = Self::FIELD_COUNT + 1;
-    /// Total number of focusable positions (fields + TLS + kind toggles).
+    /// Index of the synthetic "broker type toggle" focus position.
+    pub const TYPE_FOCUS: usize = Self::FIELD_COUNT + 1;
+    /// Total number of focusable positions (fields + TLS + type toggles).
     pub const FOCUS_COUNT: usize = Self::FIELD_COUNT + 2;
 
     pub const LABELS: [&'static str; Self::FIELD_COUNT] =
         ["Name", "Host", "Port", "DB", "Username", "Password"];
 
     /// The order focus moves through (↑/↓) and the order the rows
-    /// are rendered. Kind sits directly under Name — it drives the other
+    /// are rendered. Type sits directly under Name — it drives the other
     /// fields' defaults, so it reads first — while TLS stays at the end. The
     /// values are the focus indices (text-field slots plus the two synthetic
     /// toggles); the slot-3 (DB / Vhost) row is skipped when hidden (AMQP).
     pub const FOCUS_ORDER: [usize; Self::FOCUS_COUNT] = [
         0,                 // Name
-        Self::KIND_FOCUS,  // Kind
+        Self::TYPE_FOCUS,  // Type
         1,                 // Host
         2,                 // Port
         Self::SLOT3_FIELD, // DB / Vhost
@@ -1556,7 +1556,7 @@ impl ConnForm {
                 String::new(),
             ],
             tls: false,
-            kind: BrokerKind::Redis,
+            r#type: BrokerType::Redis,
             focus: 0,
             error: None,
             editing: None,
@@ -1571,9 +1571,9 @@ impl ConnForm {
     pub fn edit(idx: usize, profile: &ConnectionConfig) -> Self {
         let mut form = Self::new();
         form.editing = Some(idx);
-        let (kind, host, port, slot3, username, password, tls) = match profile {
+        let (r#type, host, port, slot3, username, password, tls) = match profile {
             ConnectionConfig::Redis(p) => (
-                BrokerKind::Redis,
+                BrokerType::Redis,
                 p.host.clone(),
                 p.port,
                 p.db.to_string(),
@@ -1582,7 +1582,7 @@ impl ConnForm {
                 p.tls,
             ),
             ConnectionConfig::Amqp(p) => (
-                BrokerKind::Amqp,
+                BrokerType::Amqp,
                 p.host.clone(),
                 p.port,
                 String::new(),
@@ -1591,7 +1591,7 @@ impl ConnForm {
                 p.tls,
             ),
             ConnectionConfig::Rabbitmq(p) => (
-                BrokerKind::Rabbitmq,
+                BrokerType::Rabbitmq,
                 p.host.clone(),
                 p.port,
                 p.vhost.clone(),
@@ -1600,7 +1600,7 @@ impl ConnForm {
                 p.tls,
             ),
         };
-        form.kind = kind;
+        form.r#type = r#type;
         form.fields = [
             profile.name().to_string(),
             host,
@@ -1615,44 +1615,44 @@ impl ConnForm {
         form
     }
 
-    /// Cycle the broker kind one step, fixing up the kind-dependent form fields.
+    /// Cycle the broker type one step, fixing up the type-dependent form fields.
     /// `forward` advances Redis → AMQP → RabbitMQ → Redis (Right arrow); the
     /// reverse runs Redis → RabbitMQ → AMQP → Redis (Left arrow). The **Port**
     /// means the same thing for every broker, so a value the user has customised
-    /// is preserved (only a value still holding the previous kind's default is
-    /// re-defaulted). **Slot 3's** meaning *changes* with the kind (a Redis DB
+    /// is preserved (only a value still holding the previous type's default is
+    /// re-defaulted). **Slot 3's** meaning *changes* with the type (a Redis DB
     /// index vs a RabbitMQ vhost vs unused for AMQP), so a carried-over value
-    /// would be nonsensical — it is always reset to the new kind's default rather
-    /// than bleeding across kinds.
-    pub fn cycle_kind(&mut self, forward: bool) {
-        let prev = self.kind;
-        self.kind = if forward {
+    /// would be nonsensical — it is always reset to the new type's default rather
+    /// than bleeding across types.
+    pub fn cycle_type(&mut self, forward: bool) {
+        let prev = self.r#type;
+        self.r#type = if forward {
             match prev {
-                BrokerKind::Redis => BrokerKind::Amqp,
-                BrokerKind::Amqp => BrokerKind::Rabbitmq,
-                BrokerKind::Rabbitmq => BrokerKind::Redis,
+                BrokerType::Redis => BrokerType::Amqp,
+                BrokerType::Amqp => BrokerType::Rabbitmq,
+                BrokerType::Rabbitmq => BrokerType::Redis,
             }
         } else {
             match prev {
-                BrokerKind::Redis => BrokerKind::Rabbitmq,
-                BrokerKind::Rabbitmq => BrokerKind::Amqp,
-                BrokerKind::Amqp => BrokerKind::Redis,
+                BrokerType::Redis => BrokerType::Rabbitmq,
+                BrokerType::Rabbitmq => BrokerType::Amqp,
+                BrokerType::Amqp => BrokerType::Redis,
             }
         };
-        let prev_def = Self::kind_defaults(prev);
-        let new_def = Self::kind_defaults(self.kind);
+        let prev_def = Self::type_defaults(prev);
+        let new_def = Self::type_defaults(self.r#type);
         if self.fields[2] == prev_def.port {
             self.fields[2] = new_def.port.to_string();
         }
         self.fields[Self::SLOT3_FIELD] = new_def.slot3.to_string();
     }
 
-    /// The kind-dependent form defaults in one place: the prefilled Port, the
+    /// The type-dependent form defaults in one place: the prefilled Port, the
     /// slot-3 value, and the slot-3 label (a Redis DB index vs a RabbitMQ vhost
     /// vs unused for AMQP). Adding a broker means adding one row here.
-    fn kind_defaults(kind: BrokerKind) -> KindDefaults {
-        match kind {
-            BrokerKind::Redis => KindDefaults {
+    fn type_defaults(r#type: BrokerType) -> TypeDefaults {
+        match r#type {
+            BrokerType::Redis => TypeDefaults {
                 port: "6379",
                 slot3: "0",
                 slot3_label: "DB",
@@ -1661,13 +1661,13 @@ impl ConnForm {
             // AMQP is not database-scoped, so it has no slot-3 row (the label is
             // unused). `slot3` stays empty and the field is hidden — see
             // `slot3_shown`.
-            BrokerKind::Amqp => KindDefaults {
+            BrokerType::Amqp => TypeDefaults {
                 port: "5672",
                 slot3: "",
                 slot3_label: "DB",
                 note: "AMQP 1.0: not database-scoped; port 5672, or 5671 with TLS.",
             },
-            BrokerKind::Rabbitmq => KindDefaults {
+            BrokerType::Rabbitmq => TypeDefaults {
                 port: "5672",
                 slot3: "/",
                 slot3_label: "Vhost",
@@ -1677,22 +1677,22 @@ impl ConnForm {
     }
 
     /// The label shown for the shared slot-3 field, which carries a Redis
-    /// database index or a RabbitMQ vhost depending on the selected kind.
-    pub fn slot3_label(kind: BrokerKind) -> &'static str {
-        Self::kind_defaults(kind).slot3_label
+    /// database index or a RabbitMQ vhost depending on the selected type.
+    pub fn slot3_label(r#type: BrokerType) -> &'static str {
+        Self::type_defaults(r#type).slot3_label
     }
 
-    /// The one-line note describing the selected broker kind, shown beneath the
-    /// form. Consolidated here so each kind's blurb lives beside its defaults.
-    pub fn kind_note(kind: BrokerKind) -> &'static str {
-        Self::kind_defaults(kind).note
+    /// The one-line note describing the selected broker type, shown beneath the
+    /// form. Consolidated here so each type's blurb lives beside its defaults.
+    pub fn type_note(r#type: BrokerType) -> &'static str {
+        Self::type_defaults(r#type).note
     }
 
-    /// Whether the shared slot-3 field (DB / Vhost) is shown for this kind.
+    /// Whether the shared slot-3 field (DB / Vhost) is shown for this type.
     /// AMQP 1.0 is not database-scoped, so it has no slot-3 row at all and the
     /// field is skipped both when rendering and when cycling focus.
-    pub fn slot3_shown(kind: BrokerKind) -> bool {
-        !matches!(kind, BrokerKind::Amqp)
+    pub fn slot3_shown(r#type: BrokerType) -> bool {
+        !matches!(r#type, BrokerType::Amqp)
     }
 
     pub fn focus_next(&mut self) {
@@ -1714,7 +1714,7 @@ impl ConnForm {
         loop {
             at = (at + delta).rem_euclid(n);
             let next = order[at as usize];
-            if next == Self::SLOT3_FIELD && !Self::slot3_shown(self.kind) {
+            if next == Self::SLOT3_FIELD && !Self::slot3_shown(self.r#type) {
                 continue;
             }
             self.focus = next;
@@ -2011,16 +2011,16 @@ mod tests {
     }
 
     #[test]
-    fn connform_cycle_kind_forward_cycles_and_tracks_field_defaults() {
+    fn connform_cycle_type_forward_cycles_and_tracks_field_defaults() {
         let mut form = ConnForm::new();
         // Fresh form starts as Redis with its defaults.
-        assert_eq!(form.kind, BrokerKind::Redis);
+        assert_eq!(form.r#type, BrokerType::Redis);
         assert_eq!(form.fields[2], "6379");
         assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "0");
 
         // Redis → AMQP: port and the DB slot move to AMQP's defaults.
-        form.cycle_kind(true);
-        assert_eq!(form.kind, BrokerKind::Amqp);
+        form.cycle_type(true);
+        assert_eq!(form.r#type, BrokerType::Amqp);
         assert_eq!(form.fields[2], "5672");
         assert_eq!(
             form.fields[ConnForm::SLOT3_FIELD],
@@ -2029,84 +2029,84 @@ mod tests {
         );
 
         // AMQP → RabbitMQ: port stays 5672, the slot becomes the vhost default.
-        form.cycle_kind(true);
-        assert_eq!(form.kind, BrokerKind::Rabbitmq);
+        form.cycle_type(true);
+        assert_eq!(form.r#type, BrokerType::Rabbitmq);
         assert_eq!(form.fields[2], "5672");
         assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "/");
-        assert_eq!(ConnForm::slot3_label(form.kind), "Vhost");
+        assert_eq!(ConnForm::slot3_label(form.r#type), "Vhost");
 
         // RabbitMQ → Redis: back to the Redis defaults — full cycle restored.
-        form.cycle_kind(true);
-        assert_eq!(form.kind, BrokerKind::Redis);
+        form.cycle_type(true);
+        assert_eq!(form.r#type, BrokerType::Redis);
         assert_eq!(form.fields[2], "6379");
         assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "0");
-        assert_eq!(ConnForm::slot3_label(form.kind), "DB");
+        assert_eq!(ConnForm::slot3_label(form.r#type), "DB");
     }
 
     #[test]
-    fn connform_cycle_kind_backward_is_the_reverse_order() {
+    fn connform_cycle_type_backward_is_the_reverse_order() {
         // Left arrow walks the cycle the other way: Redis → RabbitMQ → AMQP →
         // Redis, the mirror of the forward (Right) direction.
         let mut form = ConnForm::new();
-        assert_eq!(form.kind, BrokerKind::Redis);
+        assert_eq!(form.r#type, BrokerType::Redis);
 
-        form.cycle_kind(false);
-        assert_eq!(form.kind, BrokerKind::Rabbitmq);
+        form.cycle_type(false);
+        assert_eq!(form.r#type, BrokerType::Rabbitmq);
         assert_eq!(form.fields[2], "5672");
         assert_eq!(form.fields[ConnForm::SLOT3_FIELD], "/");
 
-        form.cycle_kind(false);
-        assert_eq!(form.kind, BrokerKind::Amqp);
+        form.cycle_type(false);
+        assert_eq!(form.r#type, BrokerType::Amqp);
 
-        form.cycle_kind(false);
-        assert_eq!(form.kind, BrokerKind::Redis);
+        form.cycle_type(false);
+        assert_eq!(form.r#type, BrokerType::Redis);
 
         // Forward then back from a fresh form returns to the start.
         let mut there_and_back = ConnForm::new();
-        there_and_back.cycle_kind(true);
-        there_and_back.cycle_kind(false);
-        assert_eq!(there_and_back.kind, BrokerKind::Redis);
+        there_and_back.cycle_type(true);
+        there_and_back.cycle_type(false);
+        assert_eq!(there_and_back.r#type, BrokerType::Redis);
     }
 
     #[test]
-    fn connform_cycle_kind_preserves_custom_port_but_resets_slot3() {
+    fn connform_cycle_type_preserves_custom_port_but_resets_slot3() {
         let mut form = ConnForm::new();
         // Port means the same across brokers, so a user-typed value (no longer
-        // the previous kind's default) survives a kind switch …
+        // the previous type's default) survives a type switch …
         form.fields[2] = "7000".to_string();
-        // … but slot-3's meaning changes per kind (a Redis DB index vs a vhost),
-        // so a value there must NOT bleed across kinds — it resets to the new
-        // kind's default. (Finding: a stray DB value otherwise became a vhost.)
+        // … but slot-3's meaning changes per type (a Redis DB index vs a vhost),
+        // so a value there must NOT bleed across types — it resets to the new
+        // type's default. (Finding: a stray DB value otherwise became a vhost.)
         form.fields[ConnForm::SLOT3_FIELD] = "3".to_string();
-        form.cycle_kind(true); // Redis -> AMQP
+        form.cycle_type(true); // Redis -> AMQP
         assert_eq!(form.fields[2], "7000", "custom port preserved");
         assert_eq!(
             form.fields[ConnForm::SLOT3_FIELD],
             "",
-            "slot-3 reset to the new kind's default, not carried over"
+            "slot-3 reset to the new type's default, not carried over"
         );
     }
 
     #[test]
-    fn connform_focus_order_places_kind_directly_after_name() {
-        // Focus order mirrors the rendered layout: Name → Kind → Host → … → TLS,
+    fn connform_focus_order_places_type_directly_after_name() {
+        // Focus order mirrors the rendered layout: Name → Type → Host → … → TLS,
         // wrapping back to Name.
         let mut form = ConnForm::new();
         assert_eq!(form.focus, 0, "starts on Name");
         form.focus_next();
-        assert_eq!(form.focus, ConnForm::KIND_FOCUS, "Kind follows Name");
+        assert_eq!(form.focus, ConnForm::TYPE_FOCUS, "Type follows Name");
         form.focus_next();
-        assert_eq!(form.focus, 1, "Host follows Kind");
+        assert_eq!(form.focus, 1, "Host follows Type");
 
         // Stepping back (Up) from Name wraps to the last row (TLS).
         form.focus = 0;
         form.focus_prev();
         assert_eq!(form.focus, ConnForm::TLS_FOCUS, "wrap back to TLS");
 
-        // And stepping back from Kind lands back on Name.
-        form.focus = ConnForm::KIND_FOCUS;
+        // And stepping back from Type lands back on Name.
+        form.focus = ConnForm::TYPE_FOCUS;
         form.focus_prev();
-        assert_eq!(form.focus, 0, "Kind steps back to Name");
+        assert_eq!(form.focus, 0, "Type steps back to Name");
     }
 
     #[test]
@@ -2123,7 +2123,7 @@ mod tests {
         });
         let form = ConnForm::edit(3, &profile);
         assert_eq!(form.editing, Some(3), "remembers the profile index");
-        assert_eq!(form.kind, BrokerKind::Rabbitmq);
+        assert_eq!(form.r#type, BrokerType::Rabbitmq);
         assert_eq!(form.fields[0], "prod");
         assert_eq!(form.fields[1], "broker.example");
         assert_eq!(form.fields[2], "5671");
@@ -2135,10 +2135,10 @@ mod tests {
 
     #[test]
     fn connform_slot3_shown_only_when_database_scoped() {
-        assert!(ConnForm::slot3_shown(BrokerKind::Redis), "DB row");
-        assert!(ConnForm::slot3_shown(BrokerKind::Rabbitmq), "Vhost row");
+        assert!(ConnForm::slot3_shown(BrokerType::Redis), "DB row");
+        assert!(ConnForm::slot3_shown(BrokerType::Rabbitmq), "Vhost row");
         assert!(
-            !ConnForm::slot3_shown(BrokerKind::Amqp),
+            !ConnForm::slot3_shown(BrokerType::Amqp),
             "AMQP is not database-scoped: no slot-3 row"
         );
     }
@@ -2146,8 +2146,8 @@ mod tests {
     #[test]
     fn connform_focus_skips_hidden_db_row_on_amqp() {
         let mut form = ConnForm::new();
-        form.cycle_kind(true); // -> AMQP, where slot 3 (DB) is hidden
-        assert_eq!(form.kind, BrokerKind::Amqp);
+        form.cycle_type(true); // -> AMQP, where slot 3 (DB) is hidden
+        assert_eq!(form.r#type, BrokerType::Amqp);
 
         // Down: Port (2) → Username (4), hopping over the hidden DB slot (3).
         form.focus = 2;
@@ -2173,10 +2173,10 @@ mod tests {
     }
 
     #[test]
-    fn connform_kind_note_is_distinct_per_kind() {
-        let redis = ConnForm::kind_note(BrokerKind::Redis);
-        let amqp = ConnForm::kind_note(BrokerKind::Amqp);
-        let rabbit = ConnForm::kind_note(BrokerKind::Rabbitmq);
+    fn connform_type_note_is_distinct_per_type() {
+        let redis = ConnForm::type_note(BrokerType::Redis);
+        let amqp = ConnForm::type_note(BrokerType::Amqp);
+        let rabbit = ConnForm::type_note(BrokerType::Rabbitmq);
         assert!(redis.contains("DB"));
         assert!(amqp.contains("not database-scoped"));
         assert!(rabbit.contains("Vhost"));
