@@ -1,18 +1,17 @@
 ---
 source: src/ui.rs
-expression: "render_lines(&mut app, 90, 26)"
+assertion_line: 1910
+expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
 │ prod · 127.0.0.1:6379 · db0                                                            │
 └────────────────────────────────────────────────────────────────────────────────────────┘
 ┌ Keys ─────────────────────────────────────┐┌ Value ────────────────────────────────────┐
 │  Key             Type    TTL       Size   ││Select a key to inspect its value.         │
-│▶ ▾ user (1)                               ││                                           │
+│▶ ▾ session (1)                            ││                                           │
+│    abc           hash    2m 0s     128 B  ││                                           │
+│  ▾ user (1)                               ││                                           │
 │    1             string  2m 0s     128 B  ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
@@ -20,11 +19,11 @@ expression: "render_lines(&mut app, 90, 26)"
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
-│ live · 0 events                                                                        │
-│⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
+│uptime_in_seconds:42                                                                    │
 │                                                                                        │
-│waiting for events…                                                                     │
+│❯ SET k v                                                                               │
+│`SET` is not on the read-only allowlist                                                 │
 │                                                                                        │
-│                                                                                        │
+│❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ keys · ⏎ collapse · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help

@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 2049
 expression: "render_lines(&mut app, 90, 26)"
 ---
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
@@ -19,12 +20,12 @@ expression: "render_lines(&mut app, 90, 26)"
 │                                           ││                                           │
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
-┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
-│ live · 0 events                                                                        │
-│⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
-│                                                                                        │
-│waiting for events…                                                                     │
-│                                                                                        │
+┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ pubsub:orders ● │ Tail ─────────────┐
+│ paused · 6 events                                                    ● REC 6 (4.0 KiB) │
+│12:34:56.000  orders             event 0                                                │
+│12:34:56.000  orders             event 1                                                │
+│12:34:56.000  orders             event 2                                                │
+│12:34:56.000  orders             event 3                                                │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ keys · ⏎ collapse · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help

@@ -276,13 +276,10 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     ]),
                 }
             } else {
-                let (sort, arrow, pattern) = app
+                let pattern = app
                     .active_conn()
-                    .map(|c| {
-                        let arrow = if c.browser.sort_desc { "↓" } else { "↑" };
-                        (c.browser.sort.label(), arrow, c.browser.pattern.clone())
-                    })
-                    .unwrap_or(("name", "↑", "*".to_string()));
+                    .map(|c| c.browser.pattern.clone())
+                    .unwrap_or_else(|| "*".to_string());
                 // Show the match pattern only once it differs from the default
                 // `*`, so the everyday case stays terse.
                 let filter = if pattern == "*" {
@@ -292,11 +289,10 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 };
                 vec![
                     ("↑↓", "keys".to_string()),
-                    ("⏎/Space", "collapse".to_string()),
+                    ("⏎", "collapse".to_string()),
                     ("z", "all".to_string()),
                     ("/", filter),
-                    ("o", format!("sort {sort}{arrow}")),
-                    ("O", "dir".to_string()),
+                    ("oO", "sort".to_string()),
                     ("Tab/Ctrl-↓", "panel".to_string()),
                     (":", "palette".to_string()),
                     ("?", "help".to_string()),
@@ -703,7 +699,7 @@ mod tests {
                 " ↑↓ move · Enter connect · a add",
                 "Esc Esc quit",
             ),
-            (Screen::Browser, " ↑↓ keys · ⏎/Space collapse", "Esc back"),
+            (Screen::Browser, " ↑↓ keys · ⏎ collapse", "Esc back"),
             (
                 Screen::Recordings,
                 " ↑↓ move · PgUp/PgDn scroll",
@@ -826,7 +822,7 @@ mod tests {
         // control and never a grouping toggle.
         let text = render_lines(&mut app, 160, 8);
         assert!(
-            text.contains("⏎/Space collapse"),
+            text.contains("⏎ collapse"),
             "browser footer advertises collapse/expand"
         );
         assert!(!text.contains("p group"), "no `p group` toggle");

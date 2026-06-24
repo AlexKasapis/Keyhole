@@ -1,30 +1,25 @@
 ---
 source: src/ui.rs
-expression: "render_lines(&mut app, 90, 26)"
+assertion_line: 1989
+expression: "render_lines(&mut app, 90, 20)"
 ---
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
 │ prod · 127.0.0.1:6379 · db0                                                            │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-┌ Keys ─────────────────────────────────────┐┌ Value ────────────────────────────────────┐
-│  Key             Type    TTL       Size   ││Select a key to inspect its value.         │
-│▶ ▾ user (1)                               ││                                           │
-│    1             string  2m 0s     128 B  ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
+┌ Keys ─────────────────────────────────────┐┌ user:1 ───────────────────────────────────┐
+│  Key             Type    TTL       Size   ││string · Utf8 · showing 5 of 5 bytes       │
+│  ▾ session (1)                            ││                                           │
+│    abc           hash    2m 0s     128 B  ││alice                                      │
+│  ▾ user (1)                               ││                                           │
+│▶   1             string  2m 0s     128 B  ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
-│ live · 0 events                                                                        │
-│⚠ keyspace notifications are disabled (notify-keyspace-events is empty)                 │
 │                                                                                        │
-│waiting for events…                                                                     │
-│                                                                                        │
-│                                                                                        │
+│Just type a command and press Enter to run. Writes and admin commands are refused.      │
+│Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1               │
+│❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ keys · ⏎ collapse · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help

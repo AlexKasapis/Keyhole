@@ -646,7 +646,6 @@ impl App {
                 c.toggle_all_groups();
                 "toggled all groups".to_string()
             }),
-            Action::ToggleCollapse => self.toggle_selected_group(),
             // `r` on the Browser toggles recording for the focused live feed
             // (a no-op on the Console / Pub/Sub / Tail anchors — no feed to
             // record); on the Recordings tab it renames the selected recording.

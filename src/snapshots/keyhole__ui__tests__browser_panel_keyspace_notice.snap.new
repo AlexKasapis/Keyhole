@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 2009
 expression: "render_lines(&mut app, 90, 26)"
 ---
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
