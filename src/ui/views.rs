@@ -1410,7 +1410,9 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(
             "  tabs: Details (graphs+clients) · Console · Monitor · Keyspace · Pub/Sub · Tail",
         ),
-        Line::from("  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends · p play/pause · r rec · x close"),
+        Line::from(
+            "  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends (not Monitor) · p play/pause · r rec · x close",
+        ),
         Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
         Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
         Line::from("  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history"),

@@ -70,6 +70,15 @@ const VALUE_SCROLL_STEP: i32 = 10;
 const CONSOLE_SCROLL_STEP: i32 = 4;
 /// Events a focused live-feed tab scrolls per PageUp/PageDown (or Ctrl-U/D).
 const FEED_SCROLL_STEP: i32 = 10;
+/// Live events the Monitor feed reveals into its scrollback per drawn frame. It
+/// counts every event (the tally reflects true throughput) but stores at most
+/// this many for display each frame, so under a firehose the feed scrolls at a
+/// steady, readable pace instead of teleporting a whole batch into view; the
+/// surplus is dropped from the on-screen feed (the recording keeps everything).
+/// Below roughly `MONITOR_REVEAL_PER_FRAME × repaint-rate` events/sec it never
+/// binds, so every event still shows live. Per *frame* (not per second), so the
+/// scroll speed tracks the repaint cadence rather than drifting from it.
+const MONITOR_REVEAL_PER_FRAME: usize = 8;
 
 /// The whole application as seen by the render loop.
 pub struct App {
@@ -92,6 +101,9 @@ pub struct App {
     recordings_dir: PathBuf,
     next_id: u32,
     next_sub_id: u32,
+    /// Per-frame budget of Monitor events that may be revealed into the feed,
+    /// reset each frame by [`App::begin_frame`]. See [`MONITOR_REVEAL_PER_FRAME`].
+    monitor_reveal_budget: usize,
     pending_connect: Option<String>,
 
     // UI state (read by `crate::ui`).
@@ -187,6 +199,7 @@ impl App {
             recordings_dir,
             next_id: 1,
             next_sub_id: 1,
+            monitor_reveal_budget: MONITOR_REVEAL_PER_FRAME,
             pending_connect: connect_on_start,
             theme,
             profiles,

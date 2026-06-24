@@ -146,6 +146,9 @@ async fn run(
     let mut last_draw = Instant::now();
 
     while app.running {
+        // Refresh per-frame budgets (the Monitor feed's reveal cap) before this
+        // frame's events are drained, so a firehose is paced into a steady scroll.
+        app.begin_frame();
         // Block for the next event so the loop sleeps when idle — no busy-poll.
         match rx.recv().await {
             Some(event) => app.handle_event(event),

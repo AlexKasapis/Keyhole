@@ -2560,6 +2560,146 @@ async fn focusing_monitor_tab_starts_a_monitor_feed() {
     assert!(conn.subs[0].paused);
 }
 
+// -- monitor feed pacing (steady scroll) ---------------------------------
+
+/// Focus the Monitor tab and resume it, returning its sub id ready to receive.
+fn live_monitor(app: &mut App) -> u32 {
+    focus_panel(app, PanelTab::Monitor);
+    app.toggle_play_pause(); // it starts paused; resume tracking
+    app.active_conn().unwrap().monitor_sub().unwrap().sub_id
+}
+
+#[tokio::test]
+async fn monitor_feed_reveals_at_most_the_per_frame_budget() {
+    // The monitor feed counts every event (true throughput) but reveals only a
+    // paced few per frame, so a firehose scrolls steadily instead of dumping a
+    // whole batch into view; the surplus is dropped from the on-screen feed.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    let sub_id = live_monitor(&mut app);
+
+    app.begin_frame();
+    let flood = MONITOR_REVEAL_PER_FRAME + 25;
+    for _ in 0..flood {
+        app.handle_event(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event("x"),
+        });
+    }
+
+    let sub = app.active_conn().unwrap().monitor_sub().unwrap();
+    assert_eq!(
+        sub.received, flood as u64,
+        "every event counts toward the tally (true throughput)"
+    );
+    assert_eq!(
+        sub.events.len(),
+        MONITOR_REVEAL_PER_FRAME,
+        "only the per-frame budget is revealed; the surplus is dropped"
+    );
+}
+
+#[tokio::test]
+async fn begin_frame_refills_the_monitor_reveal_budget() {
+    // Each drawn frame refills the budget, so across frames everything within
+    // budget reveals — a steady scroll rather than a one-shot cap.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    let sub_id = live_monitor(&mut app);
+
+    let frames = 3;
+    for _ in 0..frames {
+        app.begin_frame();
+        for _ in 0..MONITOR_REVEAL_PER_FRAME {
+            app.handle_event(AppEvent::Realtime {
+                id,
+                sub_id,
+                event: broker_event("x"),
+            });
+        }
+    }
+
+    let revealed = frames * MONITOR_REVEAL_PER_FRAME;
+    let sub = app.active_conn().unwrap().monitor_sub().unwrap();
+    assert_eq!(
+        sub.events.len(),
+        revealed,
+        "the budget refills per frame, so all in-budget events reveal"
+    );
+    assert_eq!(sub.received, revealed as u64);
+}
+
+#[tokio::test]
+async fn non_monitor_feed_ignores_the_reveal_budget() {
+    // The reveal cap is monitor-only: a pub/sub feed stores every event in a
+    // single frame regardless of the budget (it is not a firehose by nature).
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let sub_id = app.active_conn().unwrap().subs[0].sub_id;
+
+    app.begin_frame();
+    let flood = MONITOR_REVEAL_PER_FRAME + 25;
+    for _ in 0..flood {
+        app.handle_event(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event("x"),
+        });
+    }
+
+    let sub = &app.active_conn().unwrap().subs[0];
+    assert_eq!(sub.events.len(), flood, "pub/sub feed stores everything");
+    assert_eq!(sub.received, flood as u64);
+}
+
+#[tokio::test]
+async fn monitor_feed_ignores_scroll_keys() {
+    // The monitor tab has no manual scrollback — it always follows newest, so
+    // scroll-up and jump-to-top are inert.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    let sub_id = live_monitor(&mut app);
+    for _ in 0..MONITOR_REVEAL_PER_FRAME {
+        app.begin_frame();
+        app.handle_event(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event("x"),
+        });
+    }
+
+    app.scroll_feed(5);
+    app.feed_to_edge(true);
+    let sub = app.active_conn().unwrap().monitor_sub().unwrap();
+    assert!(sub.follow, "monitor always follows the newest event");
+    assert_eq!(sub.offset, 0, "monitor offset never moves");
+}
+
+#[tokio::test]
+async fn non_monitor_feed_still_scrolls() {
+    // Removing scroll is monitor-only: pub/sub and stream tails still scroll
+    // back through their history.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod", 16).await;
+    app.start_subscribe(SubSpec::Channel("c".into()));
+    let sub_id = app.active_conn().unwrap().subs[0].sub_id;
+    app.begin_frame();
+    for _ in 0..10 {
+        app.handle_event(AppEvent::Realtime {
+            id,
+            sub_id,
+            event: broker_event("x"),
+        });
+    }
+
+    app.scroll_feed(3);
+    let sub = &app.active_conn().unwrap().subs[0];
+    assert_eq!(sub.offset, 3, "non-monitor feeds still scroll");
+    assert!(!sub.follow, "scrolling up disables follow");
+}
+
 #[tokio::test]
 async fn focus_scoped_feeds_start_paused_and_drop_events() {
     let (mut app, _rx) = test_app();

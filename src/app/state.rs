@@ -280,6 +280,14 @@ impl Subscription {
             self.offset = (self.offset + 1).min(max);
         }
     }
+
+    /// Count a received event toward the tally without storing it for display.
+    /// The paced Monitor feed calls this once its per-frame reveal budget is
+    /// spent: the event still counts (so the tally tracks true throughput) but
+    /// is dropped from the on-screen scrollback (the recording keeps it).
+    pub(crate) fn skip(&mut self) {
+        self.received += 1;
+    }
 }
 
 /// A recording file on disk, listed in the Recordings view. The full path is

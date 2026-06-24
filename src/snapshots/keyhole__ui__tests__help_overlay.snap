@@ -24,7 +24,7 @@ expression: "render_lines(&mut app, 90, 33)"
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
 │           │  tabs: Details (graphs+clients) · Console · Monitor · Keyspace │           │
-│           │  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends · p play/pause · r re│           │
+│           │  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends (not Monitor) · p pla│           │
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │  (empty Tail = selected key · a glob makes a pattern)          │           │
 │           │  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history  │           │

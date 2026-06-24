@@ -6,7 +6,21 @@ use super::*;
 impl App {
     // -- realtime events -----------------------------------------------------
 
+    /// Reset per-frame transient state at the start of each render frame. The
+    /// render loop calls this once per drawn frame, before draining that frame's
+    /// events. For now it just refills the Monitor feed's reveal budget (see
+    /// [`MONITOR_REVEAL_PER_FRAME`]), which paces a firehose into a steady scroll.
+    pub fn begin_frame(&mut self) {
+        self.monitor_reveal_budget = MONITOR_REVEAL_PER_FRAME;
+    }
+
     pub(super) fn on_realtime(&mut self, id: ConnId, sub_id: u32, event: BrokerEvent) {
+        // The Monitor feed is a firehose: count every event (so the tally tracks
+        // true throughput) but reveal only a paced few per frame so it scrolls
+        // steadily instead of teleporting a whole batch; the surplus is dropped
+        // from the on-screen feed (the recording keeps it). Other feeds, which
+        // aren't firehoses by nature, store everything.
+        let mut reveal = self.monitor_reveal_budget;
         if let Some(conn) = self.conn_by_id_mut(id) {
             if let Some(sub) = conn.sub_by_id_mut(sub_id) {
                 // First event implicitly confirms the tail is live (even while
@@ -17,10 +31,20 @@ impl App {
                 // While paused, drop the event instead of buffering it so the
                 // scrollback and the received tally stay frozen.
                 if !sub.paused {
-                    sub.push(event);
+                    if matches!(sub.spec, SubSpec::Monitor) {
+                        if reveal > 0 {
+                            sub.push(event);
+                            reveal -= 1;
+                        } else {
+                            sub.skip();
+                        }
+                    } else {
+                        sub.push(event);
+                    }
                 }
             }
         }
+        self.monitor_reveal_budget = reveal;
     }
 
     pub(super) fn on_sub_started(&mut self, id: ConnId, sub_id: u32) {
@@ -313,6 +337,12 @@ impl App {
             .active_conn_mut()
             .and_then(|c| c.panel_subscription_mut())
         {
+            // The Monitor feed has no manual scrollback — it always follows the
+            // newest event (a paced firehose sample isn't meaningfully
+            // scrollable), so scroll keys are inert there.
+            if matches!(sub.spec, SubSpec::Monitor) {
+                return;
+            }
             let max = sub.events.len().saturating_sub(1) as i32;
             sub.offset = (sub.offset as i32 + delta).clamp(0, max) as usize;
             sub.follow = sub.offset == 0;
@@ -326,6 +356,10 @@ impl App {
             .active_conn_mut()
             .and_then(|c| c.panel_subscription_mut())
         {
+            // The Monitor feed always follows newest; jump-to-edge is inert.
+            if matches!(sub.spec, SubSpec::Monitor) {
+                return;
+            }
             if top {
                 sub.offset = sub.events.len().saturating_sub(1);
                 sub.follow = false;
