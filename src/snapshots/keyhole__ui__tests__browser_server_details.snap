@@ -31,4 +31,4 @@ expression: "render_lines(&mut app, 90, 30)"
 │ Keys 412                                       cron                 1h    client|list  │
 │ ▇▇▇▇▇▇▇█                                                                               │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·
+ ↑↓ keys · [ ] db · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-

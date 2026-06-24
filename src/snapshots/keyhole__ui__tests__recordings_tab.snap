@@ -15,4 +15,4 @@ expression: "render_lines(&mut app, 100, 14)"
 │                                            │                                                     │
 │                                            │                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ move · PgUp/PgDn scroll │ file r rename · dd delete │ tabs Tab connections │ go b browser │
+ ↑↓ move · PgUp/PgDn scroll · r rename · dd delete · Tab connections · b browser · : palette · ? hel

@@ -21,4 +21,4 @@ expression: "render_lines(&mut app, 90, 20)"
 │Try: INFO server · CONFIG GET maxmemory · TYPE mykey · LRANGE mylist 0 -1               │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ keys · [ ] db │ groups ⏎/Space collapse · z all │ view / filter · o sort name↑ ·
+ ↑↓ keys · [ ] db · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-

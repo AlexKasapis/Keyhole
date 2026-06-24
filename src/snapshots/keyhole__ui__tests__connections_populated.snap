@@ -13,4 +13,4 @@ expression: "render_lines(&mut app, 120, 12)"
 │                                                                                                                      │
 │                                                                                                                      │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
-  nav ↑↓ move │ conn Enter connect · a add │ tabs Tab recordings │ go b browser │ app : palette · ? help · Esc Esc quit
+ ↑↓ move · Enter connect · a add · Tab recordings · b browser · : palette · ? help · Esc Esc quit

@@ -163,25 +163,29 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     }
 }
 
-/// The footer keybinds for the active screen, grouped into labelled sections.
-/// Each entry is a `(section label, keys)` pair; the keys within a section keep
-/// the `·` separator. [`hint_line`] turns these into a styled row. The Browser's
-/// "view" section also carries the live sort (and any non-default match) — the
-/// former top info-bar indicators now live with their controls here.
+/// The footer keybinds for the active screen as a flat, ordered list of
+/// `(key, action)` pairs. [`hint_line`] renders each key in the heading style
+/// and its action dimmed, joined by a dim ` · ` — no group labels, so the row
+/// packs tightly. The Browser's sort/filter pair carries the live sort column
+/// and any non-default match pattern; the former top info-bar indicators now
+/// live with their controls here.
 fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
     let owned = |pairs: &[(&'static str, &str)]| {
         pairs
             .iter()
-            .map(|(l, k)| (*l, k.to_string()))
+            .map(|(k, a)| (*k, a.to_string()))
             .collect::<Vec<_>>()
     };
     match app.screen {
         Screen::Home => owned(&[
-            ("nav", "↑↓ move"),
-            ("conn", "Enter connect · a add"),
-            ("tabs", "Tab recordings"),
-            ("go", "b browser"),
-            ("app", ": palette · ? help · Esc Esc quit"),
+            ("↑↓", "move"),
+            ("Enter", "connect"),
+            ("a", "add"),
+            ("Tab", "recordings"),
+            ("b", "browser"),
+            (":", "palette"),
+            ("?", "help"),
+            ("Esc Esc", "quit"),
         ]),
         // The footer follows the focused pane: the key list keeps its grouping /
         // sort / db controls, while a focused bottom subpanel shows its own keys.
@@ -199,26 +203,38 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 );
                 if console {
                     owned(&[
-                        ("console", "type · Enter run"),
-                        ("history", "↑↓ · Ctrl-P/N"),
-                        ("output", "Ctrl-L clear · PgUp/PgDn scroll"),
-                        ("focus", "Tab tabs · Ctrl-↑/Esc keys"),
+                        ("Enter", "run"),
+                        ("↑↓ / Ctrl-P/N", "history"),
+                        ("Ctrl-L", "clear"),
+                        ("PgUp/PgDn", "scroll"),
+                        ("Tab", "tabs"),
+                        ("Ctrl-↑/Esc", "keys"),
                     ])
                 } else {
                     owned(&[
-                        ("scroll", "↑↓ line · PgUp/PgDn page · g/G ends"),
-                        ("feed", "p play/pause · r rec · x close"),
-                        ("focus", "Tab tabs · Ctrl-↑/Esc keys"),
+                        ("↑↓", "line"),
+                        ("PgUp/PgDn", "page"),
+                        ("g/G", "ends"),
+                        ("p", "play/pause"),
+                        ("r", "rec"),
+                        ("x", "close"),
+                        ("Tab", "tabs"),
+                        ("Ctrl-↑/Esc", "keys"),
                     ])
                 }
             } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
                 // The AMQP keys pane is the curated destination list, not a key
                 // scan, so it has its own controls (no db / groups / sort).
                 owned(&[
-                    ("nav", "↑↓ destinations"),
-                    ("dest", "a add · x remove · ⏎ open · t tail"),
-                    ("panel", "Tab/Ctrl-↓ tails"),
-                    ("app", ": palette · ? help · Esc back"),
+                    ("↑↓", "destinations"),
+                    ("a", "add"),
+                    ("x", "remove"),
+                    ("⏎", "open"),
+                    ("t", "tail"),
+                    ("Tab/Ctrl-↓", "tails"),
+                    (":", "palette"),
+                    ("?", "help"),
+                    ("Esc", "back"),
                 ])
             } else {
                 let (sort, arrow, pattern) = app
@@ -231,42 +247,52 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 // Show the match pattern only once it differs from the default
                 // `*`, so the everyday case stays terse.
                 let filter = if pattern == "*" {
-                    "/ filter".to_string()
+                    "filter".to_string()
                 } else {
-                    format!("/ filter {pattern}")
+                    format!("filter {pattern}")
                 };
                 vec![
-                    ("nav", "↑↓ keys · [ ] db".to_string()),
-                    ("groups", "⏎/Space collapse · z all".to_string()),
-                    ("view", format!("{filter} · o sort {sort}{arrow} · O dir")),
-                    ("panel", "Tab/Ctrl-↓ panel".to_string()),
-                    ("app", ": palette · ? help · Esc back".to_string()),
+                    ("↑↓", "keys".to_string()),
+                    ("[ ]", "db".to_string()),
+                    ("⏎/Space", "collapse".to_string()),
+                    ("z", "all".to_string()),
+                    ("/", filter),
+                    ("o", format!("sort {sort}{arrow}")),
+                    ("O", "dir".to_string()),
+                    ("Tab/Ctrl-↓", "panel".to_string()),
+                    (":", "palette".to_string()),
+                    ("?", "help".to_string()),
+                    ("Esc", "back".to_string()),
                 ]
             }
         }
         Screen::Recordings => owned(&[
-            ("nav", "↑↓ move · PgUp/PgDn scroll"),
-            ("file", "r rename · dd delete"),
-            ("tabs", "Tab connections"),
-            ("go", "b browser"),
-            ("app", ": palette · ? help · Esc back"),
+            ("↑↓", "move"),
+            ("PgUp/PgDn", "scroll"),
+            ("r", "rename"),
+            ("dd", "delete"),
+            ("Tab", "connections"),
+            ("b", "browser"),
+            (":", "palette"),
+            ("?", "help"),
+            ("Esc", "back"),
         ]),
     }
 }
 
-/// Render the footer hints as a single line: each section's label in the
-/// heading style (matching the help overlay), its keys in the status-bar
-/// foreground, and a dim vertical rule between sections.
+/// Render the footer hints as a single line: each `(key, action)` pair shows the
+/// key in the heading style (bold accent, matching the help overlay) and the
+/// action dimmed, with a dim ` · ` between pairs and a single leading space. The
+/// row never wraps, so it clips on the right on a narrow terminal.
 fn hint_line(app: &App, theme: &Theme) -> Line<'static> {
-    let mut spans = Vec::new();
-    for (i, (label, keys)) in hint_sections(app).iter().enumerate() {
-        spans.push(if i == 0 {
-            Span::raw("  ")
-        } else {
-            Span::styled(" │ ", theme.dim)
-        });
-        spans.push(Span::styled(format!("{label} "), theme.heading));
-        spans.push(Span::raw(keys.to_string()));
+    let mut spans = vec![Span::raw(" ")];
+    for (i, (key, action)) in hint_sections(app).iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", theme.dim));
+        }
+        spans.push(Span::styled((*key).to_string(), theme.heading));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(action.clone(), theme.dim));
     }
     Line::from(spans)
 }
@@ -629,83 +655,88 @@ mod tests {
     }
 
     #[test]
-    fn footer_groups_hints_into_labelled_sections() {
-        // Each screen's hint row is split into labelled sections; rendered wide
-        // so nothing clips. The section labels and a key from each must appear.
+    fn footer_lists_flat_key_action_pairs() {
+        // The hint row is a flat list of `key action` pairs — no group labels —
+        // rendered wide so nothing clips. Each pair stays contiguous (`key action`)
+        // and the pairs are joined by ` · `, with a single leading space.
         let cases = [
-            (Screen::Home, vec!["nav", "conn", "app"], "Enter connect"),
-            (Screen::Browser, vec!["nav", "view", "panel"], "/ filter"),
-            (Screen::Recordings, vec!["nav", "app"], "Esc back"),
+            (
+                Screen::Home,
+                " ↑↓ move · Enter connect · a add",
+                "Esc Esc quit",
+            ),
+            (
+                Screen::Browser,
+                " ↑↓ keys · [ ] db · ⏎/Space collapse",
+                "Esc back",
+            ),
+            (
+                Screen::Recordings,
+                " ↑↓ move · PgUp/PgDn scroll",
+                "Esc back",
+            ),
         ];
-        for (screen, labels, key) in cases {
+        for (screen, head, tail) in cases {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             let text = render_lines(&mut app, 160, 8);
-            for label in labels {
+            let footer = text.lines().last().unwrap_or_default();
+            assert!(
+                footer.starts_with(head),
+                "{screen:?} footer should open with the flat pairs {head:?}: {footer:?}"
+            );
+            assert!(
+                footer.contains(tail),
+                "{screen:?} footer should still list {tail:?}: {footer:?}"
+            );
+            // The old grouping labels are gone (each is a word followed by a space).
+            for label in ["nav ", "conn ", "view ", "groups ", "go ", "app "] {
                 assert!(
-                    text.contains(label),
-                    "{screen:?} footer should show section {label:?}: {text:?}"
+                    !footer.contains(label),
+                    "{screen:?} footer must not show the {label:?} group label: {footer:?}"
                 );
             }
-            assert!(
-                text.contains(key),
-                "{screen:?} footer should still list {key:?}: {text:?}"
-            );
         }
     }
 
     #[test]
-    fn footer_advertises_palette_and_offers_navigation() {
-        // Every screen's "app" group advertises both the command palette (`:`)
-        // and help (`?`), so the palette is discoverable without opening help.
+    fn footer_offers_palette_help_and_navigation() {
+        // Every screen advertises the command palette (`:`) and help (`?`) as
+        // their own pairs, so the palette is discoverable without opening help.
         for screen in [Screen::Home, Screen::Browser, Screen::Recordings] {
             let (mut app, _rx) = test_app();
             app.screen = screen;
-            let sections = hint_sections(&app);
-
-            let app_keys = sections
-                .iter()
-                .find(|(label, _)| *label == "app")
-                .map(|(_, keys)| keys.as_str())
-                .unwrap_or_else(|| panic!("{screen:?} footer has no 'app' group"));
+            let pairs = hint_sections(&app);
+            let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
             assert!(
-                app_keys.contains(": palette"),
-                "{screen:?} 'app' group should advertise the palette: {app_keys:?}"
+                has(":", "palette"),
+                "{screen:?} footer should advertise `: palette`: {pairs:?}"
             );
             assert!(
-                app_keys.contains("? help"),
-                "{screen:?} 'app' group should offer help: {app_keys:?}"
+                has("?", "help"),
+                "{screen:?} footer should offer `? help`: {pairs:?}"
             );
         }
 
-        // Both home-area tabs offer the `b` jump to the browser in a "go" group
-        // and the Tab tab-switch in a "tabs" group. The Browser steps back with
-        // Esc, so it carries neither.
+        // Both home-area tabs offer the `b` jump to the browser and a `Tab`
+        // switch to the sibling tab. The Browser steps back with Esc, so it
+        // carries neither.
         let expected = [
-            (Screen::Home, "b browser", "recordings"),
-            (Screen::Recordings, "b browser", "connections"),
+            (Screen::Home, "recordings"),
+            (Screen::Recordings, "connections"),
         ];
-        for (screen, go_key, tab_target) in expected {
+        for (screen, tab_target) in expected {
             let (mut app, _rx) = test_app();
             app.screen = screen;
-            let sections = hint_sections(&app);
-            let group = |label: &str| {
-                sections
-                    .iter()
-                    .find(|(l, _)| *l == label)
-                    .map(|(_, keys)| keys.clone())
-            };
-            let go = group("go")
-                .unwrap_or_else(|| panic!("{screen:?} footer has no 'go' navigation group"));
+            let pairs = hint_sections(&app);
+            let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
             assert!(
-                go.contains(go_key),
-                "{screen:?} 'go' group should offer {go_key:?}: {go:?}"
+                has("b", "browser"),
+                "{screen:?} footer should offer `b browser`: {pairs:?}"
             );
-            let tabs =
-                group("tabs").unwrap_or_else(|| panic!("{screen:?} footer has no 'tabs' group"));
             assert!(
-                tabs.contains(tab_target),
-                "{screen:?} 'tabs' group should switch to {tab_target:?}: {tabs:?}"
+                has("Tab", tab_target),
+                "{screen:?} footer should switch tabs to {tab_target:?}: {pairs:?}"
             );
         }
 
@@ -715,8 +746,41 @@ mod tests {
         app.screen = Screen::Browser;
         let browser = hint_sections(&app);
         assert!(
-            !browser.iter().any(|(label, _)| *label == "go"),
-            "Browser footer must not offer a 'go' group: {browser:?}"
+            !browser.iter().any(|(_, action)| action == "browser"),
+            "Browser footer must not offer a `b browser` jump: {browser:?}"
+        );
+    }
+
+    #[test]
+    fn footer_styles_keys_bold_and_actions_dim() {
+        // Keys carry the heading style (bold accent); action words are dimmed, so
+        // the row scans key-first now that the group labels are gone.
+        let (mut app, _rx) = test_app();
+        let theme = app.theme;
+        let mut terminal = Terminal::new(TestBackend::new(160, 8)).unwrap();
+        let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
+        let buf = frame.buffer;
+
+        // The `Enter connect` pair: `Enter` is a bold, heading-coloured key …
+        let k = find_label(buf, "Enter");
+        assert_eq!(
+            buf.content()[k].style().fg,
+            theme.heading.fg,
+            "key uses the heading colour"
+        );
+        assert!(
+            buf.content()[k]
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::BOLD),
+            "key is bold"
+        );
+        // … and its action `connect` is dimmed.
+        let a = find_label(buf, "connect");
+        assert_eq!(
+            buf.content()[a].style().fg,
+            theme.dim.fg,
+            "action uses the dim colour"
         );
     }
 
@@ -725,21 +789,19 @@ mod tests {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
         // Keys are always grouped, so the footer always carries the collapse
-        // controls and never a grouping toggle.
+        // control and never a grouping toggle.
         let text = render_lines(&mut app, 160, 8);
         assert!(
-            text.contains("groups"),
-            "browser footer has a groups section"
+            text.contains("⏎/Space collapse"),
+            "browser footer advertises collapse/expand"
         );
-        assert!(text.contains("collapse"), "and advertises collapse/expand");
         assert!(!text.contains("p group"), "no `p group` toggle");
         assert!(!text.contains("ungroup"), "no `p ungroup` toggle");
         // With the keys pane focused, the footer advertises moving focus to the
         // bottom panel (Tab / Ctrl-↓) rather than the feed/console controls.
-        assert!(text.contains("panel"), "browser footer has a panel section");
         assert!(
             text.contains("Tab/Ctrl-↓ panel"),
-            "and advertises Tab/Ctrl-↓ to focus the panel"
+            "browser footer advertises Tab/Ctrl-↓ to focus the panel"
         );
     }
 
