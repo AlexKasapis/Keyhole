@@ -1305,56 +1305,45 @@ fn human_count(n: u64) -> String {
     }
 }
 
-/// The add-connection modal overlay.
+/// The add/edit-connection modal overlay.
 pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let Some(form) = app.form.as_ref() else {
         return;
     };
-    let rect = centered(area, 60, 16);
+    let editing = form.editing.is_some();
+    // Edit mode carries one extra hint row (delete), so it gets a touch more room.
+    let rect = centered(area, 60, if editing { 17 } else { 16 });
     frame.render_widget(Clear, rect);
     let block = Block::bordered()
-        .title(" Add connection ")
+        .title(if editing {
+            " Edit connection "
+        } else {
+            " Add connection "
+        })
         .title_style(theme.heading)
         .border_style(theme.border_focused);
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, base_label) in ConnForm::LABELS.iter().enumerate() {
-        // Slot 3 is shared: a Redis DB index or a RabbitMQ vhost, relabelled to
-        // suit. AMQP is not database-scoped, so the row is omitted entirely.
-        if i == ConnForm::SLOT3_FIELD && !ConnForm::slot3_shown(form.kind) {
-            continue;
-        }
-        let label = if i == ConnForm::SLOT3_FIELD {
-            ConnForm::slot3_label(form.kind)
-        } else {
-            base_label
-        };
+    // One text-field row, right-aligned label + the field's current value and a
+    // cursor bar when focused.
+    let field_row = |i: usize, label: &str| -> Line {
         let focused = form.focus == i;
         let cursor = if focused { "▏" } else { "" };
         let label_style = if focused { theme.accent } else { theme.dim };
-        lines.push(Line::from(vec![
+        Line::from(vec![
             Span::styled(format!("{label:>9}: "), label_style),
             Span::raw(format!("{}{cursor}", form.fields[i])),
-        ]));
-    }
-    let tls_focused = form.focus == ConnForm::TLS_FOCUS;
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!("{:>9}: ", "TLS"),
-            if tls_focused { theme.accent } else { theme.dim },
-        ),
-        Span::raw(if form.tls { "[x]" } else { "[ ]" }),
-        Span::styled("  (←/→ toggles)", theme.dim),
-    ]));
-    let kind_focused = form.focus == ConnForm::KIND_FOCUS;
+        ])
+    };
+
     let kind = match form.kind {
         BrokerKind::Redis => "redis",
         BrokerKind::Amqp => "amqp",
         BrokerKind::Rabbitmq => "rabbitmq",
     };
-    lines.push(Line::from(vec![
+    let kind_focused = form.focus == ConnForm::KIND_FOCUS;
+    let kind_row = Line::from(vec![
         Span::styled(
             format!("{:>9}: ", "Kind"),
             if kind_focused {
@@ -1365,7 +1354,38 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ),
         Span::raw(format!("[{kind}]")),
         Span::styled("  (←/→ cycles)", theme.dim),
-    ]));
+    ]);
+    let tls_focused = form.focus == ConnForm::TLS_FOCUS;
+    let tls_row = Line::from(vec![
+        Span::styled(
+            format!("{:>9}: ", "TLS"),
+            if tls_focused { theme.accent } else { theme.dim },
+        ),
+        Span::raw(if form.tls { "[x]" } else { "[ ]" }),
+        Span::styled("  (←/→ toggles)", theme.dim),
+    ]);
+
+    // Kind sits directly under Name (it drives the other fields' defaults), then
+    // the connection details, with TLS last — matching the Tab order in
+    // `ConnForm::FOCUS_ORDER`. Slot 3 is shared: a Redis DB index or a RabbitMQ
+    // vhost, relabelled to suit; AMQP is not database-scoped, so the row is
+    // omitted entirely.
+    let mut lines: Vec<Line> = vec![
+        field_row(0, ConnForm::LABELS[0]), // Name
+        kind_row,
+        field_row(1, ConnForm::LABELS[1]), // Host
+        field_row(2, ConnForm::LABELS[2]), // Port
+    ];
+    if ConnForm::slot3_shown(form.kind) {
+        lines.push(field_row(
+            ConnForm::SLOT3_FIELD,
+            ConnForm::slot3_label(form.kind),
+        ));
+    }
+    lines.push(field_row(4, ConnForm::LABELS[4])); // Username
+    lines.push(field_row(5, ConnForm::LABELS[5])); // Password
+    lines.push(tls_row);
+
     lines.push(Line::from(""));
     // One consolidated per-kind note (defined alongside each kind's defaults).
     lines.push(Line::styled(ConnForm::kind_note(form.kind), theme.dim));
@@ -1376,9 +1396,19 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     if let Some(err) = &form.error {
         lines.push(Line::styled(format!("⚠ {err}"), theme.error));
     }
+    if form.confirm_delete {
+        lines.push(Line::styled(
+            "⚠ Press Ctrl-D again to delete this connection",
+            theme.error,
+        ));
+    }
     lines.push(Line::from(""));
     lines.push(Line::styled(
-        "Tab/Shift-Tab move · Enter save & connect · Esc cancel",
+        if editing {
+            "Tab/Shift-Tab move · Enter save · Ctrl-D delete · Esc cancel"
+        } else {
+            "Tab/Shift-Tab move · Enter save & connect · Esc cancel"
+        },
         theme.dim,
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -1393,6 +1423,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(""),
         Line::styled("Home (Connections / Recordings tabs)", theme.heading),
         Line::from("  Tab / Shift-Tab switch tabs   b jump to last-viewed browser"),
+        Line::from("  Connections: Enter connect · a add · e edit/delete · x disconnect"),
         Line::from("  Recordings: ↑↓ select · PgUp/PgDn scroll · r rename · dd delete"),
         Line::from(""),
         Line::styled("Browser — focus follows the pane", theme.heading),

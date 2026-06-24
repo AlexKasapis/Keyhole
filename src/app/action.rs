@@ -28,6 +28,10 @@ pub enum Action {
     Enter,
     /// Open the add-connection form.
     AddConnection,
+    /// Open the edit form for the selected saved connection (Connections tab),
+    /// pre-filled from its profile; the form can also delete it. A no-op
+    /// elsewhere.
+    EditConnection,
     /// Jump to the key browser of the most recently viewed connection (falling
     /// back to the active one). Reachable from the home area's tabs.
     GotoBrowser,
@@ -44,7 +48,9 @@ pub enum Action {
     /// Play/pause the focused live feed (freeze or resume its view). Only acts on
     /// a live-feed subpanel (Monitor / Keyspace / a pub-sub or tail tab).
     PlayPause,
-    /// Close the focused pub/sub or stream tab. The fixed tabs cannot be closed.
+    /// In the Browser, close the focused pub/sub or stream tab (the fixed tabs
+    /// cannot be closed); on the Connections tab, disconnect the selected
+    /// profile's live session. Both are "close the focused thing".
     CloseTab,
     DbPrev,
     DbNext,
@@ -84,6 +90,7 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('G') | End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
         (false, Char('a')) => Some(Action::AddConnection),
+        (false, Char('e')) => Some(Action::EditConnection),
         (false, Char('b')) => Some(Action::GotoBrowser),
         (false, Char('d')) => Some(Action::DeleteRecording),
         (false, Char('p')) => Some(Action::PlayPause),
@@ -161,6 +168,7 @@ mod tests {
         assert_eq!(plain(End), Some(Action::Bottom));
         assert_eq!(plain(Enter), Some(Action::Enter));
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
+        assert_eq!(plain(Char('e')), Some(Action::EditConnection));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
         assert_eq!(plain(Char('d')), Some(Action::DeleteRecording));
         assert_eq!(plain(Char('p')), Some(Action::PlayPause));
@@ -209,9 +217,6 @@ mod tests {
         assert_eq!(ctrl(Char('q')), None, "Ctrl-q is not a binding");
         assert_eq!(ctrl(Char('a')), None);
         assert_eq!(plain(F(1)), None);
-        // `e` opened the standalone Console screen, which is gone: the console is
-        // now an always-visible band in the Browser, entered with `i`.
-        assert_eq!(plain(Char('e')), None, "'e' is unbound: no Console screen");
         // `:` opens the command palette (see `colon_opens_palette_*`), so it is
         // deliberately *not* unbound here.
         // `w` opened the standalone Realtime screen, which is gone: tails now

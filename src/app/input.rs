@@ -267,6 +267,13 @@ impl App {
                 self.form = Some(ConnForm::new());
                 self.mode = InputMode::Form;
             }
+            // `e` opens the edit form for the selected saved connection (and from
+            // there it can be deleted); only meaningful on the Connections tab.
+            Action::EditConnection => {
+                if self.screen == Screen::Home {
+                    self.edit_selected_profile();
+                }
+            }
             // `b` jumps to the most recently viewed browser (falling back to the
             // active connection); reachable from either home-area tab.
             Action::GotoBrowser => self.goto_browser(),
@@ -297,8 +304,13 @@ impl App {
             },
             // `p` freezes/resumes the focused live feed's view.
             Action::PlayPause => self.toggle_play_pause(),
-            // `x` closes the focused pub/sub or stream tab (the fixed tabs stay).
-            Action::CloseTab => self.close_active_tab(),
+            // `x` closes the focused pub/sub or stream tab in the Browser (the
+            // fixed tabs stay); on the Connections tab it disconnects the
+            // selected profile's live session instead.
+            Action::CloseTab => match self.screen {
+                Screen::Home => self.disconnect_selected_profile(),
+                _ => self.close_active_tab(),
+            },
             // `[`/`]` change DB in the Browser.
             Action::DbPrev => self.change_db(-1),
             Action::DbNext => self.change_db(1),
@@ -382,6 +394,20 @@ impl App {
     }
 
     pub(super) fn handle_form_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Ctrl-D requests deletion of the profile being edited; a confirming
+        // second consecutive Ctrl-D actually deletes (see `form_delete_request`).
+        // Handled before the text-entry arms so it never types a literal 'd'.
+        if ctrl && matches!(key.code, KeyCode::Char('d')) {
+            self.form_delete_request();
+            return;
+        }
+        // Any other key breaks a pending delete confirmation.
+        if let Some(form) = &mut self.form {
+            form.confirm_delete = false;
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.form = None;
@@ -400,19 +426,24 @@ impl App {
                     form.focus_prev();
                 }
             }
-            // ←/→ flip the focused boolean field (TLS / broker Kind). Space is no
-            // longer a toggle — it types a literal space into the text fields,
-            // matching every other text-entry surface.
+            // ←/→ act on the focused boolean/choice field: TLS flips either way,
+            // while Kind cycles in the arrow's direction (← back, → forward).
+            // Space is no longer a toggle — it types a literal space into the
+            // text fields, matching every other text-entry surface.
             KeyCode::Left | KeyCode::Right => {
+                let forward = matches!(key.code, KeyCode::Right);
                 if let Some(form) = &mut self.form {
                     match form.focus {
                         ConnForm::TLS_FOCUS => form.tls = !form.tls,
-                        ConnForm::KIND_FOCUS => form.toggle_kind(),
+                        ConnForm::KIND_FOCUS => form.cycle_kind(forward),
                         _ => {}
                     }
                 }
             }
-            KeyCode::Char(c) => {
+            // Plain typing edits the focused text field; control-modified chars
+            // (other than the Ctrl-D handled above) are ignored rather than
+            // injected as literal letters.
+            KeyCode::Char(c) if !ctrl => {
                 if let Some(form) = &mut self.form {
                     if form.focus < ConnForm::FIELD_COUNT {
                         form.fields[form.focus].push(c);

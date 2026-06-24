@@ -138,6 +138,8 @@ impl App {
         };
         let (saved_spec, session_password) = classify_password(form.fields[5].trim());
         let tls = form.tls;
+        // `Some(idx)` edits the existing profile at that index; `None` adds a new one.
+        let editing = form.editing;
 
         let profile = match form.kind {
             BrokerKind::Redis => {
@@ -185,7 +187,19 @@ impl App {
             }
         };
 
-        // Persist (best effort) and keep the in-memory profile list in sync.
+        self.form = None;
+        self.mode = InputMode::Normal;
+        match editing {
+            Some(idx) => self.save_edited_profile(idx, profile, session_password),
+            None => self.save_new_profile(profile, session_password),
+        }
+    }
+
+    /// Persist a brand-new profile (best effort) and open a connection to it.
+    fn save_new_profile(&mut self, profile: ConnectionConfig, session_password: Option<String>) {
+        // Append to the on-disk config and keep the in-memory list in sync. On a
+        // write failure the profile isn't persisted but still connects for this
+        // session; the pop avoids a duplicate if the user retries.
         self.config.connections.push(profile.clone());
         match config::save(&self.config_path, &self.config) {
             Ok(()) => self.profiles.push(profile.clone()),
@@ -194,10 +208,151 @@ impl App {
                 self.set_status(format!("could not save config: {e}"), true);
             }
         }
+        self.start_connect(profile, session_password);
+    }
 
+    /// Replace the profile at `idx` with the edited one, persist (best effort),
+    /// and — if that profile currently has a live session — tear it down and
+    /// reconnect with the new settings so the changes take effect at once. An
+    /// offline profile is just saved.
+    fn save_edited_profile(
+        &mut self,
+        idx: usize,
+        profile: ConnectionConfig,
+        session_password: Option<String>,
+    ) {
+        // The index was captured when the form opened and the modal blocks other
+        // mutations, so it still addresses the same profile; fall back to an add
+        // if it has somehow gone out of range.
+        if idx >= self.profiles.len() {
+            return self.save_new_profile(profile, session_password);
+        }
+        let old_name = self.profiles[idx].name().to_string();
+        let was_connected = self.is_connected(&old_name);
+
+        // An in-place replace can't duplicate, so unlike the add path it needs no
+        // rollback: the edit applies in memory regardless, and a write failure
+        // only means it isn't persisted to disk.
+        self.config.connections[idx] = profile.clone();
+        self.profiles[idx] = profile.clone();
+        let saved = config::save(&self.config_path, &self.config);
+        if let Err(e) = &saved {
+            self.set_status(format!("could not save config: {e}"), true);
+        }
+
+        if was_connected {
+            self.teardown_connection(&old_name);
+            self.start_connect(profile, session_password);
+        } else if saved.is_ok() {
+            self.set_status(format!("Saved connection {}", profile.name()), false);
+        }
+    }
+
+    /// Open the edit form for the selected saved connection, pre-filled from its
+    /// profile. A no-op when nothing is selected.
+    pub(super) fn edit_selected_profile(&mut self) {
+        let Some(sel) = self.profile_state.selected() else {
+            return;
+        };
+        let Some(profile) = self.profiles.get(sel) else {
+            return;
+        };
+        self.form = Some(ConnForm::edit(sel, profile));
+        self.mode = InputMode::Form;
+    }
+
+    /// Disconnect the selected profile's live session (the `x` key on the
+    /// Connections tab). Reports whether anything was actually connected.
+    pub(super) fn disconnect_selected_profile(&mut self) {
+        let Some(sel) = self.profile_state.selected() else {
+            return;
+        };
+        let Some(profile) = self.profiles.get(sel) else {
+            return;
+        };
+        let name = profile.name().to_string();
+        if self.teardown_connection(&name) {
+            self.set_status(format!("Disconnected {name}"), false);
+        } else {
+            self.set_status(format!("{name} is not connected"), false);
+        }
+    }
+
+    /// Handle a delete request from the edit form (Ctrl-D). The first press arms
+    /// a confirmation; a confirming second press actually deletes. A no-op on the
+    /// add form (nothing to delete).
+    pub(super) fn form_delete_request(&mut self) {
+        let Some(form) = self.form.as_mut() else {
+            return;
+        };
+        let Some(idx) = form.editing else {
+            return;
+        };
+        if !form.confirm_delete {
+            form.confirm_delete = true;
+            return;
+        }
+        self.delete_profile(idx);
+    }
+
+    /// Delete the saved profile at `idx`: drop any live session, forget it on
+    /// disk and in memory, and close the form.
+    fn delete_profile(&mut self, idx: usize) {
+        if idx >= self.profiles.len() {
+            return;
+        }
+        let name = self.profiles[idx].name().to_string();
+        self.teardown_connection(&name);
+        self.config.connections.remove(idx);
+        self.profiles.remove(idx);
+        let saved = config::save(&self.config_path, &self.config);
         self.form = None;
         self.mode = InputMode::Normal;
-        self.start_connect(profile, session_password);
+        self.clamp_profile_selection();
+        match saved {
+            Ok(()) => self.set_status(format!("Deleted connection {name}"), false),
+            Err(e) => self.set_status(format!("Deleted {name} (could not save config: {e})"), true),
+        }
+    }
+
+    /// Tear down a live connection by profile name (user-initiated). Mirrors the
+    /// cleanup in [`Self::on_disconnected`] but leaves the status line to the
+    /// caller, so disconnect / edit-reconnect / delete can each phrase their own.
+    /// Returns whether a live connection was found and closed.
+    fn teardown_connection(&mut self, name: &str) -> bool {
+        let Some(idx) = self.connections.iter().position(|c| c.name == name) else {
+            return false;
+        };
+        let id = self.connections[idx].id;
+        self.connections[idx].handle.shutdown();
+        self.connections.remove(idx);
+        // Forget a closed connection as the `b` target.
+        if self.last_browser == Some(id) {
+            self.last_browser = None;
+        }
+        self.active = if self.connections.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
+        if self.connections.is_empty() {
+            // A clean, user-initiated close: return to the home screen and read
+            // as offline (not the error health a dropped link records).
+            self.screen = Screen::Home;
+            self.health = ConnHealth::Offline;
+        }
+        true
+    }
+
+    /// Keep the Connections-list cursor within range after a profile is removed.
+    fn clamp_profile_selection(&mut self) {
+        let len = self.profiles.len();
+        let sel = if len == 0 {
+            None
+        } else {
+            Some(self.profile_state.selected().unwrap_or(0).min(len - 1))
+        };
+        self.profile_state.select(sel);
     }
 
     pub(super) fn form_error(&mut self, message: &str) {

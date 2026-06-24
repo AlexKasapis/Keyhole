@@ -805,10 +805,56 @@ mod tests {
     }
 
     #[test]
+    fn edit_connection_form_shows_edit_title_and_delete_hint() {
+        let (mut app, _rx) = test_app();
+        let mut form = ConnForm::new();
+        form.editing = Some(0); // edit mode
+        app.form = Some(form);
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Edit connection"), "edit title shown");
+        assert!(
+            text.contains("Ctrl-D delete"),
+            "the delete hint shows in edit mode"
+        );
+        // The add form's title and "save & connect" footer give way to the edit
+        // wording.
+        assert!(!text.contains("Add connection"));
+    }
+
+    #[test]
+    fn add_connection_form_omits_the_delete_hint() {
+        let (mut app, _rx) = test_app();
+        app.form = Some(ConnForm::new()); // add mode (editing = None)
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Add connection"));
+        assert!(
+            !text.contains("Ctrl-D delete"),
+            "the add form has nothing to delete"
+        );
+    }
+
+    #[test]
+    fn edit_form_shows_a_delete_confirmation_when_armed() {
+        let (mut app, _rx) = test_app();
+        let mut form = ConnForm::new();
+        form.editing = Some(0);
+        form.confirm_delete = true;
+        app.form = Some(form);
+        app.mode = InputMode::Form;
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("Press Ctrl-D again"),
+            "the delete confirmation prompt is shown while armed"
+        );
+    }
+
+    #[test]
     fn connection_form_amqp_omits_db_row_and_shows_note() {
         let (mut app, _rx) = test_app();
         let mut form = ConnForm::new();
-        form.toggle_kind(); // -> AMQP
+        form.cycle_kind(true); // -> AMQP
         app.form = Some(form);
         app.mode = InputMode::Form;
         let text = screen_text(&mut app);
@@ -826,8 +872,8 @@ mod tests {
     fn connection_form_shows_rabbitmq_hint_and_vhost_label() {
         let (mut app, _rx) = test_app();
         let mut form = ConnForm::new();
-        form.toggle_kind(); // Redis -> AMQP
-        form.toggle_kind(); // AMQP  -> RabbitMQ
+        form.cycle_kind(true); // Redis -> AMQP
+        form.cycle_kind(true); // AMQP  -> RabbitMQ
         app.form = Some(form);
         app.mode = InputMode::Form;
         let text = screen_text(&mut app);

@@ -1862,8 +1862,9 @@ fn form_typing_and_backspace_edit_focused_field() {
 fn form_tab_moves_focus_and_arrows_toggle_tls() {
     let (mut app, _rx) = test_app();
     app.apply(Action::AddConnection);
+    // Kind sits directly under Name, so Tab steps Name → Kind first.
     app.handle_key(key(KeyCode::Tab));
-    assert_eq!(app.form.as_ref().unwrap().focus, 1);
+    assert_eq!(app.form.as_ref().unwrap().focus, ConnForm::KIND_FOCUS);
     app.handle_key(key(KeyCode::BackTab));
     assert_eq!(app.form.as_ref().unwrap().focus, 0);
 
@@ -2010,8 +2011,8 @@ async fn form_submit_builds_rabbitmq_profile_with_vhost() {
     app.apply(Action::AddConnection);
     {
         let form = app.form.as_mut().unwrap();
-        form.toggle_kind(); // Redis -> AMQP
-        form.toggle_kind(); // AMQP  -> RabbitMQ
+        form.cycle_kind(true); // Redis -> AMQP
+        form.cycle_kind(true); // AMQP  -> RabbitMQ
         form.fields[0] = "rmq".into(); // name
         form.fields[1] = "rabbit.local".into(); // host
         form.fields[2] = "5672".into(); // port
@@ -2043,8 +2044,8 @@ async fn form_submit_rabbitmq_blank_vhost_defaults_to_root() {
     app.apply(Action::AddConnection);
     {
         let form = app.form.as_mut().unwrap();
-        form.toggle_kind(); // -> AMQP
-        form.toggle_kind(); // -> RabbitMQ
+        form.cycle_kind(true); // -> AMQP
+        form.cycle_kind(true); // -> RabbitMQ
         form.fields[0] = "rmq2".into();
         form.fields[3] = "   ".into(); // whitespace-only vhost
     }
@@ -2054,6 +2055,191 @@ async fn form_submit_rabbitmq_blank_vhost_defaults_to_root() {
         panic!("expected a rabbitmq profile");
     };
     assert_eq!(p.vhost, "/", "a blank vhost defaults to /");
+    let _ = std::fs::remove_file(&path);
+}
+
+// -- edit / disconnect / delete connections ------------------------------
+
+#[tokio::test]
+async fn edit_key_opens_a_prefilled_form_for_the_selected_profile() {
+    let (mut app, _rx) = build_app(config_with(&["alpha", "beta"]), unique_config_path(), None);
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(1));
+    app.handle_key(ch('e'));
+
+    let form = app.form.as_ref().expect("edit form opened");
+    assert_eq!(
+        form.editing,
+        Some(1),
+        "remembers which profile is being edited"
+    );
+    assert_eq!(form.fields[0], "beta", "name pre-filled from the profile");
+    assert_eq!(app.mode, InputMode::Form);
+}
+
+#[tokio::test]
+async fn edit_key_is_a_noop_off_the_connections_tab() {
+    let (mut app, _rx) = build_app(config_with(&["alpha"]), unique_config_path(), None);
+    app.screen = Screen::Recordings;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('e'));
+    assert!(
+        app.form.is_none(),
+        "no edit form opens off the Connections tab"
+    );
+}
+
+#[tokio::test]
+async fn editing_an_offline_profile_replaces_and_persists_without_connecting() {
+    let path = unique_config_path();
+    let (mut app, _rx) = build_app(config_with(&["alpha"]), path.clone(), None);
+    let id_before = app.next_id;
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('e'));
+    app.form.as_mut().unwrap().fields[1] = "10.0.0.9".into(); // host
+    app.submit_form();
+
+    assert_eq!(
+        app.profiles.len(),
+        1,
+        "an edit replaces in place, never appends"
+    );
+    let ConnectionConfig::Redis(p) = &app.profiles[0] else {
+        panic!("expected a redis profile");
+    };
+    assert_eq!(p.host, "10.0.0.9", "the edit is applied");
+    assert!(app.form.is_none(), "the form closes on save");
+    assert_eq!(
+        app.next_id, id_before,
+        "an offline profile is not connected merely by saving an edit"
+    );
+
+    let saved = std::fs::read_to_string(&path).expect("config written");
+    assert!(saved.contains("10.0.0.9"), "the edit is persisted to disk");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn editing_a_live_profile_reconnects_with_the_new_settings() {
+    let path = unique_config_path();
+    let (mut app, _rx) = build_app(config_with(&["prod"]), path.clone(), None);
+    connect(&mut app, 1, "prod", 16).await;
+    assert!(app.is_connected("prod"));
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('e'));
+    app.form.as_mut().unwrap().fields[2] = "6400".into(); // change the port
+    app.submit_form();
+
+    // The old session is torn down and a reconnect is kicked off; its Connected
+    // event hasn't been delivered yet, so no live connection is present.
+    assert!(
+        app.connections.is_empty(),
+        "the live session is torn down before reconnecting"
+    );
+    assert_eq!(
+        app.conn_health(),
+        ConnHealth::Connecting,
+        "a reconnect with the new settings is in flight"
+    );
+    let ConnectionConfig::Redis(p) = &app.profiles[0] else {
+        panic!("expected a redis profile");
+    };
+    assert_eq!(p.port, 6400, "the new port is saved");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn x_disconnects_the_selected_live_profile() {
+    let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
+    connect(&mut app, 1, "prod", 16).await;
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('x'));
+
+    assert!(app.connections.is_empty(), "x disconnects the live session");
+    assert!(!app.is_connected("prod"));
+    let status = app.status.as_ref().expect("status set");
+    assert!(
+        status.message.contains("Disconnected"),
+        "reports the disconnect: {}",
+        status.message
+    );
+}
+
+#[tokio::test]
+async fn x_on_an_offline_profile_reports_that_it_is_not_connected() {
+    let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('x'));
+    let status = app.status.as_ref().expect("status set");
+    assert!(
+        status.message.contains("not connected"),
+        "nothing to disconnect: {}",
+        status.message
+    );
+}
+
+#[tokio::test]
+async fn ctrl_d_in_the_edit_form_deletes_after_a_confirming_repeat() {
+    let path = unique_config_path();
+    let (mut app, _rx) = build_app(config_with(&["alpha", "beta"]), path.clone(), None);
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0)); // alpha
+    app.handle_key(ch('e'));
+
+    // First Ctrl-D only arms the confirmation; nothing is removed.
+    app.handle_key(ctrl_ch('d'));
+    assert!(
+        app.form.as_ref().unwrap().confirm_delete,
+        "first press arms"
+    );
+    assert_eq!(app.profiles.len(), 2, "nothing deleted on the first press");
+
+    // Any other key breaks the confirmation.
+    app.handle_key(key(KeyCode::Tab));
+    assert!(
+        !app.form.as_ref().unwrap().confirm_delete,
+        "an unrelated key disarms the pending delete"
+    );
+
+    // Re-arm and confirm with a consecutive pair.
+    app.handle_key(ctrl_ch('d'));
+    app.handle_key(ctrl_ch('d'));
+    assert!(
+        app.form.is_none(),
+        "the form closes once the profile is deleted"
+    );
+    assert_eq!(app.profiles.len(), 1);
+    assert_eq!(app.profiles[0].name(), "beta", "alpha removed, beta kept");
+
+    let saved = std::fs::read_to_string(&path).expect("config written");
+    assert!(
+        !saved.contains("alpha"),
+        "the deleted profile is gone from disk"
+    );
+    assert!(saved.contains("beta"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn deleting_a_live_profile_disconnects_it_first() {
+    let path = unique_config_path();
+    let (mut app, _rx) = build_app(config_with(&["prod"]), path.clone(), None);
+    connect(&mut app, 1, "prod", 16).await;
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('e'));
+    app.handle_key(ctrl_ch('d'));
+    app.handle_key(ctrl_ch('d'));
+
+    assert!(app.profiles.is_empty(), "the profile is removed");
+    assert!(
+        app.connections.is_empty(),
+        "its live session is closed as part of the delete"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
