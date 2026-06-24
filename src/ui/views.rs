@@ -1612,8 +1612,25 @@ fn server_graph(
     frame.render_widget(spark, bars_area);
 }
 
+/// Fixed widths for the client table's address, idle, and command tail columns;
+/// the leading name column flexes to fill whatever the pane has left. The four
+/// columns are separated by single spaces (three gaps).
+const CLIENT_ADDR_COL: usize = 15;
+const CLIENT_IDLE_COL: usize = 4;
+const CLIENT_CMD_COL: usize = 11;
+
+/// The flexing name column's width for a client table `width` columns wide: the
+/// pane minus the fixed tails and the three inter-column gaps, never below room
+/// for the `Name` header itself.
+fn client_name_col(width: usize) -> usize {
+    width
+        .saturating_sub(CLIENT_ADDR_COL + CLIENT_IDLE_COL + CLIENT_CMD_COL + 3)
+        .max(4)
+}
+
 /// The right column of the Server Details tab: the connected clients from
-/// `CLIENT LIST`, one per row, vertically scrollable (the offset is `scroll`,
+/// `CLIENT LIST` as a table (name, address, idle, last command) under a title and
+/// a column header. The rows are vertically scrollable (the offset is `scroll`,
 /// rows from the top, clamped here against the list height).
 fn server_clients(
     frame: &mut Frame,
@@ -1622,14 +1639,18 @@ fn server_clients(
     theme: &Theme,
     area: Rect,
 ) {
-    let [header_area, list_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let [title_area, columns_area, list_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled("Clients ", theme.heading),
             Span::styled(format!("({})", clients.len()), theme.dim),
         ])),
-        header_area,
+        title_area,
     );
 
     if clients.is_empty() {
@@ -1639,6 +1660,21 @@ fn server_clients(
         );
         return;
     }
+
+    // The column header, aligned to the data rows below it via the same widths.
+    let name_w = client_name_col(columns_area.width as usize);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(pad_end("Name", name_w), theme.header),
+            Span::raw(" "),
+            Span::styled(pad_end("Addr", CLIENT_ADDR_COL), theme.header),
+            Span::raw(" "),
+            Span::styled(pad_end("Idle", CLIENT_IDLE_COL), theme.header),
+            Span::raw(" "),
+            Span::styled("Cmd", theme.header),
+        ])),
+        columns_area,
+    );
 
     // Window the list to the visible rows; an over-scroll rests at the bottom.
     let width = list_area.width as usize;
@@ -1653,31 +1689,38 @@ fn server_clients(
     frame.render_widget(Paragraph::new(lines), list_area);
 }
 
-/// One client row: an identity column (the client's name, or its address when it
-/// never set one) that flexes to fill the pane, then fixed dim age and accent
-/// last-command tails.
+/// One client row aligned to [`server_clients`]'s columns: the client's name (an
+/// em-dash when it set none), its address and dim idle time, then its last
+/// command in the accent colour. A client that has run nothing yet reports
+/// `cmd=NULL`, which — like an empty command — renders as an em-dash rather than
+/// the literal word.
 fn client_line(client: &ClientInfo, width: usize, theme: &Theme) -> Line<'static> {
-    const AGE_COL: usize = 5;
-    const CMD_COL: usize = 12;
-    let identity = if client.name.is_empty() {
-        client.addr.as_str()
+    let name_w = client_name_col(width);
+    let name = if client.name.is_empty() {
+        "—"
     } else {
         client.name.as_str()
     };
-    let cmd = if client.last_cmd.is_empty() {
+    let cmd = if client.last_cmd.is_empty() || client.last_cmd.eq_ignore_ascii_case("null") {
         "—"
     } else {
         client.last_cmd.as_str()
     };
-    // Identity takes whatever's left after the two tails plus their gaps.
-    let name_w = width.saturating_sub(AGE_COL + CMD_COL + 2).max(4);
-    let age = short_duration(client.age);
+    let idle = short_duration(client.idle);
     Line::from(vec![
-        Span::raw(pad_end(&truncate(identity, name_w), name_w)),
+        Span::raw(pad_end(&truncate(name, name_w), name_w)),
         Span::raw(" "),
-        Span::styled(pad_end(&truncate(&age, AGE_COL), AGE_COL), theme.dim),
+        Span::styled(
+            pad_end(&truncate(&client.addr, CLIENT_ADDR_COL), CLIENT_ADDR_COL),
+            theme.dim,
+        ),
         Span::raw(" "),
-        Span::styled(truncate(cmd, CMD_COL), theme.accent),
+        Span::styled(
+            pad_end(&truncate(&idle, CLIENT_IDLE_COL), CLIENT_IDLE_COL),
+            theme.dim,
+        ),
+        Span::raw(" "),
+        Span::styled(truncate(cmd, CLIENT_CMD_COL), theme.accent),
     ])
 }
 
@@ -2425,42 +2468,46 @@ mod tests {
         assert_eq!(short_duration(86_400), "1d");
     }
 
-    fn client(name: &str, addr: &str, age: u64, cmd: &str) -> ClientInfo {
+    fn client(name: &str, addr: &str, idle: u64, cmd: &str) -> ClientInfo {
         ClientInfo {
             id: 1,
             name: name.into(),
             addr: addr.into(),
-            age,
-            idle: 0,
+            age: 0,
+            idle,
             last_cmd: cmd.into(),
         }
     }
 
     #[test]
-    fn client_line_shows_name_or_falls_back_to_address() {
+    fn client_line_lays_out_name_address_idle_and_command() {
         let theme = Theme::dark();
-        // A named client leads with its name, its short age, and last command.
+        // A named, active client shows all four columns: name, address, compact
+        // idle, and last command.
         let named = line_text(&client_line(
             &client("web-1", "10.0.0.2:5555", 75, "get"),
-            40,
+            44,
             &theme,
         ));
         assert!(named.contains("web-1"), "name shown: {named:?}");
-        assert!(named.contains("1m"), "compact age shown: {named:?}");
+        assert!(named.contains("10.0.0.2:5555"), "address shown: {named:?}");
+        assert!(named.contains("1m"), "compact idle shown: {named:?}");
         assert!(named.contains("get"), "last command shown: {named:?}");
-        // An unnamed client is identified by its address instead.
+        // An unnamed client that has run nothing yet reports `cmd=NULL`: the name
+        // and the command both collapse to an em-dash, but the address still
+        // identifies it.
         let unnamed = line_text(&client_line(
-            &client("", "10.0.0.9:6666", 0, ""),
-            40,
+            &client("", "10.0.0.9:6666", 0, "NULL"),
+            44,
             &theme,
         ));
         assert!(
             unnamed.contains("10.0.0.9:6666"),
-            "address fallback: {unnamed:?}"
+            "address identifies it: {unnamed:?}"
         );
         assert!(
-            unnamed.contains('—'),
-            "missing command em-dash: {unnamed:?}"
+            unnamed.matches('—').count() >= 2,
+            "missing name and NULL command both em-dashed: {unnamed:?}"
         );
     }
 

@@ -2069,12 +2069,12 @@ mod tests {
         app.connections[0].browser.complete = true;
         app.connections[0].browser.table.select(Some(0));
 
-        let client = |id, name: &str, addr: &str, age, cmd: &str| ClientInfo {
+        let client = |id, name: &str, addr: &str, idle, cmd: &str| ClientInfo {
             id,
             name: name.into(),
             addr: addr.into(),
-            age,
-            idle: 0,
+            age: 0,
+            idle,
             last_cmd: cmd.into(),
         };
         let mut stats = ServerStats {
@@ -2090,9 +2090,12 @@ mod tests {
             keyspace_misses: Some(100),
             db_keys: vec![(0, 412)],
             clients: vec![
-                client(3, "web-1", "10.0.0.2:5051", 75, "get"),
-                client(4, "", "10.0.0.9:6210", 5, "subscribe"),
-                client(5, "cron", "10.0.0.3:4410", 3700, "client|list"),
+                client(3, "web-1", "10.0.0.2:5051", 0, "get"),
+                client(4, "", "10.0.0.9:6210", 2, "subscribe"),
+                client(5, "cron", "10.0.0.3:4410", 3600, "client|list"),
+                // A freshly opened connection that has run nothing yet: Redis
+                // reports `cmd=NULL`, which renders as an em-dash.
+                client(6, "", "10.0.0.7:7001", 45, "NULL"),
             ],
             ..Default::default()
         };
@@ -2125,7 +2128,7 @@ mod tests {
         app.connections[0].dashboard.stats = Some(stats);
         // Server Details is the leftmost tab (index 0), selected by default. A
         // taller frame gives the panel room for the metrics/facts/health lines,
-        // the two graphs, and the client list with their margins.
-        insta::assert_snapshot!("browser_server_details", render_lines(&mut app, 90, 30));
+        // the two graphs, and the client table (title + column header + rows).
+        insta::assert_snapshot!("browser_server_details", render_lines(&mut app, 90, 36));
     }
 }
