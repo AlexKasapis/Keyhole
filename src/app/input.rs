@@ -570,12 +570,17 @@ impl App {
             },
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
-            Action::Enter => match self.screen {
-                Screen::Home => self.connect_selected_profile(),
-                // On a group header, fold/unfold it; on a key, no-op.
-                Screen::Browser => self.toggle_selected_group(),
-                _ => {}
-            },
+            Action::Enter => {
+                if self.screen == Screen::Home {
+                    self.connect_selected_profile();
+                }
+            }
+            // Right (or `l`): on a group header, fold/unfold it; on a key, no-op.
+            Action::ToggleGroup => {
+                if self.screen == Screen::Browser {
+                    self.toggle_selected_group();
+                }
+            }
             Action::AddConnection => {
                 self.form = Some(ConnForm::new());
                 self.mode = InputMode::Form;

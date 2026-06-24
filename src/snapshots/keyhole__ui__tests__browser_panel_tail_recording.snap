@@ -27,4 +27,4 @@ expression: "render_lines(&mut app, 90, 26)"
 │12:34:56.000  orders             event 3                                                │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ keys · ⏎ collapse · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help
+ ↑↓→ nav · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help · Esc back

@@ -58,6 +58,8 @@ pub enum Action {
     ToggleSortDir,
     /// Collapse or expand every group at once (Browser).
     ToggleAllGroups,
+    /// Collapse or expand the group at the cursor (Browser). Bound to Right.
+    ToggleGroup,
     /// Toggle recording on the focused live-feed subpanel (Browser); rename the
     /// selected recording on the Recordings tab. No longer refreshes the key list.
     Refresh,
@@ -85,6 +87,7 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('g') | Home) => Some(Action::Top),
         (false, Char('G') | End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
+        (false, Right | Char('l')) => Some(Action::ToggleGroup),
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('e')) => Some(Action::EditConnection),
         (false, Char('b')) => Some(Action::GotoBrowser),
@@ -140,12 +143,15 @@ mod tests {
         assert_eq!(keys_focus(Char('p')), None, "p is a feed control");
         assert_eq!(keys_focus(Char('x')), None, "x is a feed control");
         assert_eq!(keys_focus(Char('r')), None, "r records a feed");
-        // Space is unbound (group folding is Enter-only), so it never reaches
+        // Space is unbound (group folding is Right/`l`), so it never reaches
         // the console either. The other list bindings stay.
         assert_eq!(keys_focus(Char(' ')), None, "Space is unbound");
         assert_eq!(keys_focus(Char('z')), Some(Action::ToggleAllGroups));
         assert_eq!(keys_focus(Char('/')), Some(Action::StartFilter));
         assert_eq!(keys_focus(Char('j')), Some(Action::Down));
+        // Right / `l` fold the cursor's group and stay live in the keys pane.
+        assert_eq!(keys_focus(Right), Some(Action::ToggleGroup));
+        assert_eq!(keys_focus(Char('l')), Some(Action::ToggleGroup));
     }
 
     #[test]
@@ -161,6 +167,8 @@ mod tests {
         assert_eq!(plain(Char('G')), Some(Action::Bottom));
         assert_eq!(plain(End), Some(Action::Bottom));
         assert_eq!(plain(Enter), Some(Action::Enter));
+        assert_eq!(plain(Right), Some(Action::ToggleGroup));
+        assert_eq!(plain(Char('l')), Some(Action::ToggleGroup));
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('e')), Some(Action::EditConnection));
         assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
@@ -211,8 +219,8 @@ mod tests {
         // `[` / `]` once stepped the Redis database; that switcher is gone.
         assert_eq!(plain(Char('[')), None, "'[' is unbound: no DB switcher");
         assert_eq!(plain(Char(']')), None, "']' is unbound: no DB switcher");
-        // Space once folded the selected group; folding is now Enter-only.
-        assert_eq!(plain(Char(' ')), None, "Space is unbound: fold with Enter");
+        // Space once folded the selected group; folding is now Right / `l`.
+        assert_eq!(plain(Char(' ')), None, "Space is unbound: fold with Right");
         // `:` opens the command palette (see `colon_opens_palette_*`), so it is
         // deliberately *not* unbound here.
         // `w` opened the standalone Realtime screen, which is gone: tails now

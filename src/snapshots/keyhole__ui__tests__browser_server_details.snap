@@ -37,4 +37,4 @@ expression: "render_lines(&mut app, 90, 36)"
 │      ▃ █                                       cron   10.0.0.3:4410   1h   client|list │
 │ ▁▂▄█▅███                                       —      10.0.0.7:7001   45s  —           │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ keys · ⏎ collapse · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help
+ ↑↓→ nav · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help · Esc back

@@ -288,8 +288,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     format!("filter {pattern}")
                 };
                 vec![
-                    ("↑↓", "keys".to_string()),
-                    ("⏎", "collapse".to_string()),
+                    ("↑↓→", "nav".to_string()),
                     ("z", "all".to_string()),
                     ("/", filter),
                     ("oO", "sort".to_string()),
@@ -699,7 +698,7 @@ mod tests {
                 " ↑↓ move · Enter connect · a add",
                 "Esc Esc quit",
             ),
-            (Screen::Browser, " ↑↓ keys · ⏎ collapse", "Esc back"),
+            (Screen::Browser, " ↑↓→ nav · z all", "Esc back"),
             (
                 Screen::Recordings,
                 " ↑↓ move · PgUp/PgDn scroll",
@@ -719,8 +718,10 @@ mod tests {
                 footer.contains(tail),
                 "{screen:?} footer should still list {tail:?}: {footer:?}"
             );
-            // The old grouping labels are gone (each is a word followed by a space).
-            for label in ["nav ", "conn ", "view ", "groups ", "go ", "app "] {
+            // The old grouping labels are gone (each is a word followed by a
+            // space). "nav" is excluded: it is now a real action word, paired
+            // with the ↑↓→ key in the Browser footer, not a group header.
+            for label in ["conn ", "view ", "groups ", "go ", "app "] {
                 assert!(
                     !footer.contains(label),
                     "{screen:?} footer must not show the {label:?} group label: {footer:?}"
@@ -815,15 +816,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn browser_footer_advertises_collapse_and_has_no_grouping_toggle() {
+    async fn browser_footer_advertises_nav_and_has_no_grouping_toggle() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        // Keys are always grouped, so the footer always carries the collapse
-        // control and never a grouping toggle.
+        // Keys are always grouped; the footer carries the combined ↑↓→ nav hint
+        // (Right folds the cursor's group) and never a grouping toggle.
         let text = render_lines(&mut app, 160, 8);
         assert!(
-            text.contains("⏎ collapse"),
-            "browser footer advertises collapse/expand"
+            text.contains("↑↓→ nav"),
+            "browser footer advertises the combined nav hint"
         );
         assert!(!text.contains("p group"), "no `p group` toggle");
         assert!(!text.contains("ungroup"), "no `p ungroup` toggle");

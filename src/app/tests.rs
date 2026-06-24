@@ -1023,7 +1023,7 @@ async fn browser_view_is_always_grouped_with_headers() {
 }
 
 #[tokio::test]
-async fn browser_enter_collapses_and_expands_selected_group() {
+async fn browser_right_collapses_and_expands_selected_group() {
     let (mut app, _rx) = browser_with_keys(vec![
         stream_entry("user:1", ValueType::String),
         stream_entry("user:2", ValueType::String),
@@ -1036,11 +1036,11 @@ async fn browser_enter_collapses_and_expands_selected_group() {
         Some("user")
     );
 
-    app.apply(Action::Enter); // collapse
+    app.apply(Action::ToggleGroup); // collapse
     assert!(app.connections[0].browser.collapsed.contains("user"));
     assert!(view_keys(&app.connections[0]).is_empty(), "keys hidden");
 
-    app.apply(Action::Enter); // expand
+    app.apply(Action::ToggleGroup); // expand
     assert!(!app.connections[0].browser.collapsed.contains("user"));
     assert_eq!(view_keys(&app.connections[0]), ["user:1", "user:2"]);
 }
@@ -1061,7 +1061,7 @@ async fn browser_collapse_works_from_a_key_inside_the_group() {
     app.connections[0].browser.table.select(Some(4));
     assert_eq!(app.connections[0].selected().unwrap().key, "user:2");
 
-    app.apply(Action::Enter); // Enter, from inside the group
+    app.apply(Action::ToggleGroup); // Right, from inside the group
     assert!(
         app.connections[0].browser.collapsed.contains("user"),
         "the cursor's group folds even from a key row"
@@ -1074,7 +1074,7 @@ async fn browser_collapse_works_from_a_key_inside_the_group() {
         Some("user")
     );
 
-    app.apply(Action::Enter); // expand again from the header
+    app.apply(Action::ToggleGroup); // expand again from the header
     assert!(!app.connections[0].browser.collapsed.contains("user"));
     assert_eq!(
         view_keys(&app.connections[0]),
@@ -3329,10 +3329,10 @@ async fn console_scroll_via_pageup_pagedown() {
 // -- pane focus ----------------------------------------------------------
 
 #[tokio::test]
-async fn browser_opens_with_keys_focused_so_enter_folds_groups() {
+async fn browser_opens_with_keys_focused_so_right_folds_groups() {
     // Regression: the Browser used to open in command mode (Console is tab 0),
     // so a fold keystroke went to the console instead of the group. It now opens
-    // with the keys pane focused, where Enter folds the selected group.
+    // with the keys pane focused, where Right folds the selected group.
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod", 16).await;
     finish_initial_scan(
@@ -3347,19 +3347,19 @@ async fn browser_opens_with_keys_focused_so_enter_folds_groups() {
     assert!(!app.bottom_focused(), "opens with the keys pane focused");
     assert_eq!(app.mode, InputMode::Normal);
 
-    // The group starts folded; Enter on the keys pane expands it, and runs
+    // The group starts folded; Right on the keys pane expands it, and runs
     // nothing in the console.
     app.connections[0].browser.table.select(Some(0));
     let folded = app.connections[0].browser.collapsed.len();
     assert!(folded > 0, "groups start folded");
-    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Right));
     assert!(
         app.connections[0].browser.collapsed.len() < folded,
-        "Enter folds/unfolds the selected group"
+        "Right folds/unfolds the selected group"
     );
     assert!(
         app.connections[0].console.input.is_empty(),
-        "Enter did not leak into the console"
+        "Right did not leak into the console"
     );
 }
 

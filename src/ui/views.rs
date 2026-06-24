@@ -1882,7 +1882,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("Keys pane", theme.heading),
         Line::from("  / filter   o sort column   O direction"),
         Line::from("  keys nest into collapsible groups by each ':' (start folded)"),
-        Line::from("  Enter collapse/expand group   z fold/unfold all"),
+        Line::from("  →/l collapse/expand group   z fold/unfold all"),
         Line::from("  PgUp/PgDn scroll the value pane   keys auto-refresh"),
         Line::from(""),
         Line::styled("Bottom subpanel (Redis)", theme.heading),

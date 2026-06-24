@@ -20,7 +20,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │Keys pane                                                       │           │
 │           │  / filter   o sort column   O direction                        │           │
 │           │  keys nest into collapsible groups by each ':' (start folded)  │           │
-│           │  Enter collapse/expand group   z fold/unfold all               │           │
+│           │  →/l collapse/expand group   z fold/unfold all                 │           │
 │           │  PgUp/PgDn scroll the value pane   keys auto-refresh           │           │
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
