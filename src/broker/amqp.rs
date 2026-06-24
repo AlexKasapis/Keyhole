@@ -2,9 +2,12 @@
 //! / RabbitMQ 4.x), built on `fe2o3-amqp`.
 //!
 //! Surfaces a destination *browser*: a user-curated list of topics/queues (AMQP
-//! 1.0 cannot enumerate them), a queue message peek, and live tails. There is no
-//! stats dashboard or command console (those need a management plane AMQP 1.0
-//! lacks; deferred to the RabbitMQ phase — see [`Capabilities::amqp`]).
+//! 1.0 cannot enumerate them), a queue message peek (navigable, filterable, with
+//! a per-message detail view of the body plus its standard/header/application
+//! metadata — see [`message_meta`]), live tails, and a single-message
+//! [`publish`](AmqpConnection::publish) — the one *write* the browser performs.
+//! There is no stats dashboard or command console (those need a management plane
+//! AMQP 1.0 lacks; deferred to the RabbitMQ phase — see [`Capabilities::amqp`]).
 //!
 //! Tailing a destination:
 //! - **Topic** (`topic:name`) — a non-destructive multicast subscription: every
@@ -32,12 +35,13 @@ use time::OffsetDateTime;
 
 use fe2o3_amqp::connection::{ConnectionHandle, OpenError};
 use fe2o3_amqp::sasl_profile::SaslProfile;
-use fe2o3_amqp::types::messaging::{Body, DistributionMode, Source};
-use fe2o3_amqp::types::primitives::Value;
-use fe2o3_amqp::{Connection, Receiver, Session};
+use fe2o3_amqp::types::messaging::{Body, Data, DistributionMode, Message, Source};
+use fe2o3_amqp::types::primitives::{Binary, Value};
+use fe2o3_amqp::{Connection, Receiver, Sender, Session};
 
 use super::{
-    BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, PeekReq, SubSpec,
+    BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, PeekReq, PublishReq,
+    SubSpec,
 };
 use crate::config::{AmqpProfile, PeekMode};
 
@@ -169,6 +173,17 @@ impl BrokerConnection for AmqpConnection {
         let peek_id = unique_container_id(&format!("keyhole-{}-peek", self.profile.name));
         peek_queue(self.url(), peek_id, queue, destructive, req.limit).await
     }
+
+    async fn publish(&mut self, req: PublishReq) -> anyhow::Result<()> {
+        let address = match &req.spec {
+            SubSpec::Topic(t) => format!("topic://{t}"),
+            SubSpec::Queue(q) => format!("queue://{q}"),
+            other => anyhow::bail!("{} is not an AMQP destination", other.label()),
+        };
+        // A publish opens its own short-lived connection, so it needs its own id.
+        let pub_id = unique_container_id(&format!("keyhole-{}-pub", self.profile.name));
+        publish_message(self.url(), pub_id, address, req.body).await
+    }
 }
 
 /// Owns a tail's dedicated connection/session/receiver so the stream stays alive.
@@ -231,7 +246,7 @@ async fn open_tail(
             Ok(delivery) => {
                 // Settle our copy; non-destructive for topics and browse-mode queues.
                 let _ = st.receiver.accept(&delivery).await;
-                let event = delivery_to_event(&st.source, delivery.into_body());
+                let event = message_to_event(&st.source, delivery.into_message());
                 Some((event, st))
             }
             // Link/connection closed (or a decode error) ends the tail.
@@ -300,7 +315,7 @@ async fn peek_queue(
         match tokio::time::timeout(wait, receiver.recv::<Body<Value>>()).await {
             Ok(Ok(delivery)) => {
                 let _ = receiver.accept(&delivery).await;
-                events.push(delivery_to_event(&queue, delivery.into_body()));
+                events.push(message_to_event(&queue, delivery.into_message()));
             }
             // A receive error ends the peek with whatever was read so far.
             Ok(Err(e)) => {
@@ -318,6 +333,53 @@ async fn peek_queue(
     let _ = session.end().await;
     let _ = connection.close().await;
     Ok(events)
+}
+
+/// Publish `body` to `address` (`topic://name` or `queue://name`) as a single
+/// AMQP message with one data section, then detach. Like a tail/peek it opens
+/// its own short-lived connection + session, so the actor's main connection is
+/// untouched. The body is sent verbatim as opaque bytes (a data section), the
+/// most broker-neutral form and a faithful round-trip of keyhole's binary-safe
+/// payloads. This is the browser's only write — every other AMQP operation is a
+/// non-destructive read.
+async fn publish_message(
+    url: String,
+    container_id: String,
+    address: String,
+    body: Vec<u8>,
+) -> anyhow::Result<()> {
+    let mut connection = open_connection(container_id, url.as_str())
+        .await
+        .map_err(|e| anyhow::anyhow!("opening publish connection: {e}"))?;
+    let mut session = Session::begin(&mut connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("beginning publish session: {e}"))?;
+    let mut sender = Sender::attach(
+        &mut session,
+        format!("keyhole-pub-{address}"),
+        address.clone(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("attaching sender to `{address}`: {e}"))?;
+
+    let message = Message::from(Data(Binary::from(body)));
+    let outcome = sender
+        .send(message)
+        .await
+        .map_err(|e| anyhow::anyhow!("publishing to `{address}`: {e}"))?;
+    // The broker may accept the message or reject/release it; treat anything
+    // other than an accept as a failure so the user isn't told it landed when
+    // the broker refused it.
+    outcome.accepted_or_else(|state| {
+        anyhow::anyhow!("broker did not accept the message for `{address}`: {state:?}")
+    })?;
+
+    // Detach the link and close the connection (best-effort: the send already
+    // succeeded, so a teardown hiccup must not turn a success into an error).
+    let _ = sender.close().await;
+    let _ = session.end().await;
+    let _ = connection.close().await;
+    Ok(())
 }
 
 /// Enforce the non-destructive guarantee for a queue browse: the broker's
@@ -338,15 +400,152 @@ fn ensure_browse_nondestructive(source: &Option<Source>, queue: &str) -> anyhow:
     Ok(())
 }
 
-/// Build a [`BrokerEvent`] from a received AMQP message body, keeping it
-/// binary-safe (data sections and non-UTF-8 strings become base64 downstream).
-fn delivery_to_event(source: &str, body: Body<Value>) -> BrokerEvent {
+/// Build a [`BrokerEvent`] from a received AMQP message, keeping the body
+/// binary-safe (data sections and non-UTF-8 strings become base64 downstream)
+/// and surfacing the message's standard properties, header flags, and
+/// application properties as event metadata (see [`message_meta`]).
+fn message_to_event(source: &str, msg: Message<Body<Value>>) -> BrokerEvent {
+    let meta = message_meta(&msg);
     BrokerEvent {
         ts: OffsetDateTime::now_utc(),
         source: source.to_string(),
-        payload: body_to_payload(body),
-        meta: Vec::new(),
+        payload: body_to_payload(msg.body),
+        meta,
     }
+}
+
+/// Extract the displayable metadata from an AMQP message: the standard
+/// properties (`message-id`, `correlation-id`, `subject`, content type, …), the
+/// non-default header flags (`durable`, `priority`, `delivery-count`, `ttl`),
+/// and every application property under an `app.<key>` name. Only fields the
+/// sender actually set are emitted, so an empty message yields no metadata.
+///
+/// The message-id is surfaced under the key `id` (not `message-id`) so it shows
+/// inline in the one-line message list, matching how a Redis stream entry's id
+/// rides under the same key.
+fn message_meta(msg: &Message<Body<Value>>) -> Vec<(String, String)> {
+    let mut meta = Vec::new();
+    if let Some(p) = &msg.properties {
+        if let Some(id) = &p.message_id {
+            meta.push(("id".to_string(), message_id_to_string(id)));
+        }
+        if let Some(id) = &p.correlation_id {
+            meta.push(("correlation-id".to_string(), message_id_to_string(id)));
+        }
+        if let Some(s) = &p.subject {
+            meta.push(("subject".to_string(), s.clone()));
+        }
+        if let Some(ct) = &p.content_type {
+            meta.push(("content-type".to_string(), ct.0.clone()));
+        }
+        if let Some(ce) = &p.content_encoding {
+            meta.push(("content-encoding".to_string(), ce.0.clone()));
+        }
+        if let Some(to) = &p.to {
+            meta.push(("to".to_string(), to.clone()));
+        }
+        if let Some(rt) = &p.reply_to {
+            meta.push(("reply-to".to_string(), rt.clone()));
+        }
+        if let Some(gid) = &p.group_id {
+            meta.push(("group-id".to_string(), gid.clone()));
+        }
+        if let Some(uid) = &p.user_id {
+            meta.push(("user-id".to_string(), bytes_to_string(uid.as_ref())));
+        }
+        if let Some(ts) = &p.creation_time {
+            meta.push((
+                "creation-time".to_string(),
+                timestamp_to_string(ts.milliseconds()),
+            ));
+        }
+    }
+    if let Some(h) = &msg.header {
+        if h.durable {
+            meta.push(("durable".to_string(), "true".to_string()));
+        }
+        // The spec default priority is 4; only surface a non-default value.
+        if h.priority.0 != 4 {
+            meta.push(("priority".to_string(), h.priority.0.to_string()));
+        }
+        // A non-zero delivery-count means the message was redelivered — a useful
+        // signal when browsing a queue, so it is only shown when it matters.
+        if h.delivery_count > 0 {
+            meta.push(("delivery-count".to_string(), h.delivery_count.to_string()));
+        }
+        if let Some(ttl) = h.ttl {
+            meta.push(("ttl".to_string(), format!("{ttl}ms")));
+        }
+    }
+    if let Some(ap) = &msg.application_properties {
+        for (k, v) in ap.0.iter() {
+            meta.push((format!("app.{k}"), simple_value_to_string(v)));
+        }
+    }
+    meta
+}
+
+/// Render an AMQP `MessageId` (which may be a ulong, uuid, binary, or string) as
+/// a display string.
+fn message_id_to_string(id: &fe2o3_amqp::types::messaging::MessageId) -> String {
+    use fe2o3_amqp::types::messaging::MessageId;
+    match id {
+        MessageId::Ulong(n) => n.to_string(),
+        MessageId::Uuid(u) => uuid_to_string(u.as_inner()),
+        MessageId::Binary(b) => bytes_to_string(b.as_ref()),
+        MessageId::String(s) => s.clone(),
+    }
+}
+
+/// Render an application-property value compactly. The common scalar cases
+/// (string, symbol, bool, the integer widths) render bare; rarer types fall back
+/// to their debug shape so nothing is silently dropped.
+fn simple_value_to_string(v: &fe2o3_amqp::types::primitives::SimpleValue) -> String {
+    use fe2o3_amqp::types::primitives::SimpleValue as S;
+    match v {
+        S::Null => String::new(),
+        S::Bool(b) => b.to_string(),
+        S::Ubyte(n) => n.to_string(),
+        S::Ushort(n) => n.to_string(),
+        S::Uint(n) => n.to_string(),
+        S::Ulong(n) => n.to_string(),
+        S::Byte(n) => n.to_string(),
+        S::Short(n) => n.to_string(),
+        S::Int(n) => n.to_string(),
+        S::Long(n) => n.to_string(),
+        S::Float(n) => n.0.to_string(),
+        S::Double(n) => n.0.to_string(),
+        S::Char(c) => c.to_string(),
+        S::Timestamp(t) => timestamp_to_string(t.milliseconds()),
+        S::Uuid(u) => uuid_to_string(u.as_inner()),
+        S::Binary(b) => bytes_to_string(b.as_ref()),
+        S::String(s) => s.clone(),
+        S::Symbol(s) => s.0.clone(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Render raw bytes for display: the UTF-8 text if valid, else base64 — the same
+/// binary-safe convention the body payloads use.
+fn bytes_to_string(bytes: &[u8]) -> String {
+    Payload::classify(bytes.to_vec()).as_text()
+}
+
+/// Format the 16 bytes of an AMQP UUID as a canonical hyphenated string.
+fn uuid_to_string(b: &[u8; 16]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+    )
+}
+
+/// Format a millisecond Unix timestamp as an ISO-8601 UTC string, falling back
+/// to the raw millisecond count if it is out of the representable range.
+fn timestamp_to_string(millis: i64) -> String {
+    OffsetDateTime::from_unix_timestamp_nanos(millis as i128 * 1_000_000)
+        .map(|dt| dt.to_string())
+        .unwrap_or_else(|_| format!("{millis}ms"))
 }
 
 /// Convert an AMQP message body into a binary-safe [`Payload`].
@@ -515,6 +714,140 @@ mod tests {
             .await
             .expect("skip peek never touches the broker");
         assert!(out.is_empty(), "skip mode reads nothing");
+    }
+
+    use fe2o3_amqp::types::messaging::{
+        ApplicationProperties, Header, Message, MessageId, Priority, Properties,
+    };
+    use fe2o3_amqp::types::primitives::{SimpleValue, Symbol, Timestamp};
+
+    /// Find a metadata value by key in an extracted `meta` list.
+    fn meta_get<'a>(meta: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        meta.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn message_meta_surfaces_properties_header_and_app_properties() {
+        let props = Properties::builder()
+            .message_id(MessageId::String("m-1".into()))
+            .correlation_id(MessageId::Ulong(7))
+            .subject("orders")
+            .content_type(Symbol("application/json".into()))
+            .build();
+        let header = Header {
+            durable: true,
+            // The default priority (4) must be omitted; a redelivery count shown.
+            priority: Priority::default(),
+            ttl: Some(60_000),
+            first_acquirer: false,
+            delivery_count: 3,
+        };
+        let app = ApplicationProperties::builder()
+            .insert("region", SimpleValue::String("eu".into()))
+            .insert("retries", SimpleValue::Int(7))
+            .build();
+        let msg = Message {
+            header: Some(header),
+            delivery_annotations: None,
+            message_annotations: None,
+            properties: Some(props),
+            application_properties: Some(app),
+            body: Body::Value(AmqpValue(Value::String(r#"{"a":1}"#.into()))),
+            footer: None,
+        };
+
+        let meta = message_meta(&msg);
+        // The message-id rides under `id` so it shows inline in the list line.
+        assert_eq!(meta_get(&meta, "id"), Some("m-1"));
+        assert_eq!(meta_get(&meta, "correlation-id"), Some("7"));
+        assert_eq!(meta_get(&meta, "subject"), Some("orders"));
+        assert_eq!(meta_get(&meta, "content-type"), Some("application/json"));
+        assert_eq!(meta_get(&meta, "durable"), Some("true"));
+        assert_eq!(meta_get(&meta, "delivery-count"), Some("3"));
+        assert_eq!(meta_get(&meta, "ttl"), Some("60000ms"));
+        assert_eq!(meta_get(&meta, "app.region"), Some("eu"));
+        assert_eq!(meta_get(&meta, "app.retries"), Some("7"));
+        // The default priority is not emitted.
+        assert_eq!(meta_get(&meta, "priority"), None);
+    }
+
+    #[test]
+    fn message_meta_is_empty_for_a_bare_message() {
+        let msg = Message {
+            header: None,
+            delivery_annotations: None,
+            message_annotations: None,
+            properties: None,
+            application_properties: None,
+            body: Body::Value(AmqpValue(Value::String("x".into()))),
+            footer: None,
+        };
+        assert!(message_meta(&msg).is_empty());
+    }
+
+    #[test]
+    fn message_to_event_carries_body_and_meta() {
+        let props = Properties::builder()
+            .message_id(MessageId::String("abc".into()))
+            .build();
+        let msg = Message {
+            header: None,
+            delivery_annotations: None,
+            message_annotations: None,
+            properties: Some(props),
+            application_properties: None,
+            body: Body::Value(AmqpValue(Value::String("hello".into()))),
+            footer: None,
+        };
+        let ev = message_to_event("orders", msg);
+        assert_eq!(ev.source, "orders");
+        assert_eq!(ev.payload, Payload::Utf8("hello".into()));
+        assert_eq!(ev.meta("id"), Some("abc"));
+    }
+
+    #[test]
+    fn timestamp_renders_iso_and_uuid_is_hyphenated() {
+        // 0 ms since the epoch is the Unix epoch instant.
+        assert!(timestamp_to_string(0).starts_with("1970-01-01"));
+        let bytes = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        assert_eq!(
+            uuid_to_string(&bytes),
+            "550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn simple_value_renders_common_scalars() {
+        assert_eq!(
+            simple_value_to_string(&SimpleValue::String("hi".into())),
+            "hi"
+        );
+        assert_eq!(simple_value_to_string(&SimpleValue::Int(42)), "42");
+        assert_eq!(simple_value_to_string(&SimpleValue::Bool(true)), "true");
+        assert_eq!(
+            simple_value_to_string(&SimpleValue::Symbol(Symbol("sym".into()))),
+            "sym"
+        );
+        assert_eq!(simple_value_to_string(&SimpleValue::Null), "");
+        // A timestamp app-property renders the same ISO form as creation-time.
+        assert!(
+            simple_value_to_string(&SimpleValue::Timestamp(Timestamp::from_milliseconds(0)))
+                .starts_with("1970-01-01")
+        );
+    }
+
+    #[test]
+    fn message_id_renders_each_variant() {
+        assert_eq!(message_id_to_string(&MessageId::Ulong(12)), "12");
+        assert_eq!(message_id_to_string(&MessageId::String("s".into())), "s");
+        // Binary message-ids fall back to the binary-safe text convention.
+        assert_eq!(
+            message_id_to_string(&MessageId::Binary(vec![0x68, 0x69].into())),
+            "hi"
+        );
     }
 }
 
@@ -772,5 +1105,64 @@ mod integration_tests {
             .await
             .expect("peek empty queue");
         assert!(events.is_empty(), "an empty queue peeks to nothing");
+    }
+
+    #[tokio::test]
+    async fn publish_sends_a_retrievable_message() {
+        let queue = unique("keyhole.it.publish");
+        let mut conn = connected().await;
+        conn.publish(PublishReq {
+            spec: SubSpec::Queue(queue.clone()),
+            body: b"published-bytes".to_vec(),
+        })
+        .await
+        .expect("publish to queue");
+
+        // Read it back through our own (destructive) peek, proving the message
+        // landed and round-trips to the expected payload.
+        let events = conn
+            .peek(PeekReq {
+                spec: SubSpec::Queue(queue.clone()),
+                mode: PeekMode::Destructive,
+                limit: 5,
+            })
+            .await
+            .expect("peek the published message");
+        let bodies: Vec<String> = events.iter().map(|e| e.payload.as_text()).collect();
+        assert_eq!(bodies, vec!["published-bytes".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn publish_to_a_topic_reaches_a_live_tail() {
+        let topic = unique("keyhole.it.pubtopic");
+        let mut conn = connected().await;
+        let mut stream = conn
+            .subscribe(SubSpec::Topic(topic.clone()))
+            .await
+            .expect("topic subscribe");
+
+        // Topics don't retain, so publish in a loop until the tail observes one
+        // (the same attach/credit race the tail test handles).
+        let mut pub_conn = connected().await;
+        let topic_for_pub = topic.clone();
+        let publisher = tokio::spawn(async move {
+            while pub_conn
+                .publish(PublishReq {
+                    spec: SubSpec::Topic(topic_for_pub.clone()),
+                    body: b"pub-to-topic".to_vec(),
+                })
+                .await
+                .is_ok()
+            {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+        });
+
+        let ev = timeout(Duration::from_secs(8), stream.next())
+            .await
+            .expect("tail timed out")
+            .expect("stream ended");
+        publisher.abort();
+        assert_eq!(ev.payload, Payload::Utf8("pub-to-topic".into()));
     }
 }

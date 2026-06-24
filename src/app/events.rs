@@ -51,6 +51,7 @@ impl App {
             AppEvent::KeysPage { id, page } => self.on_keys_page(id, page),
             AppEvent::ValueLoaded { id, key, value } => self.on_value(id, key, value),
             AppEvent::Peeked { id, spec, events } => self.on_peeked(id, spec, events),
+            AppEvent::Published { id, target, result } => self.on_published(id, target, result),
             AppEvent::StatsUpdated { id, stats } => self.on_stats(id, stats),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
@@ -240,10 +241,36 @@ impl App {
             // Drop a stale peek: the user may have moved to another destination
             // before this batch returned (mirrors `on_value`'s key guard).
             if conn.peek.peeked.as_ref() == Some(&spec) {
+                // A full batch means the queue likely holds more than we read, so
+                // the count line can flag that the view is truncated.
+                conn.peek.limit_hit = events.len() >= VALUE_LIMIT;
                 conn.peek.events = events;
                 conn.peek.pending = false;
                 conn.peek.scroll = 0;
+                // A fresh batch resets the message-list cursor, any open detail
+                // view, and the search filter.
+                conn.peek.selected = 0;
+                conn.peek.detail = false;
+                conn.peek.filter.clear();
             }
+        }
+    }
+
+    /// A publish completed: confirm or report it, and re-peek when the message
+    /// landed in the queue currently selected so the user sees it appear.
+    pub(super) fn on_published(&mut self, id: ConnId, target: String, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                self.set_status(format!("Published to {target}"), false);
+                let reselect = self
+                    .conn_by_id(id)
+                    .and_then(|c| c.selected_destination())
+                    .is_some_and(|d| d.canonical() == target && matches!(d.kind, DestKind::Queue));
+                if reselect {
+                    self.request_peek(id);
+                }
+            }
+            Err(e) => self.set_status(format!("Publish to {target} failed: {e}"), true),
         }
     }
 

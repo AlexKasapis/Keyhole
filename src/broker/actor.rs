@@ -22,7 +22,7 @@ use tokio_util::task::TaskTracker;
 
 use super::{
     BrokerConnection, BrokerEventStream, BrowseReq, Capabilities, ConnId, InspectReq, PeekReq,
-    SubSpec,
+    PublishReq, SubSpec,
 };
 use crate::event::AppEvent;
 use crate::recording::{RecordSink, Recorder, RecordingStatus, FLUSH_EVERY};
@@ -47,6 +47,12 @@ pub enum ConnCommand {
         spec: SubSpec,
         mode: crate::config::PeekMode,
         limit: usize,
+    },
+    /// Publish a single message to a destination (AMQP). The reply is an
+    /// [`AppEvent::Published`]. The lone write command.
+    Publish {
+        spec: SubSpec,
+        body: Vec<u8>,
     },
     RefreshStats,
     Ping,
@@ -433,6 +439,16 @@ async fn process(
                 }
                 Err(e) => emit_error(events, id, "peek", e).await,
             }
+        }
+        ConnCommand::Publish { spec, body } => {
+            let target = spec.label();
+            let result = conn
+                .publish(PublishReq { spec, body })
+                .await
+                .map_err(|e| format!("{e:#}"));
+            events
+                .send(AppEvent::Published { id, target, result })
+                .await
         }
         ConnCommand::RefreshStats => match conn.stats().await {
             Ok(stats) => events.send(AppEvent::StatsUpdated { id, stats }).await,

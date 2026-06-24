@@ -409,10 +409,13 @@ fn amqp_destination_pane(
     theme: &Theme,
     area: Rect,
 ) {
+    // The list is "focused" only when the keys pane has the keyboard *and* it
+    // has not been handed onward to the message pane (the AMQP sub-focus).
+    let list_focused = focus == PaneFocus::Keys && !conn.peek.focused;
     let block = Block::bordered()
         .title(" Destinations ")
         .title_style(theme.heading)
-        .border_style(border_style(theme, focus == PaneFocus::Keys));
+        .border_style(border_style(theme, list_focused));
     if conn.destinations.items.is_empty() {
         let hint = Paragraph::new(vec![
             Line::from(""),
@@ -446,52 +449,219 @@ fn amqp_destination_pane(
 
 /// The AMQP browser's right pane: the messages from the last queue peek (the
 /// analog of the Redis value pane). A topic shows a tail hint (topics don't
-/// retain), and a queue shows its peeked messages or an empty / pending state.
+/// retain); a queue shows its peeked messages as a navigable, filterable list
+/// with a count/limit title, an empty / pending state, or — when a message is
+/// opened — the full single-message detail view (see [`amqp_detail_pane`]).
 fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area: Rect) {
-    // Take owned copies so no borrow of `conn` survives into the scroll write.
     let sel = conn.selected_destination().map(|d| (d.canonical(), d.kind));
-    let title = match &sel {
-        Some((name, _)) => format!(" {name} "),
-        None => " Messages ".to_string(),
-    };
-    let lines: Vec<Line> = match sel.as_ref().map(|(_, k)| *k) {
-        Some(DestKind::Topic) => vec![Line::styled(
-            "Topics don't retain messages — press 't' or Enter to tail it live.",
-            theme.dim,
-        )],
-        Some(DestKind::Queue) => {
-            if conn.peek.pending {
-                vec![Line::styled("Peeking…", theme.dim)]
-            } else if conn.peek.events.is_empty() {
-                vec![Line::styled(
-                    "No messages to show (empty queue, or peek mode is off).",
-                    theme.dim,
-                )]
-            } else {
-                conn.peek
-                    .events
-                    .iter()
-                    .map(|ev| event_line(ev, theme))
-                    .collect()
-            }
+    let queue_name = match sel.as_ref().map(|(name, kind)| (name.clone(), *kind)) {
+        Some((name, DestKind::Topic)) => {
+            return render_peek_hint(
+                frame,
+                theme,
+                area,
+                Some(&name),
+                "Topics don't retain messages — press 't' or Enter to tail it live.",
+            );
         }
-        None => vec![Line::styled("Add a destination with 'a'.", theme.dim)],
+        Some((name, DestKind::Queue)) => name,
+        None => {
+            return render_peek_hint(frame, theme, area, None, "Add a destination with 'a'.");
+        }
     };
-    // Clamp the scroll against the content height (the peeked-message count),
-    // mirroring the Redis value pane's viewport-derived write.
+
+    if conn.peek.pending {
+        return render_peek_hint(frame, theme, area, Some(&queue_name), "Peeking…");
+    }
+    if conn.peek.events.is_empty() {
+        return render_peek_hint(
+            frame,
+            theme,
+            area,
+            Some(&queue_name),
+            "No messages to show (empty queue, or peek mode is off).",
+        );
+    }
+
+    // A message is opened: show its full body + metadata instead of the list.
+    if conn.peek.detail {
+        return amqp_detail_pane(frame, conn, theme, area, &queue_name);
+    }
+
+    // Otherwise the navigable message list, with a count/limit/filter title and a
+    // selection highlight shown only while the pane holds the keyboard.
+    let total = conn.peek.events.len();
+    let shown = conn.peek.filtered_len();
+    let title = peek_list_title(
+        &queue_name,
+        total,
+        shown,
+        &conn.peek.filter,
+        conn.peek.limit_hit,
+    );
+    let focused = conn.peek.focused;
+    let selected = conn.peek.selected;
+    let indices = conn.peek.filtered_indices();
+
+    let lines: Vec<Line> = if indices.is_empty() {
+        vec![Line::styled(
+            format!("No messages match \"{}\".", conn.peek.filter),
+            theme.dim,
+        )]
+    } else {
+        indices
+            .iter()
+            .enumerate()
+            .map(|(row, &i)| {
+                let mut line = event_line(&conn.peek.events[i], theme);
+                if focused && row == selected {
+                    line.spans.insert(0, Span::styled("▶ ", theme.accent));
+                    line.style = theme.selected;
+                } else {
+                    line.spans.insert(0, Span::raw("  "));
+                }
+                line
+            })
+            .collect()
+    };
+
+    // Auto-follow the cursor when focused so the selection stays on screen;
+    // otherwise clamp the manual scroll against the content height.
     let inner_h = area.height.saturating_sub(2) as usize;
+    if focused && inner_h > 0 && !indices.is_empty() {
+        let scroll = conn.peek.scroll as usize;
+        if selected < scroll {
+            conn.peek.scroll = selected as u16;
+        } else if selected >= scroll + inner_h {
+            conn.peek.scroll = (selected + 1 - inner_h) as u16;
+        }
+    }
     let max_scroll = lines.len().saturating_sub(inner_h) as u16;
     conn.peek.scroll = conn.peek.scroll.min(max_scroll);
+
+    let border = if focused { theme.accent } else { theme.border };
     let para = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(title)
+                .title_style(theme.heading)
+                .border_style(border),
+        )
+        .scroll((conn.peek.scroll, 0));
+    frame.render_widget(para, area);
+}
+
+/// Render the peek pane's non-list states (topic hint, empty/pending queue, no
+/// selection) as a single dim line under the pane's border.
+fn render_peek_hint(frame: &mut Frame, theme: &Theme, area: Rect, name: Option<&str>, msg: &str) {
+    let title = match name {
+        Some(n) => format!(" {n} "),
+        None => " Messages ".to_string(),
+    };
+    let para = Paragraph::new(Line::styled(msg.to_owned(), theme.dim))
         .block(
             Block::bordered()
                 .title(title)
                 .title_style(theme.heading)
                 .border_style(theme.border),
         )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(para, area);
+}
+
+/// The message-list pane title: destination plus a message count, a `+` when the
+/// peek was truncated at the limit, or a `shown/total match "filter"` summary
+/// while a filter is active.
+fn peek_list_title(
+    name: &str,
+    total: usize,
+    shown: usize,
+    filter: &str,
+    limit_hit: bool,
+) -> String {
+    if filter.is_empty() {
+        let plus = if limit_hit { "+" } else { "" };
+        format!(" {name} · {total}{plus} msgs ")
+    } else {
+        format!(" {name} · {shown}/{total} match \"{filter}\" ")
+    }
+}
+
+/// The AMQP browser's single-message detail view: the selected message's
+/// metadata (timestamp + every property/header/application property) followed by
+/// its full body, pretty-printed when it is JSON. Scrollable, since a body can be
+/// large.
+fn amqp_detail_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    theme: &Theme,
+    area: Rect,
+    queue_name: &str,
+) {
+    let position = conn.peek.selected + 1;
+    let count = conn.peek.filtered_len();
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(ev) = conn.peek.selected_event() {
+        let ts = format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            ev.ts.hour(),
+            ev.ts.minute(),
+            ev.ts.second(),
+            ev.ts.millisecond()
+        );
+        lines.push(Line::from(vec![
+            Span::styled("received: ", theme.accent),
+            Span::raw(ts),
+        ]));
+        for (k, v) in &ev.meta {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{k}: "), theme.accent),
+                Span::raw(v.clone()),
+            ]));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("── body ──", theme.dim));
+        let body = match &ev.payload {
+            Payload::Json(s) => pretty_json(s),
+            other => other.as_text(),
+        };
+        // `str::lines` drops a trailing newline and never yields for an empty
+        // body, so an empty payload renders as a single blank line.
+        if body.is_empty() {
+            lines.push(Line::raw(""));
+        } else {
+            for l in body.lines() {
+                lines.push(Line::raw(l.to_owned()));
+            }
+        }
+    } else {
+        lines.push(Line::styled("No message selected.", theme.dim));
+    }
+
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_h) as u16;
+    conn.peek.scroll = conn.peek.scroll.min(max_scroll);
+    let title = format!(" {queue_name} · message {position}/{count} ");
+    let para = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(title)
+                .title_style(theme.heading)
+                .border_style(theme.accent),
+        )
         .wrap(Wrap { trim: false })
         .scroll((conn.peek.scroll, 0));
     frame.render_widget(para, area);
+}
+
+/// Pretty-print a JSON string with two-space indentation; returns the original
+/// text unchanged if it does not parse (it should, having been classified as
+/// JSON, but this stays robust if that ever changes).
+fn pretty_json(s: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| s.to_owned())
 }
 
 /// Total height (rows) reserved for the Browser's Server band: a border (2)

@@ -125,6 +125,26 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
+        InputMode::Publish => {
+            let line = Line::from(vec![
+                Span::styled(" publish ", theme.accent),
+                Span::raw(format!("{}▏", app.publish_buf)),
+                Span::styled("   Enter send · Esc cancel", theme.dim),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
+        InputMode::PeekFilter => {
+            let filter = app
+                .active_conn()
+                .map(|c| c.peek.filter.clone())
+                .unwrap_or_default();
+            let line = Line::from(vec![
+                Span::styled(" filter messages ", theme.accent),
+                Span::raw(format!("{filter}▏")),
+                Span::styled("   Enter apply · Esc clear", theme.dim),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
         // The console tab has its own input prompt inside the panel, so command
         // mode keeps the keybind row rather than echoing the input a second time.
         InputMode::Normal | InputMode::Command => match &app.status {
@@ -224,18 +244,37 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 }
             } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
                 // The AMQP keys pane is the curated destination list, not a key
-                // scan, so it has its own controls (no db / groups / sort).
-                owned(&[
-                    ("↑↓", "destinations"),
-                    ("a", "add"),
-                    ("x", "remove"),
-                    ("⏎", "open"),
-                    ("t", "tail"),
-                    ("Tab/Ctrl-↓", "tails"),
-                    (":", "palette"),
-                    ("?", "help"),
-                    ("Esc", "back"),
-                ])
+                // scan, so it has its own controls (no db / groups / sort). The
+                // hints follow whether the keyboard is on the destination list,
+                // the peeked-message list, or an open message detail view.
+                let peek = app.active_conn().map(|c| (c.peek.focused, c.peek.detail));
+                match peek {
+                    Some((true, true)) => owned(&[
+                        ("↑↓", "scroll"),
+                        ("PgUp/PgDn", "page"),
+                        ("Esc/←", "list"),
+                        (":", "palette"),
+                        ("?", "help"),
+                    ]),
+                    Some((true, false)) => owned(&[
+                        ("↑↓", "messages"),
+                        ("⏎/→", "detail"),
+                        ("/", "filter"),
+                        ("P", "publish"),
+                        ("Esc/←", "destinations"),
+                        ("?", "help"),
+                    ]),
+                    _ => owned(&[
+                        ("↑↓", "destinations"),
+                        ("⏎/→", "messages"),
+                        ("a", "add"),
+                        ("x", "remove"),
+                        ("t", "tail"),
+                        ("P", "publish"),
+                        ("Tab/Ctrl-↓", "tails"),
+                        ("?", "help"),
+                    ]),
+                }
             } else {
                 let (sort, arrow, pattern) = app
                     .active_conn()
@@ -1889,6 +1928,32 @@ mod tests {
         pin_clock(&mut app);
         app.screen = Screen::Browser;
         insta::assert_snapshot!("browser_amqp", render_lines(&mut app, 90, 24));
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_amqp_message_detail() {
+        // The AMQP message detail view: a queue message opened from the list, so
+        // the right pane shows its metadata (here a content-type + an application
+        // property) and its pretty-printed JSON body.
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Browser;
+        // Give the second (JSON) message some metadata and open it in detail.
+        {
+            let peek = &mut app.connections[0].peek;
+            peek.events[1].meta = vec![
+                ("id".into(), "m-42".into()),
+                ("content-type".into(), "application/json".into()),
+                ("app.region".into(), "eu".into()),
+            ];
+            peek.focused = true;
+            peek.selected = 1;
+            peek.detail = true;
+        }
+        insta::assert_snapshot!(
+            "browser_amqp_message_detail",
+            render_lines(&mut app, 90, 24)
+        );
     }
 
     #[tokio::test]

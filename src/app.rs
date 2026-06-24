@@ -116,6 +116,8 @@ pub struct App {
     pub(crate) mode: InputMode,
     pub(crate) filter: String,
     pub(crate) subscribe_buf: String,
+    /// The message body being typed in the AMQP publish prompt.
+    pub(crate) publish_buf: String,
     pub(crate) form: Option<ConnForm>,
     pub(crate) status: Option<Status>,
     /// Connection health while no connection is active. `Connected` is derived
@@ -210,6 +212,7 @@ impl App {
             mode: InputMode::Normal,
             filter: String::new(),
             subscribe_buf: String::new(),
+            publish_buf: String::new(),
             form: None,
             status: None,
             health: ConnHealth::Offline,

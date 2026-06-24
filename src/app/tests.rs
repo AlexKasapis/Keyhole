@@ -3083,6 +3083,137 @@ async fn amqp_tick_skips_stats_refresh() {
     assert!(!saw_stats, "AMQP tick must not request stats");
 }
 
+/// Connect an AMQP mock, add `queue`, and load `bodies` as its peeked messages
+/// (bypassing the async peek round-trip). Leaves the queue selected with the
+/// keyboard on the destination list.
+async fn amqp_with_messages(app: &mut App, bodies: &[&str]) {
+    connect_amqp(app, 1, "mq").await;
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+    let events: Vec<BrokerEvent> = bodies.iter().map(|b| broker_event(b)).collect();
+    let conn = &mut app.connections[0];
+    conn.peek.events = events;
+    conn.peek.pending = false;
+    conn.peek.peeked = Some(SubSpec::Queue("orders".into()));
+    conn.peek.selected = 0;
+    conn.peek.focused = false;
+    conn.peek.detail = false;
+}
+
+#[tokio::test]
+async fn amqp_message_pane_navigation_and_detail() {
+    let (mut app, _rx) = test_app();
+    amqp_with_messages(&mut app, &["one", "two", "three"]).await;
+    // → steps the keyboard into the message pane.
+    app.handle_key(key(KeyCode::Right));
+    assert!(app.active_conn().unwrap().peek.focused);
+    // j/k navigate messages and clamp at the ends.
+    app.handle_key(ch('j'));
+    app.handle_key(ch('j'));
+    app.handle_key(ch('j'));
+    assert_eq!(app.active_conn().unwrap().peek.selected, 2);
+    // Enter opens the detail view for the selected message.
+    app.handle_key(key(KeyCode::Enter));
+    let conn = app.active_conn().unwrap();
+    assert!(conn.peek.detail);
+    assert_eq!(
+        conn.peek.selected_event().map(|e| e.payload.as_text()),
+        Some("three".into())
+    );
+    // Esc closes the detail view but stays in the message pane…
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.active_conn().unwrap().peek.detail);
+    assert!(app.active_conn().unwrap().peek.focused);
+    // …and a second Esc returns to the destination list.
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.active_conn().unwrap().peek.focused);
+}
+
+#[tokio::test]
+async fn amqp_message_filter_narrows_and_clears() {
+    let (mut app, _rx) = test_app();
+    amqp_with_messages(&mut app, &["alpha", "beta", "gamma"]).await;
+    app.handle_key(key(KeyCode::Right)); // focus the message pane
+    app.handle_key(ch('j')); // selected = 1
+    app.handle_key(ch('/'));
+    assert_eq!(app.mode, InputMode::PeekFilter);
+    for c in "mm".chars() {
+        app.handle_key(ch(c));
+    }
+    {
+        let peek = &app.active_conn().unwrap().peek;
+        assert_eq!(peek.filter, "mm");
+        assert_eq!(peek.filtered_len(), 1, "only gamma matches");
+        assert_eq!(peek.selected, 0, "the cursor resets as the filter narrows");
+    }
+    // Enter commits the filter and returns to normal mode.
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.mode, InputMode::Normal);
+    assert_eq!(app.active_conn().unwrap().peek.filter, "mm");
+    // '/' then Esc clears the filter.
+    app.handle_key(ch('/'));
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.active_conn().unwrap().peek.filter.is_empty());
+}
+
+#[tokio::test]
+async fn amqp_publish_prompt_confirms_and_clears() {
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 1, "mq").await;
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+    // 'P' opens the publish prompt.
+    app.handle_key(ch('P'));
+    assert_eq!(app.mode, InputMode::Publish);
+    for c in "hello".chars() {
+        app.handle_key(ch(c));
+    }
+    assert_eq!(app.publish_buf, "hello");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.mode, InputMode::Normal);
+    assert!(app.publish_buf.is_empty(), "buffer cleared after submit");
+    let status = app.status.as_ref().unwrap();
+    assert!(status.message.contains("Publishing to queue:orders"));
+    assert!(!status.is_error);
+}
+
+#[tokio::test]
+async fn amqp_publish_refused_without_a_destination() {
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 1, "mq").await;
+    // No destination is selected, so the prompt is refused with an error status.
+    app.handle_key(ch('P'));
+    assert_eq!(app.mode, InputMode::Normal);
+    let status = app.status.as_ref().unwrap();
+    assert!(status.is_error);
+    assert!(status.message.contains("select a destination"));
+}
+
+#[tokio::test]
+async fn amqp_on_published_reports_success_and_failure() {
+    let (mut app, _rx) = test_app();
+    let id = connect_amqp(&mut app, 1, "mq").await;
+    app.handle_event(AppEvent::Published {
+        id,
+        target: "queue:orders".into(),
+        result: Ok(()),
+    });
+    assert!(!app.status.as_ref().unwrap().is_error);
+    assert!(app
+        .status
+        .as_ref()
+        .unwrap()
+        .message
+        .contains("Published to"));
+
+    app.handle_event(AppEvent::Published {
+        id,
+        target: "queue:orders".into(),
+        result: Err("broker refused".into()),
+    });
+    let status = app.status.as_ref().unwrap();
+    assert!(status.is_error);
+    assert!(status.message.contains("broker refused"));
+}
+
 // -- console -------------------------------------------------------------
 
 #[tokio::test]

@@ -413,6 +413,13 @@ impl App {
     pub(super) fn request_peek(&mut self, id: ConnId) {
         let mode = self.peek_mode();
         if let Some(conn) = self.conn_by_id_mut(id) {
+            // Selecting a destination always returns focus to the list and drops
+            // any open detail view / search filter from the previous selection.
+            conn.peek.focused = false;
+            conn.peek.detail = false;
+            conn.peek.selected = 0;
+            conn.peek.filter.clear();
+            conn.peek.limit_hit = false;
             let Some(dest) = conn.selected_destination().cloned() else {
                 // Empty list / nothing selected: nothing to show.
                 conn.peek.events.clear();
@@ -496,6 +503,37 @@ impl App {
             self.set_status(format!("{label} is already in the list"), false);
         }
         self.request_peek(id);
+    }
+
+    /// Publish `body` to the active AMQP connection's selected destination. The
+    /// browser's only write: gated on the connection's [`can_publish`] capability
+    /// and a selected destination, with the result reported via
+    /// [`AppEvent::Published`](crate::event::AppEvent::Published).
+    pub(super) fn publish_to_selected(&mut self, body: String) {
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let outcome = match self.conn_by_id(id) {
+            Some(conn) if !conn.caps.can_publish => {
+                Err("this connection cannot publish".to_string())
+            }
+            Some(conn) => match conn.selected_destination().map(|d| d.spec()) {
+                Some(spec) => {
+                    let label = spec.label();
+                    conn.handle.send(ConnCommand::Publish {
+                        spec,
+                        body: body.into_bytes(),
+                    });
+                    Ok(label)
+                }
+                None => Err("no destination selected to publish to".to_string()),
+            },
+            None => return,
+        };
+        match outcome {
+            Ok(label) => self.set_status(format!("Publishing to {label}…"), false),
+            Err(e) => self.set_status(e, true),
+        }
     }
 
     /// Remove the highlighted destination from the active AMQP connection,

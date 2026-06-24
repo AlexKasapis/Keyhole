@@ -41,6 +41,14 @@ pub enum AppEvent {
         spec: SubSpec,
         events: Vec<BrokerEvent>,
     },
+    /// The result of a publish (AMQP): `Ok` when the broker accepted the
+    /// message, `Err` with a reason otherwise. `target` is the destination label
+    /// for the confirmation/failure status.
+    Published {
+        id: ConnId,
+        target: String,
+        result: Result<(), String>,
+    },
     /// Refreshed server statistics.
     StatsUpdated { id: ConnId, stats: ServerStats },
     /// A non-fatal error from a connection operation.

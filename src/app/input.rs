@@ -27,6 +27,8 @@ impl App {
             InputMode::Form => return self.handle_form_key(key),
             InputMode::Rename => return self.handle_rename_key(key),
             InputMode::AddDestination => return self.handle_add_destination_key(key),
+            InputMode::Publish => return self.handle_publish_key(key),
+            InputMode::PeekFilter => return self.handle_peek_filter_key(key),
             // Normal / Command / Subscribe are reconciled from the focused pane.
             InputMode::Normal | InputMode::Command | InputMode::Subscribe => {}
         }
@@ -78,6 +80,10 @@ impl App {
             (false, KeyCode::Esc) => {
                 if self.bottom_focused() {
                     self.set_pane_focus(PaneFocus::Keys);
+                } else if self.peek_focused() {
+                    // The AMQP message pane: Esc closes the detail view, then
+                    // steps back to the destination list — not out of the Browser.
+                    self.handle_message_key(key);
                 } else {
                     self.apply(Action::Back);
                 }
@@ -115,9 +121,16 @@ impl App {
 
     /// Keys while the AMQP destination list (left pane) is focused: navigate the
     /// list, Enter to open the selection (peek a queue / tail a topic), `a` to add
-    /// a destination, `x`/`d` to remove one, `t` to tail it. PageUp/Down scroll the
-    /// peek pane (the right pane), mirroring the Redis keys-pane value scroll.
+    /// a destination, `x`/`d` to remove one, `t` to tail it, `P` to publish.
+    /// `l`/`→` steps into the message pane; PageUp/Down scroll it (the right
+    /// pane), mirroring the Redis keys-pane value scroll.
+    ///
+    /// When the message pane holds the keyboard the keys drive that pane instead
+    /// (see [`Self::handle_message_key`]).
     fn handle_destination_key(&mut self, key: KeyEvent) {
+        if self.peek_focused() {
+            return self.handle_message_key(key);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
             (false, KeyCode::Char('j') | KeyCode::Down) => self.nav(1),
@@ -127,14 +140,145 @@ impl App {
             (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
             (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
             (false, KeyCode::Enter) => self.open_selected_destination(),
+            (false, KeyCode::Char('l') | KeyCode::Right) => self.focus_messages(),
             (false, KeyCode::Char('a')) => self.begin_add_destination(),
             (false, KeyCode::Char('x') | KeyCode::Char('d')) => self.delete_selected_destination(),
             (false, KeyCode::Char('t')) => self.tail_selected_destination(),
+            (false, KeyCode::Char('P')) => self.begin_publish(),
             (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
             (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
             (false, KeyCode::Char(':')) => self.apply(Action::OpenPalette),
             _ => {}
         }
+    }
+
+    /// Keys while the AMQP message pane (right) holds the keyboard. The list view
+    /// navigates peeked messages (`j`/`k`, `g`/`G`), filters them (`/`), opens the
+    /// full-message detail view (Enter / `l` / `→`), publishes (`P`), and steps
+    /// back to the destination list (Esc / `h` / `←`). The detail view is a
+    /// scrollable read-only pane that the same back-keys close.
+    fn handle_message_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if self.peek_detail_open() {
+            match (ctrl, key.code) {
+                (_, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
+                | (false, KeyCode::Char('h'))
+                | (_, KeyCode::Left) => self.close_detail(),
+                (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
+                (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
+                (false, KeyCode::Char('j') | KeyCode::Down) => self.scroll_peek(1),
+                (false, KeyCode::Char('k') | KeyCode::Up) => self.scroll_peek(-1),
+                (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
+                (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
+                _ => {}
+            }
+            return;
+        }
+        match (ctrl, key.code) {
+            (false, KeyCode::Char('j') | KeyCode::Down) => self.move_message(1),
+            (false, KeyCode::Char('k') | KeyCode::Up) => self.move_message(-1),
+            (false, KeyCode::Char('g') | KeyCode::Home) => self.message_to_edge(true),
+            (false, KeyCode::Char('G') | KeyCode::End) => self.message_to_edge(false),
+            (false, KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right) => self.open_detail(),
+            (_, KeyCode::Esc) | (false, KeyCode::Char('h')) | (_, KeyCode::Left) => {
+                self.unfocus_messages()
+            }
+            (false, KeyCode::Char('/')) => self.begin_peek_filter(),
+            (false, KeyCode::Char('P')) => self.begin_publish(),
+            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
+            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
+            (false, KeyCode::Char(':')) => self.apply(Action::OpenPalette),
+            _ => {}
+        }
+    }
+
+    /// Whether the AMQP message pane (right) currently holds the keyboard.
+    fn peek_focused(&self) -> bool {
+        self.active_conn().is_some_and(|c| c.peek.focused)
+    }
+
+    /// Whether the AMQP single-message detail view is open.
+    fn peek_detail_open(&self) -> bool {
+        self.active_conn().is_some_and(|c| c.peek.detail)
+    }
+
+    /// Move the keyboard into the message pane, when the selected destination is
+    /// a queue with peeked messages to browse. A no-op otherwise (so the key is
+    /// harmless on a topic or an empty/unpeeked queue).
+    fn focus_messages(&mut self) {
+        if let Some(conn) = self.active_conn_mut() {
+            if !conn.peek.events.is_empty() {
+                conn.peek.focused = true;
+                conn.peek.clamp_selection();
+                conn.peek.scroll = 0;
+            }
+        }
+    }
+
+    /// Return the keyboard to the destination list, closing any detail view.
+    fn unfocus_messages(&mut self) {
+        if let Some(conn) = self.active_conn_mut() {
+            conn.peek.focused = false;
+            conn.peek.detail = false;
+            conn.peek.scroll = 0;
+        }
+    }
+
+    /// Move the message-list cursor by `delta`, resetting the scroll so the
+    /// (single-line) selection stays in view.
+    fn move_message(&mut self, delta: i32) {
+        if let Some(conn) = self.active_conn_mut() {
+            conn.peek.move_selection(delta);
+        }
+    }
+
+    /// Jump the message-list cursor to the first/last filtered message.
+    fn message_to_edge(&mut self, top: bool) {
+        if let Some(conn) = self.active_conn_mut() {
+            let len = conn.peek.filtered_len();
+            conn.peek.selected = if top || len == 0 { 0 } else { len - 1 };
+        }
+    }
+
+    /// Open the full-message detail view for the selected message (a no-op when
+    /// the filtered list is empty).
+    fn open_detail(&mut self) {
+        if let Some(conn) = self.active_conn_mut() {
+            if conn.peek.selected_event().is_some() {
+                conn.peek.detail = true;
+                conn.peek.scroll = 0;
+            }
+        }
+    }
+
+    /// Close the detail view, returning to the message list.
+    fn close_detail(&mut self) {
+        if let Some(conn) = self.active_conn_mut() {
+            conn.peek.detail = false;
+            conn.peek.scroll = 0;
+        }
+    }
+
+    /// Enter the message-list search-filter prompt (live: the list narrows as you
+    /// type). A no-op unless the message pane is focused.
+    fn begin_peek_filter(&mut self) {
+        if self.peek_focused() {
+            self.mode = InputMode::PeekFilter;
+        }
+    }
+
+    /// Enter the publish prompt for the selected destination. Refused (with a
+    /// status) when the connection can't publish or nothing is selected.
+    fn begin_publish(&mut self) {
+        let ready = self
+            .active_conn()
+            .is_some_and(|c| c.caps.can_publish && c.selected_destination().is_some());
+        if !ready {
+            self.set_status("select a destination to publish to".to_string(), true);
+            return;
+        }
+        self.publish_buf.clear();
+        self.mode = InputMode::Publish;
     }
 
     /// Enter the destination-add prompt (AMQP): capture a `topic:name` /
@@ -144,15 +288,25 @@ impl App {
         self.mode = InputMode::AddDestination;
     }
 
-    /// Open the highlighted destination: peek a queue, or tail a topic (topics
-    /// don't retain, so there is nothing to peek).
+    /// Open the highlighted destination: a queue steps into its message pane when
+    /// it already has peeked messages, otherwise it (re)issues the peek; a topic
+    /// (which doesn't retain) opens a live tail.
     fn open_selected_destination(&mut self) {
         let Some(id) = self.active_id() else { return };
         match self
             .conn_by_id(id)
             .and_then(|c| c.selected_destination().map(|d| d.kind))
         {
-            Some(DestKind::Queue) => self.request_peek(id),
+            Some(DestKind::Queue) => {
+                let has_messages = self
+                    .conn_by_id(id)
+                    .is_some_and(|c| !c.peek.events.is_empty());
+                if has_messages {
+                    self.focus_messages();
+                } else {
+                    self.request_peek(id);
+                }
+            }
             Some(DestKind::Topic) => self.tail_selected_destination(),
             None => {}
         }
@@ -189,6 +343,62 @@ impl App {
             KeyCode::Char(c) => self.subscribe_buf.push(c),
             KeyCode::Backspace => {
                 self.subscribe_buf.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// The publish prompt's keys: type a message body, Enter publishes it to the
+    /// selected destination, Esc cancels. An empty body is a valid (empty)
+    /// message, so it is not rejected.
+    pub(super) fn handle_publish_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.publish_buf.clear();
+                self.mode = InputMode::Normal;
+            }
+            KeyCode::Enter => {
+                let body = std::mem::take(&mut self.publish_buf);
+                self.mode = InputMode::Normal;
+                self.publish_to_selected(body);
+            }
+            KeyCode::Char(c) => self.publish_buf.push(c),
+            KeyCode::Backspace => {
+                self.publish_buf.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// The peek-filter prompt's keys: the filter applies live as you type, Enter
+    /// commits and returns to the message list, Esc clears the filter and
+    /// cancels. Each edit resets the message-list cursor to the top.
+    pub(super) fn handle_peek_filter_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(conn) = self.active_conn_mut() {
+                    conn.peek.filter.clear();
+                    conn.peek.selected = 0;
+                }
+                self.mode = InputMode::Normal;
+            }
+            KeyCode::Enter => {
+                if let Some(conn) = self.active_conn_mut() {
+                    conn.peek.clamp_selection();
+                }
+                self.mode = InputMode::Normal;
+            }
+            KeyCode::Char(c) => {
+                if let Some(conn) = self.active_conn_mut() {
+                    conn.peek.filter.push(c);
+                    conn.peek.selected = 0;
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(conn) = self.active_conn_mut() {
+                    conn.peek.filter.pop();
+                    conn.peek.selected = 0;
+                }
             }
             _ => {}
         }

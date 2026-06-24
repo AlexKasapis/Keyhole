@@ -121,6 +121,10 @@ pub enum InputMode {
     /// Typing a destination spec (`topic:name` / `queue:name`) to add to an AMQP
     /// connection's curated destination list (the left pane).
     AddDestination,
+    /// Typing a message body to publish to the selected AMQP destination.
+    Publish,
+    /// Typing a substring filter over the AMQP peek message list.
+    PeekFilter,
 }
 
 /// Which Browser pane currently owns the keyboard. Independent of which bottom
@@ -827,6 +831,12 @@ pub struct DestinationBrowser {
 /// last queue peek, which destination they belong to (a staleness guard, like
 /// [`ValueInspector::value_key`]), the scroll offset, and whether a peek is in
 /// flight.
+///
+/// The pane has two states — a navigable *message list* and, for the selected
+/// message, an expanded *detail* view (full body + all metadata) — plus an
+/// optional substring `filter` over the list. Keyboard focus moves into the
+/// pane (`focused`) so `j`/`k` drive the message cursor rather than the
+/// destination list.
 #[derive(Default)]
 pub struct PeekInspector {
     pub events: Vec<BrokerEvent>,
@@ -835,6 +845,85 @@ pub struct PeekInspector {
     pub peeked: Option<SubSpec>,
     pub scroll: u16,
     pub pending: bool,
+    /// Whether the message pane (right) holds the keyboard. When false the
+    /// destination list (left) does. Reset to false whenever the selection or
+    /// destination changes.
+    pub focused: bool,
+    /// Index of the highlighted message within the *filtered* list.
+    pub selected: usize,
+    /// Whether the expanded single-message detail view is open.
+    pub detail: bool,
+    /// Case-insensitive substring filter over message bodies and metadata; empty
+    /// means show everything.
+    pub filter: String,
+    /// Whether the last peek returned a full batch (the limit), so the view may
+    /// be truncated — surfaced in the count line.
+    pub limit_hit: bool,
+}
+
+impl PeekInspector {
+    /// Whether a message matches the current `filter` (case-insensitive substring
+    /// over the payload text and every metadata key/value). An empty filter
+    /// matches everything.
+    pub fn matches(filter: &str, ev: &BrokerEvent) -> bool {
+        if filter.is_empty() {
+            return true;
+        }
+        let needle = filter.to_lowercase();
+        if ev.payload.as_text().to_lowercase().contains(&needle) {
+            return true;
+        }
+        ev.meta
+            .iter()
+            .any(|(k, v)| k.to_lowercase().contains(&needle) || v.to_lowercase().contains(&needle))
+    }
+
+    /// The indices of `events` that pass the current filter, in order.
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        self.events
+            .iter()
+            .enumerate()
+            .filter(|(_, ev)| Self::matches(&self.filter, ev))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// How many messages pass the current filter.
+    pub fn filtered_len(&self) -> usize {
+        self.events
+            .iter()
+            .filter(|ev| Self::matches(&self.filter, ev))
+            .count()
+    }
+
+    /// The currently selected message (within the filtered list), if any.
+    pub fn selected_event(&self) -> Option<&BrokerEvent> {
+        self.filtered_indices()
+            .get(self.selected)
+            .map(|&i| &self.events[i])
+    }
+
+    /// Clamp the selection to the filtered-list bounds, so a shrinking filter
+    /// never leaves the cursor past the end.
+    pub fn clamp_selection(&mut self) {
+        let len = self.filtered_len();
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+
+    /// Move the message cursor by `delta` (clamped), within the filtered list.
+    pub fn move_selection(&mut self, delta: i32) {
+        let len = self.filtered_len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let next = (self.selected as i32 + delta).clamp(0, len as i32 - 1);
+        self.selected = next as usize;
+    }
 }
 
 /// Maximum samples retained in the Server Details time-series graphs. Stats
@@ -2227,5 +2316,75 @@ mod tests {
             after_first,
             "subsequent pages stay throttled until the interval elapses"
         );
+    }
+
+    // -- AMQP peek inspector -------------------------------------------------
+
+    fn peek_event(body: &str, meta: &[(&str, &str)]) -> crate::broker::BrokerEvent {
+        crate::broker::BrokerEvent {
+            ts: time::OffsetDateTime::UNIX_EPOCH,
+            source: "q".into(),
+            payload: Payload::Utf8(body.into()),
+            meta: meta
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn peek_with(bodies: &[&str]) -> PeekInspector {
+        PeekInspector {
+            events: bodies.iter().map(|b| peek_event(b, &[])).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn peek_filter_matches_body_and_meta_case_insensitively() {
+        let ev = peek_event("Hello World", &[("subject", "Orders")]);
+        assert!(PeekInspector::matches("", &ev), "empty filter matches all");
+        assert!(PeekInspector::matches("hello", &ev), "body substring");
+        assert!(PeekInspector::matches("ORD", &ev), "meta value substring");
+        assert!(PeekInspector::matches("subject", &ev), "meta key substring");
+        assert!(!PeekInspector::matches("missing", &ev));
+    }
+
+    #[test]
+    fn peek_filtered_indices_track_the_filter() {
+        let mut p = peek_with(&["alpha", "beta", "gamma"]);
+        assert_eq!(p.filtered_indices(), vec![0, 1, 2]);
+        assert_eq!(p.filtered_len(), 3);
+        p.filter = "mm".into();
+        assert_eq!(p.filtered_indices(), vec![2]);
+        assert_eq!(p.filtered_len(), 1);
+        // The selected index addresses the filtered list, so 0 → the match.
+        p.selected = 0;
+        assert_eq!(
+            p.selected_event().map(|e| e.payload.as_text()),
+            Some("gamma".into())
+        );
+    }
+
+    #[test]
+    fn peek_move_and_clamp_selection_stay_in_bounds() {
+        let mut p = peek_with(&["a", "b", "c"]);
+        p.move_selection(1);
+        assert_eq!(p.selected, 1);
+        p.move_selection(10);
+        assert_eq!(p.selected, 2, "clamped at the last message");
+        p.move_selection(-10);
+        assert_eq!(p.selected, 0, "clamped at the first message");
+
+        // A filter that shrinks the list re-clamps the cursor.
+        p.selected = 2;
+        p.filter = "a".into(); // matches only "a"
+        p.clamp_selection();
+        assert_eq!(p.selected, 0);
+
+        // An empty list parks the cursor at 0 and yields no selected event.
+        let mut empty = peek_with(&[]);
+        empty.move_selection(1);
+        assert_eq!(empty.selected, 0);
+        assert!(empty.selected_event().is_none());
     }
 }

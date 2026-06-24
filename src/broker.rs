@@ -120,6 +120,11 @@ pub struct Capabilities {
     pub can_dashboard: bool,
     /// Read-only command console (Console screen).
     pub can_console: bool,
+    /// Whether the broker can publish a message to a destination. This is the
+    /// one *write* keyhole performs; most brokers keep it `false` (the
+    /// observe-only default), so the UI offers the publish action only where it
+    /// is `true`.
+    pub can_publish: bool,
 }
 
 impl Capabilities {
@@ -131,6 +136,7 @@ impl Capabilities {
             can_browse: true,
             can_dashboard: true,
             can_console: true,
+            can_publish: false,
         }
     }
 
@@ -148,6 +154,10 @@ impl Capabilities {
             can_browse: true,
             can_dashboard: false,
             can_console: false,
+            // AMQP 1.0 has a symmetric sender link, so the browser can publish a
+            // message to a topic/queue — the one write it offers, behind a
+            // deliberate keystroke (see [`crate::broker::amqp`]).
+            can_publish: true,
         }
     }
 
@@ -161,6 +171,7 @@ impl Capabilities {
             can_browse: false,
             can_dashboard: false,
             can_console: false,
+            can_publish: false,
         }
     }
 
@@ -310,6 +321,19 @@ pub struct PeekReq {
     pub mode: crate::config::PeekMode,
     /// Maximum number of messages to read before returning.
     pub limit: usize,
+}
+
+/// A request to publish a single message to a destination (AMQP topic/queue).
+/// This is the only *write* the browser performs; it is capability-gated
+/// ([`Capabilities::can_publish`]) and driven by a deliberate keystroke, so the
+/// browser's default observe-only posture is unchanged for brokers that don't
+/// offer it.
+#[derive(Debug, Clone)]
+pub struct PublishReq {
+    /// The destination to publish to (an AMQP topic or queue).
+    pub spec: SubSpec,
+    /// The raw message body bytes, sent verbatim as an AMQP data section.
+    pub body: Vec<u8>,
 }
 
 /// How a payload's bytes are represented for display/recording.
@@ -730,6 +754,13 @@ pub trait BrokerConnection: Send {
     /// [`Capabilities::can_browse`] for brokers without a destination browser).
     async fn peek(&mut self, _req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
         anyhow::bail!("this broker does not support peeking messages")
+    }
+
+    /// Publish a single message to `req.spec`. The one *write* in the trait;
+    /// default unsupported, so observe-only brokers keep this bail. Gated by
+    /// [`Capabilities::can_publish`].
+    async fn publish(&mut self, _req: PublishReq) -> anyhow::Result<()> {
+        anyhow::bail!("this broker does not support publishing")
     }
 
     /// Open a live tail for `spec` on a *dedicated* socket and return its event
