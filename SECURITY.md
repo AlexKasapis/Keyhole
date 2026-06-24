@@ -23,7 +23,9 @@ and a public advisory is published.
 
 ## Scope notes
 
-- All broker operations are read-only / non-destructive by design.
+- Keyhole is observe-first: browsing, inspecting, tailing, recording, and the
+  Redis command console are all read-only / non-destructive. The only write is a
+  deliberate, capability-gated AMQP publish driven by an explicit keystroke.
 - Broker passwords are never written to the config file in plaintext — they are
   resolved at connect time from an env var, the OS keyring, or an interactive
   prompt. Reports of any path that could leak a credential to disk or to the log

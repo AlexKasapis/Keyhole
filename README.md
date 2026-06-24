@@ -4,7 +4,7 @@
 
 **A terminal UI for message & data brokers — browse, watch live, and record streams to disk.**
 
-Redis · AMQP 1.0 · RabbitMQ — one self-contained binary, fully read-only by design.
+Redis · AMQP 1.0 · RabbitMQ — one self-contained binary.
 
 [![Latest release](https://img.shields.io/github/v/release/AlexKasapis/Keyhole?label=release&color=success)](https://github.com/AlexKasapis/Keyhole/releases/latest)
 [![Latest version](https://img.shields.io/github/v/tag/AlexKasapis/Keyhole?label=version&sort=semver)](https://github.com/AlexKasapis/Keyhole/tags)

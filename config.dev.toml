@@ -1,0 +1,35 @@
+# Dev config for the dockerized broker stack (see docker-compose.yml).
+#
+#   just dev                                   # brokers up, seed, publish (Ctrl-C to stop)
+#   export KEYHOLE_DEV_RABBITMQ_PASSWORD=keyhole
+#   keyhole --config config.dev.toml --connect dev-redis
+#
+# Ports are the docker-compose HOST ports, not Keyhole's 5672 defaults.
+# RabbitMQ tap target (type it in the TUI): exchange:keyhole.demo
+#                                       or  exchange:keyhole.demo/order.*
+
+[[connection]]
+type = "redis"
+name = "dev-redis"
+host = "127.0.0.1"
+port = 6379
+
+[[connection]]
+type = "amqp"
+name = "dev-activemq"
+host = "127.0.0.1"
+port = 5674
+# ActiveMQ accepts SASL ANONYMOUS by default — no credentials needed.
+# These destinations must match what `keyhole dev publish` emits.
+destinations = ["topic:keyhole.demo.events", "queue:keyhole.demo.orders"]
+
+[[connection]]
+type = "rabbitmq"
+name = "dev-rabbitmq"
+host = "127.0.0.1"
+port = 5673
+vhost = "/"
+username = "keyhole"
+# A secret spec, not a literal: export KEYHOLE_DEV_RABBITMQ_PASSWORD=keyhole
+# (the `just dev` recipe sets it for the publisher inline).
+password = "env:KEYHOLE_DEV_RABBITMQ_PASSWORD"

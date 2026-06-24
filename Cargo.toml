@@ -19,6 +19,7 @@ exclude = [
     "docs/",
     "scripts/",
     "docker-compose.yml",
+    "config.dev.toml",
     "justfile",
     "release.toml",
     "deny.toml",
@@ -57,7 +58,7 @@ pkg-fmt = "tgz"
 extended-description = """\
 A terminal UI to connect to message/data brokers (Redis, AMQP 1.0, RabbitMQ), \
 browse their data, watch realtime activity, and record live streams to disk for \
-later inspection. All operations are read-only / non-destructive by design."""
+later inspection."""
 section = "utils"
 priority = "optional"
 # libc6 + libgcc-s1 are auto-detected from the binary by dpkg-shlibdeps, which

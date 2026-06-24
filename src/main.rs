@@ -8,6 +8,7 @@ mod app;
 mod broker;
 mod cli;
 mod config;
+mod dev;
 mod event;
 mod logging;
 mod recording;
@@ -59,6 +60,13 @@ async fn main() -> anyhow::Result<()> {
         return cli::run_gen(asset);
     }
 
+    // `dev` is a headless fake-data helper (seed/publish to local brokers). Like
+    // `gen` it runs before logging/terminal setup and prints progress straight
+    // to stdout, so it never touches the file logger or the alternate screen.
+    if let Some(Command::Dev { action }) = &cli.command {
+        return dev::run(action).await;
+    }
+
     let paths = config::paths().context("resolving application directories")?;
     // The guard must stay alive for the whole program so buffered logs flush.
     let _log_guard =
@@ -76,6 +84,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         // Handled above, before logging/config setup.
         Some(Command::Gen { .. }) => unreachable!("`gen` is dispatched before this match"),
+        Some(Command::Dev { .. }) => unreachable!("`dev` is dispatched before this match"),
         // Default: the interactive TUI.
         None => {
             let recordings_dir = paths.recordings_dir();

@@ -40,9 +40,22 @@ test-int:
     -cargo test --features integration -- --include-ignored
     docker compose --profile rabbitmq down
 
-# Seed the local Redis with sample data (expanded in Phase 1).
+# Seed the local Redis with sample browse data.
 seed:
-    docker compose exec redis redis-cli ping
+    docker compose up -d redis
+    bash -c 'for i in $(seq 1 30); do docker compose exec -T redis redis-cli ping >/dev/null 2>&1 && break; sleep 1; done'
+    cargo run -- dev seed
+
+# Bring up all brokers, seed Redis, then stream fake traffic into them until
+# Ctrl-C. Connection parameters come from config.dev.toml; launch the TUI in
+# another shell with `keyhole --config config.dev.toml --connect dev-redis`.
+dev:
+    docker compose --profile rabbitmq up -d redis activemq rabbitmq
+    bash -c 'for i in $(seq 1 30); do docker compose exec -T redis redis-cli ping >/dev/null 2>&1 && break; sleep 1; done'
+    bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/${KEYHOLE_ACTIVEMQ_PORT:-5674}) 2>/dev/null && break; sleep 2; done'
+    bash -c 'for i in $(seq 1 60); do docker compose exec -T rabbitmq rabbitmqctl -q authenticate_user keyhole keyhole >/dev/null 2>&1 && break; sleep 2; done'
+    cargo run -- dev seed
+    KEYHOLE_DEV_RABBITMQ_PASSWORD=keyhole cargo run -- dev publish --broker all
 
 # Optimized release build.
 build-release:

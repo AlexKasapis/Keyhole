@@ -29,8 +29,8 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-/// CLI subcommands. The only one is the hidden `gen` packaging helper; with no
-/// subcommand the interactive TUI launches.
+/// CLI subcommands. Both are hidden maintainer/dev helpers (`gen` for packaging,
+/// `dev` for local fake data); with no subcommand the interactive TUI launches.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Generate packaging assets (man page, shell completions) and exit.
@@ -43,6 +43,52 @@ pub enum Command {
         #[command(subcommand)]
         asset: GenAsset,
     },
+
+    /// Seed or publish fake data to the local dev brokers and exit.
+    ///
+    /// Hidden from `--help`: a developer/testing helper that writes to brokers,
+    /// not an end-user command. Connection parameters come from the config file
+    /// (default `config.dev.toml`, the dockerized broker stack).
+    #[command(hide = true)]
+    Dev {
+        #[command(subcommand)]
+        action: DevAction,
+    },
+}
+
+/// What `keyhole dev` should do.
+#[derive(Debug, Subcommand)]
+pub enum DevAction {
+    /// One-shot: seed the Redis keyspace with sample browse data.
+    Seed {
+        /// Config file to read the `redis` connection from.
+        #[arg(long, value_name = "FILE", default_value = "config.dev.toml")]
+        config: PathBuf,
+        /// Key namespace to seed under (defaults to `keyhole:demo`).
+        #[arg(long, value_name = "PREFIX")]
+        prefix: Option<String>,
+    },
+    /// Continuous: publish fake traffic to the brokers until Ctrl-C.
+    Publish {
+        /// Which broker(s) to publish to.
+        #[arg(long, value_name = "BROKER", default_value = "all")]
+        broker: DevBroker,
+        /// Messages per second, per broker.
+        #[arg(long, default_value_t = 2.0, value_name = "HZ")]
+        rate: f64,
+        /// Config file to read the connection profiles from.
+        #[arg(long, value_name = "FILE", default_value = "config.dev.toml")]
+        config: PathBuf,
+    },
+}
+
+/// Which broker(s) `keyhole dev publish` targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum DevBroker {
+    Redis,
+    Amqp,
+    Rabbitmq,
+    All,
 }
 
 /// Which packaging asset `keyhole gen` should emit.
@@ -159,6 +205,63 @@ mod tests {
         assert_eq!(cli.connect.as_deref(), Some("prod"));
         assert_eq!(cli.log_level, "keyhole=debug");
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn dev_seed_parses_with_default_config_and_optional_prefix() {
+        let cli = Cli::try_parse_from(["keyhole", "dev", "seed"]).unwrap();
+        match cli.command {
+            Some(Command::Dev {
+                action: DevAction::Seed { config, prefix },
+            }) => {
+                assert_eq!(config, Path::new("config.dev.toml"));
+                assert!(prefix.is_none());
+            }
+            other => panic!("expected dev seed, got {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["keyhole", "dev", "seed", "--prefix", "demo:ns"]).unwrap();
+        match cli.command {
+            Some(Command::Dev {
+                action: DevAction::Seed { prefix, .. },
+            }) => assert_eq!(prefix.as_deref(), Some("demo:ns")),
+            other => panic!("expected dev seed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dev_publish_parses_broker_and_rate() {
+        let cli = Cli::try_parse_from([
+            "keyhole", "dev", "publish", "--broker", "all", "--rate", "5",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Command::Dev {
+                action: DevAction::Publish { broker, rate, .. },
+            }) => {
+                assert_eq!(broker, DevBroker::All);
+                assert_eq!(rate, 5.0);
+            }
+            other => panic!("expected dev publish, got {other:?}"),
+        }
+
+        // Defaults: broker = all, rate = 2.0.
+        let cli = Cli::try_parse_from(["keyhole", "dev", "publish"]).unwrap();
+        match cli.command {
+            Some(Command::Dev {
+                action: DevAction::Publish { broker, rate, .. },
+            }) => {
+                assert_eq!(broker, DevBroker::All);
+                assert_eq!(rate, 2.0);
+            }
+            other => panic!("expected dev publish, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dev_rejects_unknown_broker_and_missing_action() {
+        assert!(Cli::try_parse_from(["keyhole", "dev", "publish", "--broker", "kafka"]).is_err());
+        assert!(Cli::try_parse_from(["keyhole", "dev"]).is_err());
     }
 
     #[test]
