@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **AMQP 1.0 connections without credentials** now negotiate SASL ANONYMOUS
+  instead of attempting a bare (SASL-less) handshake. Brokers that require the
+  SASL layer even for anonymous access — Apache ActiveMQ / Amazon MQ — rejected
+  the bare handshake (`Expecting ProtocolHeader Amqp, found Sasl`), so a profile
+  with no username/password could not connect. A credentialed profile is
+  unchanged: the URL's userinfo still negotiates SASL PLAIN.
+
 ## [0.1.1] - 2026-06-23
 
 ### Removed

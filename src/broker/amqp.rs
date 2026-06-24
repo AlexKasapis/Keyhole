@@ -30,7 +30,8 @@ use async_trait::async_trait;
 use futures_util::stream;
 use time::OffsetDateTime;
 
-use fe2o3_amqp::connection::ConnectionHandle;
+use fe2o3_amqp::connection::{ConnectionHandle, OpenError};
+use fe2o3_amqp::sasl_profile::SaslProfile;
 use fe2o3_amqp::types::messaging::{Body, DistributionMode, Source};
 use fe2o3_amqp::types::primitives::Value;
 use fe2o3_amqp::{Connection, Receiver, Session};
@@ -52,6 +53,31 @@ const PEEK_IDLE_TIMEOUT: Duration = Duration::from_millis(400);
 /// sharing one id), so this draws from the shared connection sequence.
 fn unique_container_id(prefix: &str) -> String {
     format!("{prefix}-{}", super::next_conn_seq())
+}
+
+/// Open an AMQP 1.0 connection, defaulting to **SASL ANONYMOUS** when the URL
+/// carries no credentials.
+///
+/// `fe2o3-amqp` only engages a SASL layer when the URL embeds a username *and*
+/// password (it derives [`SaslProfile::Plain`] from the userinfo); with neither
+/// it sends a bare AMQP protocol header and no SASL. Apache ActiveMQ (the
+/// primary target, and Amazon MQ for ActiveMQ) *requires* the SASL layer even
+/// for anonymous access: it answers a bare handshake with a SASL protocol
+/// header, which the bare client rejects with `Expecting ProtocolHeader { id:
+/// Amqp, .. }, found .. Sasl`. Seeding the builder with [`SaslProfile::Anonymous`]
+/// makes a credential-less connect negotiate SASL ANONYMOUS instead. When the
+/// URL *does* carry full credentials, `open` derives [`SaslProfile::Plain`] from
+/// it and overrides this default (see `fe2o3_amqp`'s `Builder::open`), so the
+/// authenticated path is unchanged.
+async fn open_connection(
+    container_id: String,
+    url: &str,
+) -> Result<ConnectionHandle<()>, OpenError> {
+    Connection::builder()
+        .container_id(container_id)
+        .sasl_profile(SaslProfile::Anonymous)
+        .open(url)
+        .await
 }
 
 /// A live (or not-yet-connected) AMQP 1.0 connection.
@@ -92,7 +118,7 @@ impl AmqpConnection {
 #[async_trait]
 impl BrokerConnection for AmqpConnection {
     async fn connect(&mut self) -> anyhow::Result<Capabilities> {
-        let conn = Connection::open(self.container_id.clone(), self.url().as_str())
+        let conn = open_connection(self.container_id.clone(), self.url().as_str())
             .await
             .map_err(|e| anyhow::anyhow!("connecting to AMQP broker: {e}"))?;
         self.conn = Some(conn);
@@ -164,7 +190,7 @@ async fn open_tail(
     name: String,
     browse: bool,
 ) -> anyhow::Result<BrokerEventStream> {
-    let mut connection = Connection::open(container_id, url.as_str())
+    let mut connection = open_connection(container_id, url.as_str())
         .await
         .map_err(|e| anyhow::anyhow!("opening tail connection: {e}"))?;
     let mut session = Session::begin(&mut connection)
@@ -234,7 +260,7 @@ async fn peek_queue(
     limit: usize,
 ) -> anyhow::Result<Vec<BrokerEvent>> {
     let address = format!("queue://{queue}");
-    let mut connection = Connection::open(container_id, url.as_str())
+    let mut connection = open_connection(container_id, url.as_str())
         .await
         .map_err(|e| anyhow::anyhow!("opening peek connection: {e}"))?;
     let mut session = Session::begin(&mut connection)
@@ -537,6 +563,34 @@ mod integration_tests {
         let caps = conn.connect().await.expect("connect to test ActiveMQ");
         assert_eq!(caps.kind, crate::broker::BrokerKind::Amqp);
         conn
+    }
+
+    #[tokio::test]
+    async fn connect_without_credentials_uses_sasl_anonymous() {
+        // Regression: ActiveMQ requires the SASL layer even for anonymous access,
+        // answering a bare AMQP handshake with a SASL protocol header. A
+        // credential-less profile must therefore negotiate SASL ANONYMOUS rather
+        // than the bare handshake `fe2o3-amqp` does by default (which the broker
+        // rejects with "Expecting ProtocolHeader Amqp, found Sasl").
+        let profile = AmqpProfile {
+            name: "anon".into(),
+            host: "127.0.0.1".into(),
+            port: test_port(),
+            username: None,
+            password: None,
+            tls: false,
+            destinations: Vec::new(),
+        };
+        let mut conn = AmqpConnection::new(profile, None);
+        let caps = conn
+            .connect()
+            .await
+            .expect("a credential-less connect must negotiate SASL ANONYMOUS");
+        assert_eq!(caps.kind, crate::broker::BrokerKind::Amqp);
+        // The connection is live enough to round-trip a session (begin/end).
+        conn.ping()
+            .await
+            .expect("ping after an anonymous connect should succeed");
     }
 
     /// Send one text message to `address` over a throwaway connection.
