@@ -5,3 +5,5 @@
 /dist-assets
 # Local environment overrides (e.g. docker compose host ports).
 .env
+# Pending insta snapshots: transient review artifacts, never committed.
+*.snap.new
