@@ -78,14 +78,14 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (ctrl, key.code) {
         (true, Char('c')) => Some(Action::Quit),
-        (false, Down | Char('j')) => Some(Action::Down),
-        (false, Up | Char('k')) => Some(Action::Up),
+        (false, Down) => Some(Action::Down),
+        (false, Up) => Some(Action::Up),
         (true, Char('d')) => Some(Action::PageDown),
         (true, Char('u')) => Some(Action::PageUp),
         (_, PageDown) => Some(Action::PageDown),
         (_, PageUp) => Some(Action::PageUp),
-        (false, Char('g') | Home) => Some(Action::Top),
-        (false, Char('G') | End) => Some(Action::Bottom),
+        (false, Home) => Some(Action::Top),
+        (false, End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
         (false, Right | Char('l')) => Some(Action::ToggleGroup),
         (false, Char('a')) => Some(Action::AddConnection),
@@ -148,7 +148,8 @@ mod tests {
         assert_eq!(keys_focus(Char(' ')), None, "Space is unbound");
         assert_eq!(keys_focus(Char('z')), Some(Action::ToggleAllGroups));
         assert_eq!(keys_focus(Char('/')), Some(Action::StartFilter));
-        assert_eq!(keys_focus(Char('j')), Some(Action::Down));
+        assert_eq!(keys_focus(Down), Some(Action::Down));
+        assert_eq!(keys_focus(Char('j')), None, "vim movement is gone");
         // Right / `l` fold the cursor's group and stay live in the keys pane.
         assert_eq!(keys_focus(Right), Some(Action::ToggleGroup));
         assert_eq!(keys_focus(Char('l')), Some(Action::ToggleGroup));
@@ -158,13 +159,9 @@ mod tests {
     fn every_normal_binding_maps() {
         assert_eq!(plain(Esc), Some(Action::Back));
         assert_eq!(ctrl(Char('c')), Some(Action::Quit));
-        assert_eq!(plain(Char('j')), Some(Action::Down));
         assert_eq!(plain(Down), Some(Action::Down));
-        assert_eq!(plain(Char('k')), Some(Action::Up));
         assert_eq!(plain(Up), Some(Action::Up));
-        assert_eq!(plain(Char('g')), Some(Action::Top));
         assert_eq!(plain(Home), Some(Action::Top));
-        assert_eq!(plain(Char('G')), Some(Action::Bottom));
         assert_eq!(plain(End), Some(Action::Bottom));
         assert_eq!(plain(Enter), Some(Action::Enter));
         assert_eq!(plain(Right), Some(Action::ToggleGroup));
@@ -221,6 +218,11 @@ mod tests {
         assert_eq!(plain(Char(']')), None, "']' is unbound: no DB switcher");
         // Space once folded the selected group; folding is now Right / `l`.
         assert_eq!(plain(Char(' ')), None, "Space is unbound: fold with Right");
+        // The vim-style movement keys are gone: arrows / Home / End (and the Page
+        // keys) are the only navigation now.
+        for c in ['j', 'k', 'g', 'G'] {
+            assert_eq!(plain(Char(c)), None, "'{c}' is unbound: no vim movement");
+        }
         // `:` opens the command palette (see `colon_opens_palette_*`), so it is
         // deliberately *not* unbound here.
         // `w` opened the standalone Realtime screen, which is gone: tails now

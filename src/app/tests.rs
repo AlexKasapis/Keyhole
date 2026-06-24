@@ -833,7 +833,7 @@ fn esc_quit_confirmation_resets_on_other_input() {
     let (mut app, _rx) = test_app();
     app.handle_key(key(KeyCode::Esc)); // arm
     assert!(app.running);
-    app.handle_key(ch('j')); // move selection — disarms
+    app.handle_key(key(KeyCode::Down)); // move selection — disarms
     app.handle_key(key(KeyCode::Esc)); // re-arms rather than quitting
     assert!(
         app.running,
@@ -3075,10 +3075,10 @@ async fn amqp_message_pane_navigation_and_detail() {
     // → steps the keyboard into the message pane.
     app.handle_key(key(KeyCode::Right));
     assert!(app.active_conn().unwrap().peek.focused);
-    // j/k navigate messages and clamp at the ends.
-    app.handle_key(ch('j'));
-    app.handle_key(ch('j'));
-    app.handle_key(ch('j'));
+    // ↑/↓ navigate messages and clamp at the ends.
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
     assert_eq!(app.active_conn().unwrap().peek.selected, 2);
     // Enter opens the detail view for the selected message.
     app.handle_key(key(KeyCode::Enter));
@@ -3102,7 +3102,7 @@ async fn amqp_message_filter_narrows_and_clears() {
     let (mut app, _rx) = test_app();
     amqp_with_messages(&mut app, &["alpha", "beta", "gamma"]).await;
     app.handle_key(key(KeyCode::Right)); // focus the message pane
-    app.handle_key(ch('j')); // selected = 1
+    app.handle_key(key(KeyCode::Down)); // selected = 1
     app.handle_key(ch('/'));
     assert_eq!(app.mode, InputMode::PeekFilter);
     for c in "mm".chars() {
@@ -3501,22 +3501,22 @@ async fn server_details_tab_scrolls_its_client_list_without_touching_feeds() {
     );
     assert_eq!(app.mode, InputMode::Normal);
 
-    // Navigation scrolls the client list; g/G jump to the ends.
-    app.handle_key(ch('j'));
-    app.handle_key(ch('j'));
+    // Navigation scrolls the client list; Home/End jump to the ends.
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
     assert_eq!(app.connections[0].dashboard.details_scroll, 2);
-    app.handle_key(ch('k'));
+    app.handle_key(key(KeyCode::Up));
     assert_eq!(app.connections[0].dashboard.details_scroll, 1);
-    app.handle_key(ch('g'));
+    app.handle_key(key(KeyCode::Home));
     assert_eq!(
         app.connections[0].dashboard.details_scroll, 0,
-        "g jumps to top"
+        "Home jumps to top"
     );
-    app.handle_key(ch('G'));
+    app.handle_key(key(KeyCode::End));
     assert_eq!(
         app.connections[0].dashboard.details_scroll,
         u16::MAX,
-        "G jumps to the bottom (render clamps to the list height)"
+        "End jumps to the bottom (render clamps to the list height)"
     );
 
     // The feed controls are inert here: there is no subscription to pause, and

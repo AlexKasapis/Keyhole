@@ -1864,7 +1864,7 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
     let lines = vec![
         Line::styled("Navigation", theme.heading),
-        Line::from("  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel scrolls"),
+        Line::from("  ↑ ↓ move   Home/End top/bottom   Ctrl-u/d page   mouse wheel scrolls"),
         Line::from("  Enter connect (Connections)   Esc step back / quit"),
         Line::from(""),
         Line::styled("Home (Connections / Recordings tabs)", theme.heading),
@@ -1888,7 +1888,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
             "  tabs: Details (graphs+clients) · Console · Monitor · Keyspace · Pub/Sub · Tail",
         ),
         Line::from(
-            "  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends (not Monitor) · p play/pause · r rec · x close",
+            "  feed tab: ↑↓/PgUp/PgDn scroll · Home/End ends (not Monitor) · p play/pause · r rec · x close",
         ),
         Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
         Line::from("  (empty Tail = selected key · a glob makes a pattern)"),

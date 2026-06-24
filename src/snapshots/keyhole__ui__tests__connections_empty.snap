@@ -17,4 +17,4 @@ expression: "render_lines(&mut app, 90, 16)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ move · Enter connect · a add · Tab recordings · b browser · : palette · ? help · Esc E
+ ↑↓ move · Enter connect · a add · Tab recordings · : palette · ? help · Esc Esc quit

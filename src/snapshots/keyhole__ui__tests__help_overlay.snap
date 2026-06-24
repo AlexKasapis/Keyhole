@@ -4,7 +4,7 @@ expression: "render_lines(&mut app, 90, 40)"
 ---
 ┌ Connection┌ Help ──────────────────────────────────────────────────────────┐───────────┐
 │           │Navigation                                                      │           │
-│           │  ↑/k ↓/j move   g/G top/bottom   Ctrl-u/d page   mouse wheel sc│           │
+│           │  ↑ ↓ move   Home/End top/bottom   Ctrl-u/d page   mouse wheel s│           │
 │           │  Enter connect (Connections)   Esc step back / quit            │           │
 │           │                                                                │           │
 │           │Home (Connections / Recordings tabs)                            │           │
@@ -25,7 +25,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
 │           │  tabs: Details (graphs+clients) · Console · Monitor · Keyspace │           │
-│           │  feed tab: ↑↓/PgUp/PgDn scroll · g/G ends (not Monitor) · p pla│           │
+│           │  feed tab: ↑↓/PgUp/PgDn scroll · Home/End ends (not Monitor) · │           │
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │  (empty Tail = selected key · a glob makes a pattern)          │           │
 │           │  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history  │           │
@@ -41,4 +41,4 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │  : command palette   a add connection   ? toggle help          │           │
 │           │  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)   │           │
 └───────────└────────────────────────────────────────────────────────────────┘───────────┘
- ↑↓ move · Enter connect · a add · Tab recordings · b browser · : palette · ? help · Esc E
+ ↑↓ move · Enter connect · a add · Tab recordings · : palette · ? help · Esc Esc quit

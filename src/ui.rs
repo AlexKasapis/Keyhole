@@ -202,7 +202,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
             ("Enter", "connect"),
             ("a", "add"),
             ("Tab", "recordings"),
-            ("b", "browser"),
             (":", "palette"),
             ("?", "help"),
             ("Esc Esc", "quit"),
@@ -234,7 +233,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     owned(&[
                         ("↑↓", "line"),
                         ("PgUp/PgDn", "page"),
-                        ("g/G", "ends"),
                         ("p", "play/pause"),
                         ("r", "rec"),
                         ("x", "close"),
@@ -749,9 +747,8 @@ mod tests {
             );
         }
 
-        // Both home-area tabs offer the `b` jump to the browser and a `Tab`
-        // switch to the sibling tab. The Browser steps back with Esc, so it
-        // carries neither.
+        // Both home-area tabs offer a `Tab` switch to the sibling tab. The
+        // Browser steps back with Esc, so it carries no tab switch.
         let expected = [
             (Screen::Home, "recordings"),
             (Screen::Recordings, "connections"),
@@ -762,24 +759,32 @@ mod tests {
             let pairs = hint_sections(&app);
             let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
             assert!(
-                has("b", "browser"),
-                "{screen:?} footer should offer `b browser`: {pairs:?}"
-            );
-            assert!(
                 has("Tab", tab_target),
                 "{screen:?} footer should switch tabs to {tab_target:?}: {pairs:?}"
             );
         }
 
-        // The Browser footer no longer advertises a cross-screen jump (the `R`
-        // recordings keybind is gone; Esc backs out to the home area).
+        // The `b` jump to the browser lives only on the Recordings footer now; it
+        // was dropped from the Connections (Home) footer.
         let (mut app, _rx) = test_app();
-        app.screen = Screen::Browser;
-        let browser = hint_sections(&app);
+        app.screen = Screen::Recordings;
+        let recordings = hint_sections(&app);
         assert!(
-            !browser.iter().any(|(_, action)| action == "browser"),
-            "Browser footer must not offer a `b browser` jump: {browser:?}"
+            recordings.iter().any(|(k, a)| *k == "b" && a == "browser"),
+            "Recordings footer should still offer `b browser`: {recordings:?}"
         );
+
+        // Neither the Connections footer nor the Browser footer advertises the
+        // `b browser` jump.
+        for screen in [Screen::Home, Screen::Browser] {
+            let (mut app, _rx) = test_app();
+            app.screen = screen;
+            let pairs = hint_sections(&app);
+            assert!(
+                !pairs.iter().any(|(_, action)| action == "browser"),
+                "{screen:?} footer must not offer a `b browser` jump: {pairs:?}"
+            );
+        }
     }
 
     #[test]

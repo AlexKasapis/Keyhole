@@ -24,8 +24,8 @@ impl App {
         match (ctrl, key.code) {
             (true, KeyCode::Char('c')) => self.running = false,
             (false, KeyCode::Esc) => self.palette = None,
-            (false, KeyCode::Down | KeyCode::Char('j')) => self.move_palette(1),
-            (false, KeyCode::Up | KeyCode::Char('k')) => self.move_palette(-1),
+            (false, KeyCode::Down) => self.move_palette(1),
+            (false, KeyCode::Up) => self.move_palette(-1),
             (false, KeyCode::Enter) => self.run_palette_selection(),
             _ => {}
         }
@@ -65,8 +65,8 @@ impl App {
         match (ctrl, key.code) {
             (true, KeyCode::Char('c')) => self.running = false,
             (false, KeyCode::Esc | KeyCode::Enter) => self.settings = None,
-            (false, KeyCode::Up | KeyCode::Char('k')) => self.move_settings(-1),
-            (false, KeyCode::Down | KeyCode::Char('j')) => self.move_settings(1),
+            (false, KeyCode::Up) => self.move_settings(-1),
+            (false, KeyCode::Down) => self.move_settings(1),
             (false, KeyCode::Left | KeyCode::Char('h')) => self.cycle_setting(-1),
             (false, KeyCode::Right | KeyCode::Char('l')) => self.cycle_setting(1),
             _ => {}
@@ -213,10 +213,10 @@ mod tests {
         // `:` from the home screen opens the palette.
         app.handle_key(key(KeyCode::Char(':')));
         assert!(app.palette.is_some(), "':' opens the command palette");
-        // While the palette is up it captures input: a 'j' moves its highlight
+        // While the palette is up it captures input: a Down moves its highlight
         // (clamped to the single command) rather than navigating the home list.
         let before = app.profile_state.selected();
-        app.handle_key(key(KeyCode::Char('j')));
+        app.handle_key(key(KeyCode::Down));
         assert_eq!(
             app.profile_state.selected(),
             before,

@@ -133,10 +133,10 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
-            (false, KeyCode::Char('j') | KeyCode::Down) => self.nav(1),
-            (false, KeyCode::Char('k') | KeyCode::Up) => self.nav(-1),
-            (false, KeyCode::Char('g') | KeyCode::Home) => self.nav_edge(true),
-            (false, KeyCode::Char('G') | KeyCode::End) => self.nav_edge(false),
+            (false, KeyCode::Down) => self.nav(1),
+            (false, KeyCode::Up) => self.nav(-1),
+            (false, KeyCode::Home) => self.nav_edge(true),
+            (false, KeyCode::End) => self.nav_edge(false),
             (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
             (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
             (false, KeyCode::Enter) => self.open_selected_destination(),
@@ -153,7 +153,7 @@ impl App {
     }
 
     /// Keys while the AMQP message pane (right) holds the keyboard. The list view
-    /// navigates peeked messages (`j`/`k`, `g`/`G`), filters them (`/`), opens the
+    /// navigates peeked messages (↑/↓, Home/End), filters them (`/`), opens the
     /// full-message detail view (Enter / `l` / `→`), publishes (`P`), and steps
     /// back to the destination list (Esc / `h` / `←`). The detail view is a
     /// scrollable read-only pane that the same back-keys close.
@@ -166,8 +166,8 @@ impl App {
                 | (_, KeyCode::Left) => self.close_detail(),
                 (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
                 (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
-                (false, KeyCode::Char('j') | KeyCode::Down) => self.scroll_peek(1),
-                (false, KeyCode::Char('k') | KeyCode::Up) => self.scroll_peek(-1),
+                (false, KeyCode::Down) => self.scroll_peek(1),
+                (false, KeyCode::Up) => self.scroll_peek(-1),
                 (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
                 (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
                 _ => {}
@@ -175,10 +175,10 @@ impl App {
             return;
         }
         match (ctrl, key.code) {
-            (false, KeyCode::Char('j') | KeyCode::Down) => self.move_message(1),
-            (false, KeyCode::Char('k') | KeyCode::Up) => self.move_message(-1),
-            (false, KeyCode::Char('g') | KeyCode::Home) => self.message_to_edge(true),
-            (false, KeyCode::Char('G') | KeyCode::End) => self.message_to_edge(false),
+            (false, KeyCode::Down) => self.move_message(1),
+            (false, KeyCode::Up) => self.move_message(-1),
+            (false, KeyCode::Home) => self.message_to_edge(true),
+            (false, KeyCode::End) => self.message_to_edge(false),
             (false, KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right) => self.open_detail(),
             (_, KeyCode::Esc) | (false, KeyCode::Char('h')) | (_, KeyCode::Left) => {
                 self.unfocus_messages()
@@ -457,14 +457,14 @@ impl App {
     fn handle_feed_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
-            (false, KeyCode::Char('j') | KeyCode::Down) => self.scroll_feed(-1),
-            (false, KeyCode::Char('k') | KeyCode::Up) => self.scroll_feed(1),
+            (false, KeyCode::Down) => self.scroll_feed(-1),
+            (false, KeyCode::Up) => self.scroll_feed(1),
             (true, KeyCode::Char('d')) => self.scroll_feed(-FEED_SCROLL_STEP),
             (true, KeyCode::Char('u')) => self.scroll_feed(FEED_SCROLL_STEP),
             (_, KeyCode::PageDown) => self.scroll_feed(-FEED_SCROLL_STEP),
             (_, KeyCode::PageUp) => self.scroll_feed(FEED_SCROLL_STEP),
-            (false, KeyCode::Char('g') | KeyCode::Home) => self.feed_to_edge(true),
-            (false, KeyCode::Char('G') | KeyCode::End) => self.feed_to_edge(false),
+            (false, KeyCode::Home) => self.feed_to_edge(true),
+            (false, KeyCode::End) => self.feed_to_edge(false),
             (false, KeyCode::Char('p')) => self.toggle_play_pause(),
             (false, KeyCode::Char('x')) => self.close_active_tab(),
             (false, KeyCode::Char('r')) => self.toggle_recording(),
@@ -481,14 +481,14 @@ impl App {
     fn handle_details_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
-            (false, KeyCode::Char('j') | KeyCode::Down) => self.scroll_details(1),
-            (false, KeyCode::Char('k') | KeyCode::Up) => self.scroll_details(-1),
+            (false, KeyCode::Down) => self.scroll_details(1),
+            (false, KeyCode::Up) => self.scroll_details(-1),
             (true, KeyCode::Char('d')) => self.scroll_details(FEED_SCROLL_STEP),
             (true, KeyCode::Char('u')) => self.scroll_details(-FEED_SCROLL_STEP),
             (_, KeyCode::PageDown) => self.scroll_details(FEED_SCROLL_STEP),
             (_, KeyCode::PageUp) => self.scroll_details(-FEED_SCROLL_STEP),
-            (false, KeyCode::Char('g') | KeyCode::Home) => self.scroll_details(i32::MIN),
-            (false, KeyCode::Char('G') | KeyCode::End) => self.scroll_details(i32::MAX),
+            (false, KeyCode::Home) => self.scroll_details(i32::MIN),
+            (false, KeyCode::End) => self.scroll_details(i32::MAX),
             (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
             (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
             _ => {}
