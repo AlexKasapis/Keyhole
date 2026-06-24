@@ -93,6 +93,7 @@ impl App {
         match rows[selected.min(rows.len() - 1)] {
             SettingsRow::Theme => self.cycle_theme(delta),
             SettingsRow::Animations => self.cycle_animation(delta),
+            SettingsRow::PeekMode => self.cycle_peek_mode(delta),
         }
     }
 
@@ -140,6 +141,29 @@ impl App {
             Ok(()) => self.set_status(format!("Animations: {label}"), false),
             Err(e) => self.set_status(
                 format!("animations set to {label}, but could not save: {e}"),
+                true,
+            ),
+        }
+    }
+
+    /// Step the AMQP queue-peek mode through [`config::PeekMode::ALL`] by `delta`
+    /// (wrapping). Takes effect on the next peek and is persisted to the config
+    /// file. Like the other cyclers, persisting is best-effort: a write failure is
+    /// surfaced as a footer status but the in-memory setting still changes.
+    pub(super) fn cycle_peek_mode(&mut self, delta: i32) {
+        let all = config::PeekMode::ALL;
+        let cur = all
+            .iter()
+            .position(|&m| m == self.peek_mode())
+            .unwrap_or_default() as i32;
+        let next = (cur + delta).rem_euclid(all.len() as i32) as usize;
+        let mode = all[next];
+        self.config.settings.peek_mode = mode;
+        let label = mode.label();
+        match config::save(&self.config_path, &self.config) {
+            Ok(()) => self.set_status(format!("AMQP peek mode: {label}"), false),
+            Err(e) => self.set_status(
+                format!("AMQP peek mode set to {label}, but could not save: {e}"),
                 true,
             ),
         }
@@ -288,13 +312,48 @@ mod tests {
         app.handle_key(key(KeyCode::Left));
         assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::On);
 
-        // ↓ clamps at the last row rather than wrapping, so the highlight stays
-        // on Animations.
+        // ↓ moves to the third row (AMQP peek mode); a further ↓ clamps there
+        // rather than wrapping.
         app.handle_key(key(KeyCode::Down));
-        assert_eq!(app.settings.unwrap().selected, 1, "clamped at the last row");
-        // ↑ returns to the Theme row.
+        assert_eq!(app.settings.unwrap().selected, 2);
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.settings.unwrap().selected, 2, "clamped at the last row");
+        // ↑ returns to the Animations row.
         app.handle_key(key(KeyCode::Up));
-        assert_eq!(app.settings.unwrap().selected, 0);
+        assert_eq!(app.settings.unwrap().selected, 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn settings_cycles_peek_mode_live_and_persists() {
+        let (mut app, path) = app_with_config_path();
+        app.settings = Some(SettingsState::default());
+        // Default peek mode is the non-destructive browse.
+        assert_eq!(app.peek_mode(), crate::config::PeekMode::Browse);
+
+        // Navigate to the third row (AMQP peek mode).
+        app.handle_key(key(KeyCode::Down));
+        app.handle_key(key(KeyCode::Down));
+        assert_eq!(app.settings.unwrap().selected, 2);
+
+        // ←/→ cycle it, applied live: browse -> skip -> destructive.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.peek_mode(), crate::config::PeekMode::Skip);
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.peek_mode(), crate::config::PeekMode::Destructive);
+
+        // The choice is persisted to the config file as it changes.
+        let saved = crate::config::load(&path).expect("config reloads");
+        assert_eq!(
+            saved.settings.peek_mode,
+            crate::config::PeekMode::Destructive
+        );
+
+        // Wrapping forward returns to browse; Left wraps the other way.
+        app.handle_key(key(KeyCode::Right));
+        assert_eq!(app.peek_mode(), crate::config::PeekMode::Browse);
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.peek_mode(), crate::config::PeekMode::Destructive);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -17,9 +17,9 @@ mod recordings;
 mod settings;
 
 pub use state::{
-    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, InputMode, PaletteCommand,
-    PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile, ScanStep, Screen, SettingsRow,
-    SettingsState, Status, StatusKind, SubState, Subscription, ViewRow,
+    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, DestKind, Destination, InputMode,
+    PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile, ScanStep,
+    Screen, SettingsRow, SettingsState, Status, StatusKind, SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -275,6 +275,12 @@ impl App {
     /// show and step the current selection.
     pub(crate) fn animation_speed(&self) -> config::AnimationSpeed {
         self.config.settings.animation
+    }
+
+    /// The configured AMQP queue-peek mode — read when issuing a peek and by the
+    /// settings overlay to show and step the current selection.
+    pub(crate) fn peek_mode(&self) -> config::PeekMode {
+        self.config.settings.peek_mode
     }
 
     /// Connection health, surfaced by the Browser's Server band. An active

@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::{
-    BrokerConnection, BrokerEventStream, BrowseReq, Capabilities, ConnId, InspectReq, SubSpec,
+    BrokerConnection, BrokerEventStream, BrowseReq, Capabilities, ConnId, InspectReq, PeekReq,
+    SubSpec,
 };
 use crate::event::AppEvent;
 use crate::recording::{RecordSink, Recorder, RecordingStatus, FLUSH_EVERY};
@@ -40,6 +41,13 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 pub enum ConnCommand {
     Browse(BrowseReq),
     Inspect(InspectReq),
+    /// Peek a bounded batch of the messages currently in a destination (AMQP
+    /// queue). The reply is an [`AppEvent::Peeked`].
+    Peek {
+        spec: SubSpec,
+        mode: crate::config::PeekMode,
+        limit: usize,
+    },
     RefreshStats,
     Ping,
     /// Open a tail for `spec`; start recording immediately if `record`.
@@ -411,6 +419,21 @@ async fn process(
                 Err(e) => emit_error(events, id, "inspect", e).await,
             }
         }
+        ConnCommand::Peek { spec, mode, limit } => {
+            let reply_spec = spec.clone();
+            match conn.peek(PeekReq { spec, mode, limit }).await {
+                Ok(events_batch) => {
+                    events
+                        .send(AppEvent::Peeked {
+                            id,
+                            spec: reply_spec,
+                            events: events_batch,
+                        })
+                        .await
+                }
+                Err(e) => emit_error(events, id, "peek", e).await,
+            }
+        }
         ConnCommand::RefreshStats => match conn.stats().await {
             Ok(stats) => events.send(AppEvent::StatsUpdated { id, stats }).await,
             Err(e) => emit_error(events, id, "stats", e).await,
@@ -483,7 +506,7 @@ pub(crate) mod mock {
     use super::{spawn_connection, ConnHandle};
     use crate::broker::{
         BrokerConnection, BrokerEvent, BrokerEventStream, BrowsePage, BrowseReq, Capabilities,
-        ConnId, InspectReq, ServerStats, SubSpec, ValueView,
+        ConnId, InspectReq, PeekReq, ServerStats, SubSpec, ValueView,
     };
     use crate::event::AppEvent;
 
@@ -510,6 +533,10 @@ pub(crate) mod mock {
         pub browse_err: Option<String>,
         pub inspect: ValueView,
         pub stats: ServerStats,
+        /// Messages a queue peek returns.
+        pub peek: Vec<BrokerEvent>,
+        /// When set, `peek` fails with this message instead of returning `peek`.
+        pub peek_err: Option<String>,
         pub sub: Option<SubBehavior>,
         /// Advisory returned from `tail_notice` (e.g. keyspace notifications off).
         pub notice: Option<String>,
@@ -528,6 +555,8 @@ pub(crate) mod mock {
                 browse_err: None,
                 inspect: ValueView::Missing,
                 stats: ServerStats::default(),
+                peek: Vec::new(),
+                peek_err: None,
                 sub: None,
                 notice: None,
             }
@@ -570,6 +599,13 @@ pub(crate) mod mock {
 
         async fn inspect(&mut self, _req: InspectReq) -> anyhow::Result<ValueView> {
             Ok(self.inspect.clone())
+        }
+
+        async fn peek(&mut self, _req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
+            if let Some(e) = &self.peek_err {
+                anyhow::bail!("{e}");
+            }
+            Ok(self.peek.clone())
         }
 
         async fn stats(&mut self) -> anyhow::Result<ServerStats> {
@@ -849,6 +885,46 @@ mod tests {
         match next(&mut rx).await {
             Some(AppEvent::ValueLoaded { key, .. }) => assert_eq!(key, "k"),
             other => panic!("expected ValueLoaded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peek_emits_peeked_with_the_messages() {
+        let mut mock = MockBroker::new(1);
+        mock.peek = vec![ev("orders", "m1"), ev("orders", "m2")];
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("peek")).await;
+        handle.send(ConnCommand::Peek {
+            spec: SubSpec::Queue("orders".into()),
+            mode: crate::config::PeekMode::Browse,
+            limit: 10,
+        });
+        match next(&mut rx).await {
+            Some(AppEvent::Peeked { spec, events, .. }) => {
+                // The reply echoes the requested destination (the UI's staleness
+                // guard) and carries the batch.
+                assert_eq!(spec, SubSpec::Queue("orders".into()));
+                assert_eq!(events.len(), 2);
+            }
+            other => panic!("expected Peeked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn peek_error_emits_conn_error() {
+        let mut mock = MockBroker::new(1);
+        mock.peek_err = Some("boom".into());
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("peekerr")).await;
+        handle.send(ConnCommand::Peek {
+            spec: SubSpec::Queue("q".into()),
+            mode: crate::config::PeekMode::Browse,
+            limit: 10,
+        });
+        match next(&mut rx).await {
+            Some(AppEvent::ConnError { context, error, .. }) => {
+                assert_eq!(context, "peek");
+                assert!(error.contains("boom"), "error was {error:?}");
+            }
+            other => panic!("expected ConnError, got {other:?}"),
         }
     }
 

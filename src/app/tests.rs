@@ -2985,45 +2985,81 @@ async fn connect_amqp(app: &mut App, id: u32, name: &str) -> ConnId {
 }
 
 #[tokio::test]
-async fn amqp_connection_stays_on_connections() {
+async fn amqp_connection_opens_the_browser() {
     let (mut app, _rx) = test_app();
     connect_amqp(&mut app, 1, "mq").await;
-    // AMQP has no browser, and the Realtime screen was removed, so an AMQP
-    // connection has no data screen yet — it stays on the Connections list.
+    // AMQP now has a (curated) destination browser, so a connection lands on the
+    // Browser screen rather than the Connections list.
     assert_eq!(
         app.screen,
-        Screen::Home,
-        "AMQP has no data screen, so it lands on Connections"
+        Screen::Browser,
+        "AMQP has a destination browser, so it opens the Browser"
     );
 }
 
 #[tokio::test]
-async fn amqp_capabilities_gate_redis_only_screens() {
+async fn amqp_capabilities_browse_and_tail_but_no_dashboard_or_console() {
     let (mut app, _rx) = test_app();
     connect_amqp(&mut app, 1, "mq").await;
-    // The Browser (and the bottom panel it carries) is Redis-only.
+    {
+        let caps = &app.active_conn().unwrap().caps;
+        assert!(caps.can_browse, "AMQP has a destination browser");
+        assert!(caps.can_tail(), "AMQP hosts live tails");
+        assert!(
+            !caps.can_dashboard && !caps.can_console,
+            "no dashboard or console yet (deferred to RabbitMQ)"
+        );
+        // The browse list is curated, not a Redis SCAN, so the scan cadence is off.
+        assert!(!caps.uses_key_scan());
+    }
+    // GotoBrowser now succeeds for AMQP.
     app.screen = Screen::Home;
     app.apply(Action::GotoBrowser);
-    assert_eq!(app.screen, Screen::Home, "GotoBrowser must be blocked");
-    assert!(app
-        .status
-        .as_ref()
-        .unwrap()
-        .message
-        .contains("no key browser"));
+    assert_eq!(app.screen, Screen::Browser);
+    // AMQP isn't database-scoped: a db step is a no-op (stays on db 0).
+    app.change_db(1);
+    assert_eq!(app.active_conn().unwrap().db, 0);
 }
 
 #[tokio::test]
-async fn amqp_cannot_open_a_tail() {
-    // Realtime tails were removed for AMQP/RabbitMQ: with no panel to host
-    // them, a subscribe attempt is refused rather than opening a hidden tail.
+async fn amqp_can_open_a_tail() {
+    // AMQP tails are now surfaced in the UI: subscribing opens a tail tab.
     let (mut app, _rx) = test_app();
     connect_amqp(&mut app, 1, "mq").await;
     app.start_subscribe(SubSpec::Topic("events".into()));
-    assert!(app.active_conn().unwrap().subs.is_empty());
-    let status = app.status.as_ref().unwrap();
-    assert!(status.is_error);
-    assert!(status.message.contains("not available for this broker"));
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.subs.len(), 1, "the tail tab was opened");
+    assert_eq!(conn.subs[0].spec, SubSpec::Topic("events".into()));
+    // AMQP's bottom panel is the Tail anchor plus one tab per tail (no Redis
+    // anchors), and opening a tail focuses its tab.
+    assert_eq!(conn.panel_slots(), vec![PanelTab::Tail, PanelTab::Sub(0)]);
+    assert_eq!(conn.active_panel(), PanelTab::Sub(0));
+}
+
+#[tokio::test]
+async fn amqp_add_and_remove_destination_drives_the_browser() {
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 1, "mq").await;
+    // Adding a queue lands it in the curated list and selects it.
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+    app.add_amqp_destination(SubSpec::Topic("events".into()));
+    {
+        let conn = app.active_conn().unwrap();
+        assert_eq!(conn.destinations.items.len(), 2);
+        assert_eq!(
+            conn.selected_destination().map(|d| d.spec()),
+            Some(SubSpec::Topic("events".into())),
+            "the most recently added destination is selected"
+        );
+    }
+    // Removing the selection drops it and reselects a neighbour.
+    app.delete_selected_destination();
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.destinations.items.len(), 1);
+    assert_eq!(
+        conn.selected_destination().map(|d| d.spec()),
+        Some(SubSpec::Queue("orders".into()))
+    );
 }
 
 #[tokio::test]

@@ -15,8 +15,8 @@ use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, ConnForm, ConnHealth, Connection, InputMode, PaletteCommand, PaneFocus, PanelTab,
-    RecordState, Screen, SettingsRow, SubState, Subscription, ViewRow,
+    App, ConnForm, ConnHealth, Connection, DestKind, InputMode, PaletteCommand, PaneFocus,
+    PanelTab, RecordState, Screen, SettingsRow, SubState, Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerKind, ClientInfo, Payload, ServerStats, Ttl, ValueView};
 use crate::config::AnimationSpeed;
@@ -237,7 +237,9 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         rows.push(Constraint::Length(SERVER_BAND_HEIGHT));
     }
     rows.push(Constraint::Min(0));
-    if conn.caps.can_console {
+    // The bottom panel hosts the tails — present for Redis (alongside its
+    // console) and AMQP (its only panel). See [`Capabilities::can_tail`].
+    if conn.caps.can_tail() {
         rows.push(Constraint::Length(panel_h));
     }
     let chunks = Layout::vertical(rows).split(area);
@@ -245,7 +247,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // Body sits after the optional stats band.
     let body_idx = if conn.caps.can_dashboard { 1 } else { 0 };
     let body_area = chunks[body_idx];
-    let panel_area = conn.caps.can_console.then(|| chunks[body_idx + 1]);
+    let panel_area = conn.caps.can_tail().then(|| chunks[body_idx + 1]);
 
     if let Some(band_area) = band_area {
         server_stats_band(frame, conn, health, now, anim_speed, theme, band_area);
@@ -254,6 +256,17 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let [table_area, value_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
             .areas(body_area);
+
+    // AMQP browses a curated destination list (no key scan), so its body is a
+    // destination list + queue-peek pane rather than the key table + value pane.
+    if !conn.caps.uses_key_scan() {
+        amqp_destination_pane(frame, conn, focus, theme, table_area);
+        amqp_peek_pane(frame, conn, theme, value_area);
+        if let Some(panel_area) = panel_area {
+            panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
+        }
+        return;
+    }
 
     // The key list is a pure viewport: only the rows that fall inside the
     // visible window are turned into `Row`s each frame. With a large expanded
@@ -384,6 +397,101 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     if let Some(panel_area) = panel_area {
         panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
     }
+}
+
+/// The AMQP browser's left pane: the curated destination list (the analog of the
+/// Redis key table). Each row is a destination name with a dim `[topic]` /
+/// `[queue]` tag; an empty list shows an add prompt instead.
+fn amqp_destination_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    focus: PaneFocus,
+    theme: &Theme,
+    area: Rect,
+) {
+    let block = Block::bordered()
+        .title(" Destinations ")
+        .title_style(theme.heading)
+        .border_style(border_style(theme, focus == PaneFocus::Keys));
+    if conn.destinations.items.is_empty() {
+        let hint = Paragraph::new(vec![
+            Line::from(""),
+            Line::styled("  No destinations yet.", theme.dim),
+            Line::styled("  Press 'a' to add topic:name or queue:name.", theme.dim),
+        ])
+        .block(block);
+        frame.render_widget(hint, area);
+        return;
+    }
+    let rows: Vec<Row> = conn
+        .destinations
+        .items
+        .iter()
+        .map(|d| {
+            Row::new(vec![
+                Cell::from(d.name.clone()),
+                Cell::from(Span::styled(format!("[{}]", d.kind.tag()), theme.dim)),
+            ])
+        })
+        .collect();
+    let widths = [Constraint::Min(10), Constraint::Length(8)];
+    let table = Table::new(rows, widths)
+        .header(Row::new(["Destination", "Kind"]).style(theme.header))
+        .column_spacing(2)
+        .block(block)
+        .row_highlight_style(theme.selected)
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(table, area, &mut conn.destinations.table);
+}
+
+/// The AMQP browser's right pane: the messages from the last queue peek (the
+/// analog of the Redis value pane). A topic shows a tail hint (topics don't
+/// retain), and a queue shows its peeked messages or an empty / pending state.
+fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area: Rect) {
+    // Take owned copies so no borrow of `conn` survives into the scroll write.
+    let sel = conn.selected_destination().map(|d| (d.canonical(), d.kind));
+    let title = match &sel {
+        Some((name, _)) => format!(" {name} "),
+        None => " Messages ".to_string(),
+    };
+    let lines: Vec<Line> = match sel.as_ref().map(|(_, k)| *k) {
+        Some(DestKind::Topic) => vec![Line::styled(
+            "Topics don't retain messages — press 't' or Enter to tail it live.",
+            theme.dim,
+        )],
+        Some(DestKind::Queue) => {
+            if conn.peek.pending {
+                vec![Line::styled("Peeking…", theme.dim)]
+            } else if conn.peek.events.is_empty() {
+                vec![Line::styled(
+                    "No messages to show (empty queue, or peek mode is off).",
+                    theme.dim,
+                )]
+            } else {
+                conn.peek
+                    .events
+                    .iter()
+                    .map(|ev| event_line(ev, theme))
+                    .collect()
+            }
+        }
+        None => vec![Line::styled("Add a destination with 'a'.", theme.dim)],
+    };
+    // Clamp the scroll against the content height (the peeked-message count),
+    // mirroring the Redis value pane's viewport-derived write.
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = lines.len().saturating_sub(inner_h) as u16;
+    conn.peek.scroll = conn.peek.scroll.min(max_scroll);
+    let para = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(title)
+                .title_style(theme.heading)
+                .border_style(theme.border),
+        )
+        .wrap(Wrap { trim: false })
+        .scroll((conn.peek.scroll, 0));
+    frame.render_widget(para, area);
 }
 
 /// Total height (rows) reserved for the Browser's Server band: a border (2)
@@ -528,6 +636,16 @@ fn panel_band(
             subscribe_buf,
             "channel or pattern",
             "Enter subscribes · a glob (* ? [) makes it a pattern (PSUBSCRIBE)",
+        ),
+        // AMQP's single Tail anchor accepts a full destination spec.
+        PanelTab::Tail if !conn.caps.uses_key_scan() => anchor_input(
+            frame,
+            theme,
+            content_area,
+            mode,
+            subscribe_buf,
+            "topic:name or queue:name",
+            "Enter tails it · topic = live multicast · queue = non-destructive browse",
         ),
         PanelTab::Tail => anchor_input(
             frame,
@@ -1449,6 +1567,12 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history"),
         Line::from("  Ctrl-L clear · PgUp/PgDn scroll · writes/admin refused"),
         Line::from(""),
+        Line::styled("AMQP browser", theme.heading),
+        Line::from("  destinations are curated (AMQP 1.0 can't enumerate them)"),
+        Line::from("  a add · x/d remove · Enter open (queue → peek, topic → tail) · t tail"),
+        Line::from("  PgUp/PgDn scroll the peek pane · Tail tab: type topic:/queue: then Enter"),
+        Line::from("  peek mode (browse / skip / destructive) is set in : → Settings"),
+        Line::from(""),
         Line::styled("General", theme.heading),
         Line::from("  : command palette   a add connection   ? toggle help"),
         Line::from("  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)"),
@@ -1516,6 +1640,7 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         let value = match row {
             SettingsRow::Theme => theme_name.to_string(),
             SettingsRow::Animations => app.animation_speed().label().to_string(),
+            SettingsRow::PeekMode => app.peek_mode().label().to_string(),
         };
         let selected = i == settings.selected.min(rows.len().saturating_sub(1));
         // The highlighted row gets the `▶` marker and the accent tint; the rest
@@ -1526,7 +1651,7 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ("  ", theme.dim)
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{marker}{:<12}", row.label()), label_style),
+            Span::styled(format!("{marker}{:<14}", row.label()), label_style),
             Span::styled("‹ ", theme.dim),
             Span::raw(value),
             Span::styled(" ›", theme.dim),

@@ -164,6 +164,9 @@ impl App {
                 username,
                 password: saved_spec,
                 tls,
+                // A new connection starts with no curated destinations; the user
+                // adds them from the browser.
+                destinations: Vec::new(),
             }),
             BrokerKind::Rabbitmq => {
                 // The DB slot is relabelled "Vhost" for RabbitMQ; empty → default "/".
@@ -399,6 +402,150 @@ impl App {
     pub(super) fn request_stats(&mut self, id: ConnId) {
         if let Some(conn) = self.conn_by_id(id) {
             conn.handle.send(ConnCommand::RefreshStats);
+        }
+    }
+
+    // -- AMQP destination browser -------------------------------------------
+
+    /// Peek the connection's currently selected destination (AMQP). A queue is
+    /// peeked per the configured [`Self::peek_mode`]; a topic (which doesn't
+    /// retain) or `Skip` mode clears the inspector instead of issuing a read.
+    pub(super) fn request_peek(&mut self, id: ConnId) {
+        let mode = self.peek_mode();
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            let Some(dest) = conn.selected_destination().cloned() else {
+                // Empty list / nothing selected: nothing to show.
+                conn.peek.events.clear();
+                conn.peek.peeked = None;
+                conn.peek.pending = false;
+                return;
+            };
+            let spec = dest.spec();
+            let peekable = matches!(dest.kind, DestKind::Queue) && mode != config::PeekMode::Skip;
+            // Reset the inspector to the freshly selected destination.
+            conn.peek.peeked = Some(spec.clone());
+            conn.peek.events.clear();
+            conn.peek.scroll = 0;
+            conn.peek.pending = peekable;
+            if peekable {
+                conn.handle.send(ConnCommand::Peek {
+                    spec,
+                    mode,
+                    limit: VALUE_LIMIT,
+                });
+            }
+        }
+    }
+
+    /// Populate an AMQP connection's destination list from its saved profile's
+    /// curated `destinations`, selecting the first. A no-op when the profile has
+    /// no saved destinations.
+    pub(super) fn seed_destinations(&mut self, id: ConnId) {
+        let Some(name) = self.conn_by_id(id).map(|c| c.name.clone()) else {
+            return;
+        };
+        let specs: Vec<String> = self
+            .profiles
+            .iter()
+            .find_map(|p| match p {
+                ConnectionConfig::Amqp(a) if a.name == name => Some(a.destinations.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        if specs.is_empty() {
+            return;
+        }
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            for spec in &specs {
+                // Tolerate a malformed saved spec rather than failing the whole
+                // seed; a bad entry is simply skipped.
+                if let Ok(parsed) = SubSpec::parse(spec, 0) {
+                    if let Some(dest) = Destination::from_spec(&parsed) {
+                        conn.add_destination(dest);
+                    }
+                }
+            }
+            if !conn.destinations.items.is_empty() {
+                conn.destinations.table.select(Some(0));
+            }
+        }
+    }
+
+    /// Add a curated destination (from a parsed source spec) to the active AMQP
+    /// connection, persist the list, and peek the new selection.
+    pub(super) fn add_amqp_destination(&mut self, spec: SubSpec) {
+        let Some(dest) = Destination::from_spec(&spec) else {
+            self.set_status(
+                "not an AMQP destination — use topic:name or queue:name".to_string(),
+                true,
+            );
+            return;
+        };
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let label = dest.canonical();
+        let newly = match self.conn_by_id_mut(id) {
+            Some(conn) => conn.add_destination(dest),
+            None => return,
+        };
+        if newly {
+            self.persist_destinations(id);
+            self.set_status(format!("Added {label}"), false);
+        } else {
+            self.set_status(format!("{label} is already in the list"), false);
+        }
+        self.request_peek(id);
+    }
+
+    /// Remove the highlighted destination from the active AMQP connection,
+    /// persist the list, and peek the new selection.
+    pub(super) fn delete_selected_destination(&mut self) {
+        let Some(id) = self.active_id() else {
+            return;
+        };
+        let removed = match self.conn_by_id_mut(id) {
+            Some(conn) => conn.remove_selected_destination(),
+            None => return,
+        };
+        if let Some(dest) = removed {
+            let label = dest.canonical();
+            self.persist_destinations(id);
+            self.set_status(format!("Removed {label}"), false);
+            self.request_peek(id);
+        }
+    }
+
+    /// Write the connection's current destination list back into its saved AMQP
+    /// profile (config + in-memory list) and persist. Best-effort: a write
+    /// failure surfaces as a footer status but the in-memory list still changes.
+    fn persist_destinations(&mut self, id: ConnId) {
+        let Some((name, specs)) = self.conn_by_id(id).map(|c| {
+            let specs: Vec<String> = c.destinations.items.iter().map(|d| d.canonical()).collect();
+            (c.name.clone(), specs)
+        }) else {
+            return;
+        };
+        let mut changed = false;
+        for p in self.config.connections.iter_mut() {
+            if let ConnectionConfig::Amqp(a) = p {
+                if a.name == name {
+                    a.destinations = specs.clone();
+                    changed = true;
+                }
+            }
+        }
+        for p in self.profiles.iter_mut() {
+            if let ConnectionConfig::Amqp(a) = p {
+                if a.name == name {
+                    a.destinations = specs.clone();
+                }
+            }
+        }
+        if changed {
+            if let Err(e) = config::save(&self.config_path, &self.config) {
+                self.set_status(format!("could not save destinations: {e}"), true);
+            }
         }
     }
 

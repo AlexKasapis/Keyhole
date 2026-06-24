@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 90, 24)"
+---
+┌ Destinations ─────────────────────────────┐┌ queue:orders ─────────────────────────────┐
+│  Destination                      Kind    ││00:00:00.000  orders             order #1  │
+│▶ orders                           [queue] ││00:00:00.000  orders             {"id":2}  │
+│  alerts                           [topic] ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
+│topic:name or queue:name:                                                               │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│Enter tails it · topic = live multicast · queue = non-destructive browse                │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+  nav ↑↓ destinations │ dest a add · x remove · ⏎ open · t tail │ panel Tab/Ctrl-↓ tails │

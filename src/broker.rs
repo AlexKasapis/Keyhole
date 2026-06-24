@@ -134,24 +134,26 @@ impl Capabilities {
         }
     }
 
-    /// AMQP (v1): no key browser, dashboard, or command console (the broker
-    /// model and the read-only mandate don't fit them yet). The broker can still
-    /// tail + record at the protocol level, but the UI exposes no tail view for
-    /// it yet (the Realtime screen was removed pending a rework).
+    /// AMQP (v1): a destination *browser* (a user-curated list of topics/queues,
+    /// since AMQP 1.0 cannot enumerate them), with a queue message peek and live
+    /// tails — but no stats dashboard or command console (those need a management
+    /// plane AMQP 1.0 lacks; deferred to the RabbitMQ phase). `can_browse` is true
+    /// so the broker lands on the Browser screen, but [`Self::uses_key_scan`] is
+    /// false: the browse list is curated, not scanned, so the Redis SCAN cadence
+    /// (auto-refresh, db switching) never runs for it.
     pub fn amqp() -> Self {
         Self {
             kind: BrokerKind::Amqp,
             databases: 1,
-            can_browse: false,
+            can_browse: true,
             can_dashboard: false,
             can_console: false,
         }
     }
 
-    /// RabbitMQ (AMQP 0.9.1): same capability shape as the AMQP 1.0 broker. The
-    /// one tail is a non-destructive exchange tap (see
-    /// [`crate::broker::rabbitmq`]); like AMQP, the UI exposes no tail view for
-    /// it yet (the Realtime screen was removed pending a rework).
+    /// RabbitMQ (AMQP 0.9.1): tail + record only for now (a non-destructive
+    /// exchange tap, see [`crate::broker::rabbitmq`]). The browser experience is
+    /// deferred to the RabbitMQ phase, so it stays on the Connections list.
     pub fn rabbitmq() -> Self {
         Self {
             kind: BrokerKind::Rabbitmq,
@@ -160,6 +162,22 @@ impl Capabilities {
             can_dashboard: false,
             can_console: false,
         }
+    }
+
+    /// Whether the browse list is driven by a Redis-style `SCAN` (cursor paging,
+    /// periodic auto-refresh, per-database scoping). True only for Redis; AMQP's
+    /// browse list is a curated set of destinations, so the SCAN cadence must not
+    /// run for it. Gates the scan-specific code paths (initial scan on connect,
+    /// auto-refresh, db switching, key navigation).
+    pub fn uses_key_scan(&self) -> bool {
+        matches!(self.kind, BrokerKind::Redis)
+    }
+
+    /// Whether the broker offers a live-tail bottom panel. Redis surfaces it
+    /// alongside its console; AMQP has tails without a console, so it qualifies
+    /// on broker kind rather than [`Self::can_console`].
+    pub fn can_tail(&self) -> bool {
+        self.can_console || matches!(self.kind, BrokerKind::Amqp)
     }
 }
 
@@ -277,6 +295,20 @@ pub struct InspectReq {
     /// Offset into a collection (lists/hashes/zsets).
     pub offset: usize,
     /// Maximum elements/bytes to return.
+    pub limit: usize,
+}
+
+/// A request to peek the current messages sitting in a destination (AMQP). The
+/// [`mode`](crate::config::PeekMode) decides whether the read is non-destructive
+/// (browse), skipped, or consumes the messages (destructive).
+#[derive(Debug, Clone)]
+pub struct PeekReq {
+    /// The destination to peek. Only a queue is peekable; a topic does not retain
+    /// messages, so the broker rejects a topic peek.
+    pub spec: SubSpec,
+    /// How to read: browse (copy, non-destructive), skip (no read), or destructive.
+    pub mode: crate::config::PeekMode,
+    /// Maximum number of messages to read before returning.
     pub limit: usize,
 }
 
@@ -686,6 +718,15 @@ pub trait BrokerConnection: Send {
         anyhow::bail!("this broker does not support a stats dashboard")
     }
 
+    /// Peek a bounded batch of the messages currently sitting in a destination
+    /// (AMQP queue), returning them as [`BrokerEvent`]s so they render like a
+    /// tail. The read is non-destructive, skipped, or destructive per
+    /// [`PeekReq::mode`]. Default: unsupported (gated off via
+    /// [`Capabilities::can_browse`] for brokers without a destination browser).
+    async fn peek(&mut self, _req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
+        anyhow::bail!("this broker does not support peeking messages")
+    }
+
     /// Open a live tail for `spec` on a *dedicated* socket and return its event
     /// stream. The returned stream owns that socket, so it is `'static` and the
     /// actor's main connection is untouched. Takes `&mut self` (not `&self`) so
@@ -923,18 +964,25 @@ mod tests {
         assert_eq!(r.kind, BrokerKind::Redis);
         assert_eq!(r.databases, 16);
         assert!(r.can_browse && r.can_dashboard && r.can_console);
+        // Redis browses via SCAN and tails alongside its console.
+        assert!(r.uses_key_scan() && r.can_tail());
 
         let a = Capabilities::amqp();
         assert_eq!(a.kind, BrokerKind::Amqp);
         assert_eq!(a.databases, 1);
-        assert!(!a.can_browse && !a.can_dashboard && !a.can_console);
+        // AMQP has a (curated) destination browser and tails, but no dashboard
+        // or console — and it never runs the Redis SCAN cadence.
+        assert!(a.can_browse && a.can_tail());
+        assert!(!a.can_dashboard && !a.can_console);
+        assert!(!a.uses_key_scan());
 
-        // RabbitMQ mirrors AMQP's capability shape (no browser, dashboard, or
-        // console).
+        // RabbitMQ is tail + record only for now — its browser is deferred to the
+        // RabbitMQ phase, so it stays off the Browser screen.
         let rmq = Capabilities::rabbitmq();
         assert_eq!(rmq.kind, BrokerKind::Rabbitmq);
         assert_eq!(rmq.databases, 1);
         assert!(!rmq.can_browse && !rmq.can_dashboard && !rmq.can_console);
+        assert!(!rmq.uses_key_scan());
     }
 
     #[test]

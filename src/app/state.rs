@@ -72,12 +72,18 @@ pub enum SettingsRow {
     Theme,
     /// Whether UI animations play (`on` / `off`).
     Animations,
+    /// How peeking an AMQP queue reads it (`browse` / `skip` / `destructive`).
+    PeekMode,
 }
 
 impl SettingsRow {
     /// Every row, in the order shown on the settings page.
     pub fn all() -> &'static [SettingsRow] {
-        &[SettingsRow::Theme, SettingsRow::Animations]
+        &[
+            SettingsRow::Theme,
+            SettingsRow::Animations,
+            SettingsRow::PeekMode,
+        ]
     }
 
     /// The label shown in this row's left column.
@@ -85,6 +91,7 @@ impl SettingsRow {
         match self {
             SettingsRow::Theme => "Theme",
             SettingsRow::Animations => "Animations",
+            SettingsRow::PeekMode => "AMQP peek mode",
         }
     }
 }
@@ -111,6 +118,9 @@ pub enum InputMode {
     Command,
     /// Editing the name of the selected recording on the Recordings tab.
     Rename,
+    /// Typing a destination spec (`topic:name` / `queue:name`) to add to an AMQP
+    /// connection's curated destination list (the left pane).
+    AddDestination,
 }
 
 /// Which Browser pane currently owns the keyboard. Independent of which bottom
@@ -746,6 +756,87 @@ impl ValueInspector {
     }
 }
 
+/// Whether a curated AMQP destination is a topic or a queue. Decides the source
+/// spec built when peeking or tailing it (and the tag shown in the list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestKind {
+    Topic,
+    Queue,
+}
+
+impl DestKind {
+    /// The lower-case tag shown beside the name in the destination list.
+    pub fn tag(self) -> &'static str {
+        match self {
+            DestKind::Topic => "topic",
+            DestKind::Queue => "queue",
+        }
+    }
+}
+
+/// One curated AMQP destination: a topic or queue the user has added to the
+/// browser. AMQP 1.0 can't enumerate destinations, so the user maintains this
+/// list themselves (persisted in the profile).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Destination {
+    pub name: String,
+    pub kind: DestKind,
+}
+
+impl Destination {
+    /// The source spec this destination tails/peeks as.
+    pub fn spec(&self) -> SubSpec {
+        match self.kind {
+            DestKind::Topic => SubSpec::Topic(self.name.clone()),
+            DestKind::Queue => SubSpec::Queue(self.name.clone()),
+        }
+    }
+
+    /// Build a destination from a source spec, if it is an AMQP one (`topic:` /
+    /// `queue:`). Other specs have no destination-list representation.
+    pub fn from_spec(spec: &SubSpec) -> Option<Self> {
+        match spec {
+            SubSpec::Topic(name) => Some(Destination {
+                name: name.clone(),
+                kind: DestKind::Topic,
+            }),
+            SubSpec::Queue(name) => Some(Destination {
+                name: name.clone(),
+                kind: DestKind::Queue,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The canonical `topic:name` / `queue:name` string persisted in the profile.
+    pub fn canonical(&self) -> String {
+        self.spec().label()
+    }
+}
+
+/// The left-pane destination browser for an AMQP connection: the curated list
+/// plus its selection. The AMQP analog of [`KeyBrowser`] (no scan/sort/grouping —
+/// the list is user-curated, not discovered).
+#[derive(Default)]
+pub struct DestinationBrowser {
+    pub items: Vec<Destination>,
+    pub table: TableState,
+}
+
+/// The right-pane peek inspector for an AMQP connection: the messages from the
+/// last queue peek, which destination they belong to (a staleness guard, like
+/// [`ValueInspector::value_key`]), the scroll offset, and whether a peek is in
+/// flight.
+#[derive(Default)]
+pub struct PeekInspector {
+    pub events: Vec<BrokerEvent>,
+    /// The destination the current `events` are from. A late-arriving peek for a
+    /// different destination (the user moved on) is discarded by comparing this.
+    pub peeked: Option<SubSpec>,
+    pub scroll: u16,
+    pub pending: bool,
+}
+
 /// Maximum samples retained in the Server Details time-series graphs. Stats
 /// refresh every `STATS_REFRESH_TICKS` ticks (~2s), so this holds roughly the
 /// last `STATS_HISTORY × 2s` ≈ 8 minutes of ops/keys history; older samples are
@@ -806,6 +897,10 @@ pub struct Connection {
     pub inspector: ValueInspector,
     /// Server-statistics dashboard band — populated for Redis.
     pub dashboard: StatsPanel,
+    /// Curated destination list (left pane) — populated for AMQP.
+    pub destinations: DestinationBrowser,
+    /// Queue message peek (right pane) — populated for AMQP.
+    pub peek: PeekInspector,
     /// Live tails for this connection. Pub/sub and stream tails each get their
     /// own tab in the Browser's bottom panel (after the Pub/Sub and Tail anchors
     /// respectively); MONITOR and keyspace tails live under their fixed anchor
@@ -834,6 +929,8 @@ impl Connection {
             browser: KeyBrowser::new(),
             inspector: ValueInspector::default(),
             dashboard: StatsPanel::default(),
+            destinations: DestinationBrowser::default(),
+            peek: PeekInspector::default(),
             subs: Vec::new(),
             panel_tab: 0,
             focus: PaneFocus::Keys,
@@ -854,6 +951,43 @@ impl Connection {
             Some(ViewRow::Entry { idx, .. }) => self.browser.keys.get(*idx),
             _ => None,
         }
+    }
+
+    /// The highlighted AMQP destination, if one is selected (AMQP browser).
+    pub fn selected_destination(&self) -> Option<&Destination> {
+        self.destinations
+            .table
+            .selected()
+            .and_then(|i| self.destinations.items.get(i))
+    }
+
+    /// Add `dest` to the curated list (deduped) and select it. Returns `true`
+    /// when it was newly added, `false` when it was already present (the existing
+    /// row is selected either way).
+    pub fn add_destination(&mut self, dest: Destination) -> bool {
+        if let Some(i) = self.destinations.items.iter().position(|d| *d == dest) {
+            self.destinations.table.select(Some(i));
+            return false;
+        }
+        self.destinations.items.push(dest);
+        let last = self.destinations.items.len() - 1;
+        self.destinations.table.select(Some(last));
+        true
+    }
+
+    /// Remove the highlighted destination, reselecting a neighbour. Returns the
+    /// removed entry, or `None` when nothing was selected.
+    pub fn remove_selected_destination(&mut self) -> Option<Destination> {
+        let sel = self.destinations.table.selected()?;
+        if sel >= self.destinations.items.len() {
+            return None;
+        }
+        let removed = self.destinations.items.remove(sel);
+        let len = self.destinations.items.len();
+        self.destinations
+            .table
+            .select((len > 0).then(|| sel.min(len - 1)));
+        Some(removed)
     }
 
     /// The prefix of the group the cursor is *in*: the highlighted group
@@ -1125,6 +1259,14 @@ impl Connection {
     /// render under their anchor — so their focus-driven lifecycle never shifts
     /// the tab indices. [`Self::panel_tab`] indexes into this.
     pub fn panel_slots(&self) -> Vec<PanelTab> {
+        // AMQP has no Redis anchors (no stats/console/monitor/keyspace). Its
+        // bottom panel is a single Tail anchor (an input to start a topic/queue
+        // tail) followed by one tab per live tail.
+        if !self.caps.uses_key_scan() {
+            let mut slots = vec![PanelTab::Tail];
+            slots.extend((0..self.subs.len()).map(PanelTab::Sub));
+            return slots;
+        }
         let mut slots = vec![
             PanelTab::ServerDetails,
             PanelTab::Console,
@@ -1146,9 +1288,13 @@ impl Connection {
         slots
     }
 
-    /// Number of tabs in the bottom panel: the six fixed anchors plus one per
-    /// pub/sub or stream tail. (MONITOR/keyspace tails have no tab of their own.)
+    /// Number of tabs in the bottom panel. AMQP: a single Tail anchor plus one
+    /// per live tail. Redis: the six fixed anchors plus one per pub/sub or stream
+    /// tail (MONITOR/keyspace tails have no tab of their own).
     pub fn panel_tab_count(&self) -> usize {
+        if !self.caps.uses_key_scan() {
+            return 1 + self.subs.len();
+        }
         6 + self
             .subs
             .iter()

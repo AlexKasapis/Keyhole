@@ -63,6 +63,7 @@ mod tests {
             username: None,
             password: None,
             tls: false,
+            destinations: Vec::new(),
         });
         assert!(connection_for(profile, None, 4096).is_ok());
     }

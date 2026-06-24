@@ -204,6 +204,13 @@ pub struct AmqpProfile {
     pub password: Option<String>,
     #[serde(default)]
     pub tls: bool,
+    /// The user-curated destinations shown in the browser, as canonical source
+    /// specs (`topic:name` / `queue:name`). AMQP 1.0 cannot enumerate
+    /// destinations, so this list is the browse surface; it persists so the
+    /// curation survives restarts. Empty by default and omitted from the file
+    /// when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub destinations: Vec<String>,
 }
 
 impl AmqpProfile {
@@ -281,6 +288,10 @@ pub struct Settings {
     /// settings page.
     #[serde(default)]
     pub animation: AnimationSpeed,
+    /// How peeking an AMQP queue reads its messages: a non-destructive browse,
+    /// skipped entirely, or a destructive consume. Cycled from the settings page.
+    #[serde(default)]
+    pub peek_mode: PeekMode,
 }
 
 impl Default for Settings {
@@ -291,6 +302,7 @@ impl Default for Settings {
             tail_scrollback: default_tail_scrollback(),
             browse_refresh_ms: default_browse_refresh_ms(),
             animation: AnimationSpeed::default(),
+            peek_mode: PeekMode::default(),
         }
     }
 }
@@ -344,6 +356,38 @@ impl AnimationSpeed {
         match self {
             AnimationSpeed::On => Some(1000),
             AnimationSpeed::Off => None,
+        }
+    }
+}
+
+/// How peeking an AMQP queue reads the messages currently sitting in it. The
+/// original app was non-destructive only; this knob opens that up per the user's
+/// choice. The default, `Browse`, preserves the non-destructive behaviour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeekMode {
+    /// Read copies of the messages without removing them (distribution-mode
+    /// `copy`). Non-destructive; the broker may flip a redelivery flag.
+    #[default]
+    Browse,
+    /// Don't read queue contents at all — the destination list and live tails
+    /// still work, but selecting a queue shows nothing.
+    Skip,
+    /// Consume the messages as they are read (a normal receiver that accepts
+    /// each delivery). Destructive: peeked messages are removed from the queue.
+    Destructive,
+}
+
+impl PeekMode {
+    /// Every mode, in the order the settings page cycles through them.
+    pub const ALL: [PeekMode; 3] = [PeekMode::Browse, PeekMode::Skip, PeekMode::Destructive];
+
+    /// The lower-case label shown on the settings page (and written to config).
+    pub fn label(self) -> &'static str {
+        match self {
+            PeekMode::Browse => "browse",
+            PeekMode::Skip => "skip",
+            PeekMode::Destructive => "destructive",
         }
     }
 }
@@ -511,6 +555,33 @@ mod tests {
     }
 
     #[test]
+    fn peek_mode_defaults_to_browse_and_parses_each_value() {
+        // Absent setting defaults to the non-destructive browse.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.settings.peek_mode, PeekMode::Browse);
+
+        // Each value parses from its lower-case label and round-trips on save.
+        for (label, mode) in [
+            ("browse", PeekMode::Browse),
+            ("skip", PeekMode::Skip),
+            ("destructive", PeekMode::Destructive),
+        ] {
+            let text = format!("[settings]\npeek_mode = \"{label}\"\n");
+            let cfg: Config = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.settings.peek_mode, mode, "parsing {label}");
+            let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+            assert_eq!(back.settings.peek_mode, mode);
+            assert_eq!(mode.label(), label);
+        }
+
+        // `ALL` lists every mode exactly once, in cycle order.
+        assert_eq!(
+            PeekMode::ALL,
+            [PeekMode::Browse, PeekMode::Skip, PeekMode::Destructive]
+        );
+    }
+
+    #[test]
     fn parses_amqp_connection() {
         let text = r#"
             [[connection]]
@@ -531,11 +602,52 @@ mod tests {
         assert_eq!(p.port, 5671);
         assert!(p.tls);
         assert_eq!(p.password_spec(), SecretSpec::Env("MQ_PW".into()));
+        // A profile with no curated destinations defaults to an empty list.
+        assert!(p.destinations.is_empty());
         assert_eq!(cfg.connections[0].kind_label(), "amqp");
         assert_eq!(
             cfg.connections[0].endpoint(),
             "b-x.mq.eu-west-1.amazonaws.com:5671 tls"
         );
+    }
+
+    #[test]
+    fn amqp_destinations_round_trip_and_are_omitted_when_empty() {
+        let text = r#"
+            [[connection]]
+            type = "amqp"
+            name = "mq"
+            host = "broker"
+            destinations = ["topic:events", "queue:orders"]
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        let ConnectionConfig::Amqp(p) = &cfg.connections[0] else {
+            panic!("expected an amqp profile");
+        };
+        assert_eq!(p.destinations, vec!["topic:events", "queue:orders"]);
+        // The list round-trips on save.
+        let back: Config = toml::from_str(&toml::to_string(&cfg).unwrap()).unwrap();
+        let ConnectionConfig::Amqp(bp) = &back.connections[0] else {
+            panic!("expected an amqp profile");
+        };
+        assert_eq!(bp.destinations, vec!["topic:events", "queue:orders"]);
+
+        // An empty list is omitted from the serialized form entirely.
+        let empty = AmqpProfile {
+            name: "x".into(),
+            host: "h".into(),
+            port: 5672,
+            username: None,
+            password: None,
+            tls: false,
+            destinations: Vec::new(),
+        };
+        let dumped = toml::to_string(&Config {
+            connections: vec![ConnectionConfig::Amqp(empty)],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!dumped.contains("destinations"));
     }
 
     #[test]

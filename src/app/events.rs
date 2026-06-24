@@ -50,6 +50,7 @@ impl App {
             AppEvent::Disconnected { id, reason } => self.on_disconnected(id, reason),
             AppEvent::KeysPage { id, page } => self.on_keys_page(id, page),
             AppEvent::ValueLoaded { id, key, value } => self.on_value(id, key, value),
+            AppEvent::Peeked { id, spec, events } => self.on_peeked(id, spec, events),
             AppEvent::StatsUpdated { id, stats } => self.on_stats(id, stats),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
@@ -111,7 +112,7 @@ impl App {
             // the user touching anything. Gated to the Browser screen (no point
             // re-scanning while a tail is on screen) and never stacked on top of
             // a scan that is still running.
-            if refresh_ticks > 0 && on_browser && conn.caps.can_browse {
+            if refresh_ticks > 0 && on_browser && conn.caps.uses_key_scan() {
                 conn.browser.browse_ticks += 1;
                 if conn.browser.browse_ticks >= refresh_ticks {
                     conn.browser.browse_ticks = 0;
@@ -142,8 +143,13 @@ impl App {
         // surface there).
         self.health = ConnHealth::Connected;
         // Kick off the broker-appropriate first load.
-        if caps.can_browse {
+        if caps.uses_key_scan() {
             self.start_scan(id, true);
+        } else if caps.can_browse {
+            // AMQP: a curated destination browser. Seed the list from the saved
+            // profile, then peek whatever queue lands selected.
+            self.seed_destinations(id);
+            self.request_peek(id);
         }
         if caps.can_dashboard {
             self.request_stats(id);
@@ -225,6 +231,18 @@ impl App {
         if let Some(conn) = self.conn_by_id_mut(id) {
             if conn.inspector.value_key.as_deref() == Some(key.as_str()) {
                 conn.inspector.value = Some(value);
+            }
+        }
+    }
+
+    pub(super) fn on_peeked(&mut self, id: ConnId, spec: SubSpec, events: Vec<BrokerEvent>) {
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            // Drop a stale peek: the user may have moved to another destination
+            // before this batch returned (mirrors `on_value`'s key guard).
+            if conn.peek.peeked.as_ref() == Some(&spec) {
+                conn.peek.events = events;
+                conn.peek.pending = false;
+                conn.peek.scroll = 0;
             }
         }
     }

@@ -11,7 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::broker::actor::ConnHandle;
-use crate::broker::{BrokerEvent, BrowsePage, ConnId, ServerStats, ValueView};
+use crate::broker::{BrokerEvent, BrowsePage, ConnId, ServerStats, SubSpec, ValueView};
 use crate::recording::RecordingStatus;
 
 /// Everything the render loop reacts to.
@@ -32,6 +32,14 @@ pub enum AppEvent {
         id: ConnId,
         key: String,
         value: ValueView,
+    },
+    /// The result of a queue peek (AMQP): a bounded batch of the messages
+    /// currently in `spec`. `spec` lets the UI discard a stale peek (the user
+    /// moved to another destination before it returned).
+    Peeked {
+        id: ConnId,
+        spec: SubSpec,
+        events: Vec<BrokerEvent>,
     },
     /// Refreshed server statistics.
     StatsUpdated { id: ConnId, stats: ServerStats },

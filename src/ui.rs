@@ -114,6 +114,17 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
+        InputMode::AddDestination => {
+            let line = Line::from(vec![
+                Span::styled(" add destination ", theme.accent),
+                Span::raw(format!("{}▏", app.subscribe_buf)),
+                Span::styled(
+                    "   topic:name · queue:name   Enter add · Esc cancel",
+                    theme.dim,
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
         // The console tab has its own input prompt inside the panel, so command
         // mode keeps the keybind row rather than echoing the input a second time.
         InputMode::Normal | InputMode::Command => match &app.status {
@@ -200,6 +211,15 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                         ("focus", "Tab tabs · Ctrl-↑/Esc keys"),
                     ])
                 }
+            } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
+                // The AMQP keys pane is the curated destination list, not a key
+                // scan, so it has its own controls (no db / groups / sort).
+                owned(&[
+                    ("nav", "↑↓ destinations"),
+                    ("dest", "a add · x remove · ⏎ open · t tail"),
+                    ("panel", "Tab/Ctrl-↓ tails"),
+                    ("app", ": palette · ? help · Esc back"),
+                ])
             } else {
                 let (sort, arrow, pattern) = app
                     .active_conn()
@@ -785,6 +805,12 @@ mod tests {
         // The animation option renders alongside it, at its default (on).
         assert!(text.contains("Animations"), "the animation option renders");
         assert!(text.contains("‹ on ›"), "current animation setting shown");
+        // The AMQP peek-mode option renders at its default (browse).
+        assert!(
+            text.contains("AMQP peek mode"),
+            "the peek-mode option renders"
+        );
+        assert!(text.contains("‹ browse ›"), "current peek mode shown");
     }
 
     #[test]
@@ -919,6 +945,7 @@ mod tests {
                     username: None,
                     password: None,
                     tls: true,
+                    destinations: Vec::new(),
                 }),
             ],
             ..Default::default()
@@ -1023,6 +1050,7 @@ mod tests {
                 username: None,
                 password: None,
                 tls: false,
+                destinations: Vec::new(),
             })],
             ..Default::default()
         };
@@ -1054,6 +1082,43 @@ mod tests {
         let (mut app, rx) = test_app();
         let handle = mock::handle(1, "prod", 16).await;
         app.connections.push(Connection::new(handle));
+        app.active = Some(0);
+        (app, rx)
+    }
+
+    /// An app with one AMQP connection seeded with a couple of curated
+    /// destinations and a pinned peek result, for the AMQP-browser snapshot.
+    async fn app_with_amqp_connection() -> (App, Receiver<AppEvent>) {
+        use crate::app::{DestKind, Destination};
+        let (mut app, rx) = test_app();
+        let handle = mock::amqp_handle(1, "events").await;
+        let mut conn = Connection::new(handle);
+        conn.add_destination(Destination {
+            name: "orders".into(),
+            kind: DestKind::Queue,
+        });
+        conn.add_destination(Destination {
+            name: "alerts".into(),
+            kind: DestKind::Topic,
+        });
+        conn.destinations.table.select(Some(0));
+        // A pinned peek result for the selected queue (`orders`).
+        conn.peek.peeked = Some(SubSpec::Queue("orders".into()));
+        conn.peek.events = vec![
+            BrokerEvent {
+                ts: OffsetDateTime::UNIX_EPOCH,
+                source: "orders".into(),
+                payload: Payload::Utf8("order #1".into()),
+                meta: Vec::new(),
+            },
+            BrokerEvent {
+                ts: OffsetDateTime::UNIX_EPOCH,
+                source: "orders".into(),
+                payload: Payload::Json(r#"{"id":2}"#.into()),
+                meta: Vec::new(),
+            },
+        ];
+        app.connections.push(conn);
         app.active = Some(0);
         (app, rx)
     }
@@ -1655,6 +1720,7 @@ mod tests {
                     username: None,
                     password: None,
                     tls: true,
+                    destinations: Vec::new(),
                 }),
                 ConnectionConfig::Rabbitmq(RabbitmqProfile {
                     name: "rabbit".into(),
@@ -1699,7 +1765,7 @@ mod tests {
         let (mut app, _rx) = test_app();
         pin_clock(&mut app);
         app.show_help = true;
-        insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 33));
+        insta::assert_snapshot!("help_overlay", render_lines(&mut app, 90, 40));
     }
 
     #[test]
@@ -1753,6 +1819,17 @@ mod tests {
                 is_error: true,
             });
         insta::assert_snapshot!("browser_with_console", render_lines(&mut app, 90, 24));
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_amqp() {
+        // The AMQP browser: a curated destination list (left), the queue-peek
+        // pane showing the selected queue's messages (right), and a tail-only
+        // bottom panel (just the Tail anchor, no Redis anchors).
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        pin_clock(&mut app);
+        app.screen = Screen::Browser;
+        insta::assert_snapshot!("browser_amqp", render_lines(&mut app, 90, 24));
     }
 
     #[tokio::test]

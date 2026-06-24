@@ -26,6 +26,7 @@ impl App {
             InputMode::Filter => return self.handle_filter_key(key),
             InputMode::Form => return self.handle_form_key(key),
             InputMode::Rename => return self.handle_rename_key(key),
+            InputMode::AddDestination => return self.handle_add_destination_key(key),
             // Normal / Command / Subscribe are reconciled from the focused pane.
             InputMode::Normal | InputMode::Command | InputMode::Subscribe => {}
         }
@@ -96,8 +97,110 @@ impl App {
                 // navigation scrolls the feed and p/x/r control it.
                 _ => self.handle_feed_key(key),
             }
+        } else if self.active_is_amqp() {
+            // The AMQP left pane is the curated destination list, not a key list.
+            self.handle_destination_key(key);
         } else if let Some(action) = action::map_keys_focus(&key) {
             self.apply(action);
+        }
+    }
+
+    /// Whether the active connection is an AMQP 1.0 broker (a curated destination
+    /// browser rather than a Redis key scan).
+    pub(super) fn active_is_amqp(&self) -> bool {
+        self.active_conn()
+            .map(|c| c.caps.kind == BrokerKind::Amqp)
+            .unwrap_or(false)
+    }
+
+    /// Keys while the AMQP destination list (left pane) is focused: navigate the
+    /// list, Enter to open the selection (peek a queue / tail a topic), `a` to add
+    /// a destination, `x`/`d` to remove one, `t` to tail it. PageUp/Down scroll the
+    /// peek pane (the right pane), mirroring the Redis keys-pane value scroll.
+    fn handle_destination_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (false, KeyCode::Char('j') | KeyCode::Down) => self.nav(1),
+            (false, KeyCode::Char('k') | KeyCode::Up) => self.nav(-1),
+            (false, KeyCode::Char('g') | KeyCode::Home) => self.nav_edge(true),
+            (false, KeyCode::Char('G') | KeyCode::End) => self.nav_edge(false),
+            (_, KeyCode::PageDown) => self.scroll_peek(VALUE_SCROLL_STEP),
+            (_, KeyCode::PageUp) => self.scroll_peek(-VALUE_SCROLL_STEP),
+            (false, KeyCode::Enter) => self.open_selected_destination(),
+            (false, KeyCode::Char('a')) => self.begin_add_destination(),
+            (false, KeyCode::Char('x') | KeyCode::Char('d')) => self.delete_selected_destination(),
+            (false, KeyCode::Char('t')) => self.tail_selected_destination(),
+            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
+            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
+            (false, KeyCode::Char(':')) => self.apply(Action::OpenPalette),
+            _ => {}
+        }
+    }
+
+    /// Enter the destination-add prompt (AMQP): capture a `topic:name` /
+    /// `queue:name` spec, added on submit.
+    fn begin_add_destination(&mut self) {
+        self.subscribe_buf.clear();
+        self.mode = InputMode::AddDestination;
+    }
+
+    /// Open the highlighted destination: peek a queue, or tail a topic (topics
+    /// don't retain, so there is nothing to peek).
+    fn open_selected_destination(&mut self) {
+        let Some(id) = self.active_id() else { return };
+        match self
+            .conn_by_id(id)
+            .and_then(|c| c.selected_destination().map(|d| d.kind))
+        {
+            Some(DestKind::Queue) => self.request_peek(id),
+            Some(DestKind::Topic) => self.tail_selected_destination(),
+            None => {}
+        }
+    }
+
+    /// Open a live tail on the highlighted destination (topic or queue).
+    fn tail_selected_destination(&mut self) {
+        if let Some(spec) = self
+            .active_conn()
+            .and_then(|c| c.selected_destination().map(|d| d.spec()))
+        {
+            self.start_subscribe(spec);
+        }
+    }
+
+    /// The destination-add prompt's keys: type a spec, Enter adds it, Esc cancels.
+    pub(super) fn handle_add_destination_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.subscribe_buf.clear();
+                self.mode = InputMode::Normal;
+            }
+            KeyCode::Enter => {
+                let raw = self.subscribe_buf.trim().to_string();
+                self.subscribe_buf.clear();
+                self.mode = InputMode::Normal;
+                if !raw.is_empty() {
+                    match SubSpec::parse(&raw, 0) {
+                        Ok(spec) => self.add_amqp_destination(spec),
+                        Err(e) => self.set_status(e.to_string(), true),
+                    }
+                }
+            }
+            KeyCode::Char(c) => self.subscribe_buf.push(c),
+            KeyCode::Backspace => {
+                self.subscribe_buf.pop();
+            }
+            _ => {}
+        }
+    }
+
+    /// Scroll the AMQP peek pane by `delta` logical lines (negative = up). The
+    /// offset is clamped against the rendered height, so an over-scroll rests at
+    /// the bottom.
+    pub(super) fn scroll_peek(&mut self, delta: i32) {
+        if let Some(conn) = self.active_conn_mut() {
+            let next = conn.peek.scroll as i32 + delta;
+            conn.peek.scroll = next.clamp(0, u16::MAX as i32) as u16;
         }
     }
 
@@ -473,19 +576,32 @@ impl App {
             Screen::Browser => {
                 if let Some(idx) = self.active {
                     let conn = &mut self.connections[idx];
-                    // Selection moves through rendered rows (group headers +
-                    // keys), so it ranges over the view, not the raw key list.
-                    let next = move_selection(
-                        conn.browser.table.selected(),
-                        conn.browser.view.len(),
-                        delta,
-                    );
-                    conn.browser.table.select(next);
+                    if conn.caps.uses_key_scan() {
+                        // Selection moves through rendered rows (group headers +
+                        // keys), so it ranges over the view, not the raw key list.
+                        let next = move_selection(
+                            conn.browser.table.selected(),
+                            conn.browser.view.len(),
+                            delta,
+                        );
+                        conn.browser.table.select(next);
+                    } else {
+                        // AMQP: move through the curated destination list.
+                        let next = move_selection(
+                            conn.destinations.table.selected(),
+                            conn.destinations.items.len(),
+                            delta,
+                        );
+                        conn.destinations.table.select(next);
+                    }
                 }
-                // Navigation only moves the highlight; the key list refreshes on
-                // its own timer (see `on_tick`), not as a side effect of moving.
+                // Redis loads the selected key's value as the highlight moves
+                // (cheap, multiplexed). AMQP does NOT peek on move — each peek
+                // opens its own connection — so it peeks only on explicit open.
                 if let Some(id) = self.active_id() {
-                    self.request_selected_value(id);
+                    if self.conn_by_id(id).is_some_and(|c| c.caps.uses_key_scan()) {
+                        self.request_selected_value(id);
+                    }
                 }
             }
             Screen::Recordings => {
@@ -509,15 +625,26 @@ impl App {
             Screen::Browser => {
                 if let Some(idx) = self.active {
                     let conn = &mut self.connections[idx];
-                    let len = conn.browser.view.len();
-                    if len > 0 {
-                        conn.browser
-                            .table
-                            .select(Some(if top { 0 } else { len - 1 }));
+                    if conn.caps.uses_key_scan() {
+                        let len = conn.browser.view.len();
+                        if len > 0 {
+                            conn.browser
+                                .table
+                                .select(Some(if top { 0 } else { len - 1 }));
+                        }
+                    } else {
+                        let len = conn.destinations.items.len();
+                        if len > 0 {
+                            conn.destinations
+                                .table
+                                .select(Some(if top { 0 } else { len - 1 }));
+                        }
                     }
                 }
                 if let Some(id) = self.active_id() {
-                    self.request_selected_value(id);
+                    if self.conn_by_id(id).is_some_and(|c| c.caps.uses_key_scan()) {
+                        self.request_selected_value(id);
+                    }
                 }
             }
             Screen::Recordings => {
@@ -567,6 +694,10 @@ impl App {
         }
         let Some(idx) = self.active else { return };
         let conn = &mut self.connections[idx];
+        // Only Redis is database-scoped; AMQP has a single logical space.
+        if !conn.caps.uses_key_scan() {
+            return;
+        }
         let max = conn.caps.databases.saturating_sub(1) as i32;
         let new_db = (conn.db as i32 + delta).clamp(0, max) as u32;
         if new_db == conn.db {

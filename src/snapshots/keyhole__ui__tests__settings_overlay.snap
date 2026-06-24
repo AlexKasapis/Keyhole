@@ -5,11 +5,11 @@ expression: "render_lines(&mut app, 90, 16)"
 ┌ Connections │ Recordings ──────────────────────────────────────────────────────────────┐
 │                                                                                        │
 │                                  No saved connections.                                 │
-│                                                                                        │
 │                   ┌ Settings ──────────────────────────────────────┐                   │
 │                   │                                                │                   │
-│                   │▶ Theme       ‹ dark ›                          │                   │
-│                   │  Animations  ‹ on ›                            │                   │
+│                   │▶ Theme         ‹ dark ›                        │                   │
+│                   │  Animations    ‹ on ›                          │                   │
+│                   │  AMQP peek mode‹ browse ›                      │                   │
 │                   │                                                │                   │
 │                   │  ↑/↓ row · ←/→ change · Enter/Esc close        │                   │
 │                   │                                                │                   │

@@ -1,20 +1,30 @@
 //! AMQP 1.0 implementation of [`BrokerConnection`] (Apache ActiveMQ / Amazon MQ
 //! / RabbitMQ 4.x), built on `fe2o3-amqp`.
 //!
-//! Only the **read + record** surface is implemented, matching the v1 mandate:
-//! there is no key browser, dashboard, or command console (see
-//! [`Capabilities::amqp`]). The one capability is tailing a destination:
+//! Surfaces a destination *browser*: a user-curated list of topics/queues (AMQP
+//! 1.0 cannot enumerate them), a queue message peek, and live tails. There is no
+//! stats dashboard or command console (those need a management plane AMQP 1.0
+//! lacks; deferred to the RabbitMQ phase — see [`Capabilities::amqp`]).
+//!
+//! Tailing a destination:
 //! - **Topic** (`topic:name`) — a non-destructive multicast subscription: every
 //!   subscriber gets its own copy, so observing never steals messages.
 //! - **Queue** (`queue:name`) — opened in **browse** mode (distribution-mode
 //!   `copy`), so messages are read without being consumed. Once the link
 //!   attaches we check the broker's negotiated source and refuse the tail if it
 //!   downgraded to a destructive (non-`copy`) distribution mode, upholding the
-//!   "no destructive ops" rule even against a broker that ignores `copy`.
+//!   non-destructive guarantee even against a broker that ignores `copy`.
 //!
-//! Each tail owns a dedicated connection + session + receiver (mirroring the
-//! Redis dedicated-socket model) so the returned stream is `'static` and the
-//! actor's main connection stays free for liveness checks.
+//! Peeking a queue ([`AmqpConnection::peek`]) reuses the same machinery as a
+//! browse tail but drains a bounded batch and detaches. Its
+//! [`PeekMode`](crate::config::PeekMode) decides whether the read is
+//! non-destructive (`copy`), skipped, or destructive (a consuming receiver).
+//!
+//! Each tail/peek owns a dedicated connection + session + receiver (mirroring the
+//! Redis dedicated-socket model) so a tail's stream is `'static` and the actor's
+//! main connection stays free for liveness checks.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::stream;
@@ -25,8 +35,17 @@ use fe2o3_amqp::types::messaging::{Body, DistributionMode, Source};
 use fe2o3_amqp::types::primitives::Value;
 use fe2o3_amqp::{Connection, Receiver, Session};
 
-use super::{BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, SubSpec};
-use crate::config::AmqpProfile;
+use super::{
+    BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, PeekReq, SubSpec,
+};
+use crate::config::{AmqpProfile, PeekMode};
+
+/// Idle timeouts bounding a queue peek. The broker gets a generous window to
+/// deliver the first message after the link attaches (the credit/flow
+/// round-trip), then a short window between messages so an exhausted or empty
+/// queue returns promptly rather than blocking the inspector.
+const PEEK_FIRST_TIMEOUT: Duration = Duration::from_millis(2000);
+const PEEK_IDLE_TIMEOUT: Duration = Duration::from_millis(400);
 
 /// A process-unique AMQP container-id with the given prefix. Container-ids must
 /// be unique per connection (a broker may reject or confuse two connections
@@ -104,6 +123,26 @@ impl BrokerConnection for AmqpConnection {
         let tail_id = unique_container_id(&format!("keyhole-{}-tail", self.profile.name));
         open_tail(self.url(), tail_id, address, name, browse).await
     }
+
+    async fn peek(&mut self, req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
+        let queue = match &req.spec {
+            SubSpec::Queue(q) => q.clone(),
+            // Topics don't retain messages, so there is nothing sitting in them
+            // to peek — the UI offers a live tail instead.
+            SubSpec::Topic(_) => anyhow::bail!(
+                "topics do not retain messages, so there is nothing to peek — tail it instead"
+            ),
+            other => anyhow::bail!("{} is not an AMQP destination", other.label()),
+        };
+        // Skip reads nothing — selecting a queue simply shows an empty inspector.
+        if matches!(req.mode, PeekMode::Skip) {
+            return Ok(Vec::new());
+        }
+        let destructive = matches!(req.mode, PeekMode::Destructive);
+        // A peek opens its own short-lived connection, so it needs its own id.
+        let peek_id = unique_container_id(&format!("keyhole-{}-peek", self.profile.name));
+        peek_queue(self.url(), peek_id, queue, destructive, req.limit).await
+    }
 }
 
 /// Owns a tail's dedicated connection/session/receiver so the stream stays alive.
@@ -179,6 +218,82 @@ async fn open_tail(
     Ok(Box::pin(stream))
 }
 
+/// Peek up to `limit` messages currently sitting in `queue` and return them.
+/// Mirrors [`open_tail`]'s connect/attach but drains a bounded batch (bounded by
+/// `limit` and an idle timeout) and then detaches, rather than handing back a
+/// live stream. `destructive` selects a consuming receiver (default distribution
+/// mode); otherwise a `copy` link reads non-destructively, guarded by
+/// [`ensure_browse_nondestructive`]. Either way each delivery is accepted: on a
+/// `copy` link that only discards our copy; on a consuming link it removes the
+/// message from the queue.
+async fn peek_queue(
+    url: String,
+    container_id: String,
+    queue: String,
+    destructive: bool,
+    limit: usize,
+) -> anyhow::Result<Vec<BrokerEvent>> {
+    let address = format!("queue://{queue}");
+    let mut connection = Connection::open(container_id, url.as_str())
+        .await
+        .map_err(|e| anyhow::anyhow!("opening peek connection: {e}"))?;
+    let mut session = Session::begin(&mut connection)
+        .await
+        .map_err(|e| anyhow::anyhow!("beginning peek session: {e}"))?;
+
+    let source = if destructive {
+        Source::builder().address(address.clone()).build()
+    } else {
+        Source::builder()
+            .address(address.clone())
+            .distribution_mode(DistributionMode::Copy)
+            .build()
+    };
+    let mut receiver = Receiver::builder()
+        .name(format!("keyhole-peek-{queue}"))
+        .source(source)
+        .attach(&mut session)
+        .await
+        .map_err(|e| anyhow::anyhow!("attaching to `{address}`: {e}"))?;
+
+    // Non-destructive guarantee for a browse peek: refuse if the broker
+    // downgraded the link to a consuming distribution mode (reused from the tail).
+    if !destructive {
+        ensure_browse_nondestructive(receiver.source(), &queue)?;
+    }
+
+    let mut events = Vec::new();
+    while events.len() < limit {
+        // The first message gets a generous window (link credit/flow round-trip);
+        // subsequent ones a short one, so an exhausted/empty queue returns fast.
+        let wait = if events.is_empty() {
+            PEEK_FIRST_TIMEOUT
+        } else {
+            PEEK_IDLE_TIMEOUT
+        };
+        match tokio::time::timeout(wait, receiver.recv::<Body<Value>>()).await {
+            Ok(Ok(delivery)) => {
+                let _ = receiver.accept(&delivery).await;
+                events.push(delivery_to_event(&queue, delivery.into_body()));
+            }
+            // A receive error ends the peek with whatever was read so far.
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, queue = %queue, "amqp peek ended");
+                break;
+            }
+            // Idle timeout: the queue is exhausted (or empty). Return what we have.
+            Err(_elapsed) => break,
+        }
+    }
+
+    // Detach the link and close the connection so the peek leaves nothing behind;
+    // best-effort, the results are already in hand.
+    let _ = receiver.close().await;
+    let _ = session.end().await;
+    let _ = connection.close().await;
+    Ok(events)
+}
+
 /// Enforce the non-destructive guarantee for a queue browse: the broker's
 /// negotiated `source` must not carry a distribution mode other than `copy`.
 /// A `move` (or any non-`copy`) mode means settling a delivery consumes it, so
@@ -251,6 +366,7 @@ mod tests {
             username: Some("user".into()),
             password: None,
             tls,
+            destinations: Vec::new(),
         }
     }
 
@@ -339,6 +455,41 @@ mod tests {
         assert!(ensure_browse_nondestructive(&unspecified, "q").is_ok());
         assert!(ensure_browse_nondestructive(&None, "q").is_ok());
     }
+
+    #[tokio::test]
+    async fn peek_rejects_a_topic() {
+        // Topics don't retain, so peeking one is meaningless — it must error
+        // before any connection is attempted (so this needs no live broker).
+        let mut conn = AmqpConnection::new(profile(false), None);
+        let err = conn
+            .peek(PeekReq {
+                spec: SubSpec::Topic("events".into()),
+                mode: PeekMode::Browse,
+                limit: 10,
+            })
+            .await
+            .expect_err("peeking a topic must error");
+        assert!(
+            format!("{err:#}").contains("topics do not retain"),
+            "error should explain topics can't be peeked: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_skip_returns_empty_without_connecting() {
+        // `Skip` short-circuits before opening a connection, so it succeeds with
+        // no broker present and yields nothing.
+        let mut conn = AmqpConnection::new(profile(false), None);
+        let out = conn
+            .peek(PeekReq {
+                spec: SubSpec::Queue("q".into()),
+                mode: PeekMode::Skip,
+                limit: 10,
+            })
+            .await
+            .expect("skip peek never touches the broker");
+        assert!(out.is_empty(), "skip mode reads nothing");
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -380,6 +531,7 @@ mod integration_tests {
             username: Some("admin".into()),
             password: None,
             tls: false,
+            destinations: Vec::new(),
         };
         let mut conn = AmqpConnection::new(profile, Some("admin".to_string()));
         let caps = conn.connect().await.expect("connect to test ActiveMQ");
@@ -492,5 +644,79 @@ mod integration_tests {
             Some("queued-msg"),
             "queue browse must not consume the message"
         );
+    }
+
+    #[tokio::test]
+    async fn peek_browse_returns_messages_and_leaves_them() {
+        let queue = unique("keyhole.it.peekq");
+        send_one(&format!("queue://{queue}"), "m1").await;
+        send_one(&format!("queue://{queue}"), "m2").await;
+
+        let mut conn = connected().await;
+        let events = conn
+            .peek(PeekReq {
+                spec: SubSpec::Queue(queue.clone()),
+                mode: PeekMode::Browse,
+                limit: 10,
+            })
+            .await
+            .expect("browse peek");
+        let mut bodies: Vec<String> = events.iter().map(|e| e.payload.as_text()).collect();
+        bodies.sort();
+        assert_eq!(bodies, vec!["m1".to_string(), "m2".to_string()]);
+
+        // Both messages must still be in the queue afterwards (non-destructive).
+        let mut left = Vec::new();
+        while left.len() < 2 {
+            match consume_one(&format!("queue://{queue}"), 5).await {
+                Some(b) => left.push(b),
+                None => break,
+            }
+        }
+        left.sort();
+        assert_eq!(
+            left,
+            vec!["m1".to_string(), "m2".to_string()],
+            "browse peek must leave every message in the queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn peek_destructive_consumes_messages() {
+        let queue = unique("keyhole.it.peekqd");
+        send_one(&format!("queue://{queue}"), "gone").await;
+
+        let mut conn = connected().await;
+        let events = conn
+            .peek(PeekReq {
+                spec: SubSpec::Queue(queue.clone()),
+                mode: PeekMode::Destructive,
+                limit: 10,
+            })
+            .await
+            .expect("destructive peek");
+        let bodies: Vec<String> = events.iter().map(|e| e.payload.as_text()).collect();
+        assert_eq!(bodies, vec!["gone".to_string()]);
+
+        // The queue must now be empty: a destructive peek consumed the message.
+        let after = consume_one(&format!("queue://{queue}"), 2).await;
+        assert_eq!(after, None, "destructive peek must consume the message");
+    }
+
+    #[tokio::test]
+    async fn peek_empty_queue_returns_empty() {
+        let queue = unique("keyhole.it.peekempty");
+        let mut conn = connected().await;
+        // Nothing was sent: attaching auto-creates an empty queue, so the peek
+        // drains nothing and returns on the idle timeout.
+        let events = conn
+            .peek(PeekReq {
+                spec: SubSpec::Queue(queue.clone()),
+                mode: PeekMode::Browse,
+                limit: 10,
+            })
+            .await
+            .expect("peek empty queue");
+        assert!(events.is_empty(), "an empty queue peeks to nothing");
     }
 }
