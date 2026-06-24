@@ -22,13 +22,13 @@ expression: "render_lines(&mut app, 90, 30)"
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
-│ v7.4.0 · up 1h 1m 1s · 7 clients · mem 1.0 MiB / 4.0 MiB · hit 90.0%                   │
-│ standalone · master · 120.3k cmds · 42 expired · 0 evicted                             │
+│ v7.4.0 · up 1h 1m 1s · 7/10000 clients · mem 1.0 MiB / 4.0 MiB · hit 90.0%             │
+│ standalone · master · 2 replicas · 412 keys · 120.3k cmds · 42 expired · 0 evicted     │
+│ frag 1.42 · allkeys-lru · rdb ok · 1.3k unsaved · 1 blocked · 3 rejected               │
 │                                                                                        │
 │ Ops/sec 31 · peak 31                           Clients (3)                             │
 │  ▁▂▃▅▄▆█                                       web-1                1m    get          │
-│                                                10.0.0.9:6210        5s    subscribe    │
-│ Keys 412                                       cron                 1h    client|list  │
-│ ▇▇▇▇▇▇▇█                                                                               │
+│ Net 12.0 KiB/s in · 4.0 KiB/s out              10.0.0.9:6210        5s    subscribe    │
+│  ▁▂▄▂▅▄█                                       cron                 1h    client|list  │
 └────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ keys · [ ] db · ⏎/Space collapse · z all · / filter · o sort name↑ · O dir · Tab/Ctrl-

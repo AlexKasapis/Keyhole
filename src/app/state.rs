@@ -839,13 +839,13 @@ pub struct PeekInspector {
 
 /// Maximum samples retained in the Server Details time-series graphs. Stats
 /// refresh every `STATS_REFRESH_TICKS` ticks (~2s), so this holds roughly the
-/// last `STATS_HISTORY × 2s` ≈ 8 minutes of ops/keys history; older samples are
-/// evicted from the front as new ones arrive.
+/// last `STATS_HISTORY × 2s` ≈ 8 minutes of ops/network history; older samples
+/// are evicted from the front as new ones arrive.
 pub const STATS_HISTORY: usize = 240;
 
 /// The server-statistics state for one connection: the latest stats and the
 /// tick counter that paces their refresh (both feeding the Browser's Server
-/// band), plus the rolling ops/keys history and client-list scroll that drive
+/// band), plus the rolling ops/network history and client-list scroll that drive
 /// the Server Details tab.
 #[derive(Default)]
 pub struct StatsPanel {
@@ -854,23 +854,29 @@ pub struct StatsPanel {
     /// Instantaneous ops/sec at each refresh, oldest first, capped at
     /// [`STATS_HISTORY`]. Feeds the Server Details "Ops/sec" graph.
     pub ops_history: VecDeque<u64>,
-    /// Total key count (summed across DBs) at each refresh, oldest first, capped
-    /// at [`STATS_HISTORY`]. Feeds the Server Details "Keys" graph.
-    pub keys_history: VecDeque<u64>,
+    /// Total network throughput in bytes/sec (read + write) at each refresh,
+    /// oldest first, capped at [`STATS_HISTORY`]. Feeds the Server Details
+    /// "Net" graph.
+    pub net_history: VecDeque<u64>,
     /// Scroll offset (rows from the top) of the Server Details client list.
     pub details_scroll: u16,
 }
 
 impl StatsPanel {
-    /// Fold a fresh stats reply into the panel: append its ops/sec and total-key
-    /// count to the rolling history (evicting the oldest once [`STATS_HISTORY`]
-    /// is reached), then store the reply. A metric absent from the reply records
-    /// a `0` sample so the two series stay evenly spaced in time.
+    /// Fold a fresh stats reply into the panel: append its ops/sec and total
+    /// network throughput to the rolling history (evicting the oldest once
+    /// [`STATS_HISTORY`] is reached), then store the reply. A metric absent from
+    /// the reply records a `0` sample so the two series stay evenly spaced in
+    /// time.
     pub fn record(&mut self, stats: ServerStats) {
         let ops = stats.instantaneous_ops_per_sec.unwrap_or(0);
-        let keys: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
+        // INFO reports the rates in KB/s; track bytes/sec so the graph caption
+        // can reuse the byte formatter.
+        let in_bps = stats.instantaneous_input_kbps.unwrap_or(0.0) * 1024.0;
+        let out_bps = stats.instantaneous_output_kbps.unwrap_or(0.0) * 1024.0;
+        let net = (in_bps + out_bps).round() as u64;
         push_capped(&mut self.ops_history, ops);
-        push_capped(&mut self.keys_history, keys);
+        push_capped(&mut self.net_history, net);
         self.stats = Some(stats);
     }
 }
@@ -2113,36 +2119,35 @@ mod tests {
         let d = StatsPanel::default();
         assert!(d.stats.is_none());
         assert_eq!(d.stat_ticks, 0);
-        assert!(d.ops_history.is_empty() && d.keys_history.is_empty());
+        assert!(d.ops_history.is_empty() && d.net_history.is_empty());
         assert_eq!(d.details_scroll, 0);
     }
 
     #[test]
-    fn stats_panel_record_tracks_ops_and_keys_history() {
+    fn stats_panel_record_tracks_ops_and_net_history() {
         let mut panel = StatsPanel::default();
-        let stats = |ops: u64, k0: u64, k1: u64| ServerStats {
+        let stats = |ops: u64, in_kbps: f64, out_kbps: f64| ServerStats {
             instantaneous_ops_per_sec: Some(ops),
-            db_keys: vec![(0, k0), (1, k1)],
+            instantaneous_input_kbps: Some(in_kbps),
+            instantaneous_output_kbps: Some(out_kbps),
             ..Default::default()
         };
-        panel.record(stats(7, 10, 5));
-        panel.record(stats(9, 20, 5));
-        // Each sample appends the ops/sec and the across-DB key total, oldest first.
+        panel.record(stats(7, 1.0, 1.0));
+        panel.record(stats(9, 2.0, 0.5));
+        // Each sample appends the ops/sec and the summed read+write throughput in
+        // bytes/sec (KB/s × 1024), oldest first.
         assert_eq!(panel.ops_history, [7, 9]);
-        assert_eq!(panel.keys_history, [15, 25]);
+        assert_eq!(panel.net_history, [2048, 2560]);
         // The latest reply is retained for the band.
         assert_eq!(
             panel.stats.as_ref().unwrap().instantaneous_ops_per_sec,
             Some(9)
         );
 
-        // A reply missing the ops metric records a 0 so the series stay aligned.
-        panel.record(ServerStats {
-            db_keys: vec![(0, 30)],
-            ..Default::default()
-        });
+        // A reply missing the metrics records a 0 so the series stay aligned.
+        panel.record(ServerStats::default());
         assert_eq!(panel.ops_history, [7, 9, 0]);
-        assert_eq!(panel.keys_history, [15, 25, 30]);
+        assert_eq!(panel.net_history, [2048, 2560, 0]);
     }
 
     #[test]

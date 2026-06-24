@@ -36,6 +36,7 @@ pub fn parse_info(text: &str) -> ServerStats {
     }
 
     let num = |k: &str| stats.raw.get(k).and_then(|v| v.parse::<u64>().ok());
+    let float = |k: &str| stats.raw.get(k).and_then(|v| v.parse::<f64>().ok());
     stats.redis_version = stats.raw.get("redis_version").cloned();
     stats.uptime_seconds = num("uptime_in_seconds");
     stats.connected_clients = num("connected_clients");
@@ -43,6 +44,8 @@ pub fn parse_info(text: &str) -> ServerStats {
     stats.used_memory_peak = num("used_memory_peak");
     stats.maxmemory = num("maxmemory");
     stats.instantaneous_ops_per_sec = num("instantaneous_ops_per_sec");
+    stats.instantaneous_input_kbps = float("instantaneous_input_kbps");
+    stats.instantaneous_output_kbps = float("instantaneous_output_kbps");
     stats.keyspace_hits = num("keyspace_hits");
     stats.keyspace_misses = num("keyspace_misses");
 
@@ -103,7 +106,7 @@ fn parse_client_line(line: &str) -> ClientInfo {
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = "# Server\r\nredis_version:7.4.0\r\nuptime_in_seconds:12345\r\n\r\n# Clients\r\nconnected_clients:3\r\n\r\n# Memory\r\nused_memory:1048576\r\nused_memory_peak:2097152\r\nmaxmemory:0\r\n\r\n# Stats\r\ninstantaneous_ops_per_sec:7\r\nkeyspace_hits:90\r\nkeyspace_misses:10\r\n\r\n# Keyspace\r\ndb0:keys=9,expires=1,avg_ttl=0\r\ndb1:keys=1,expires=0,avg_ttl=0\r\n";
+    const SAMPLE: &str = "# Server\r\nredis_version:7.4.0\r\nuptime_in_seconds:12345\r\n\r\n# Clients\r\nconnected_clients:3\r\n\r\n# Memory\r\nused_memory:1048576\r\nused_memory_peak:2097152\r\nmaxmemory:0\r\n\r\n# Stats\r\ninstantaneous_ops_per_sec:7\r\ninstantaneous_input_kbps:12.50\r\ninstantaneous_output_kbps:3.25\r\nkeyspace_hits:90\r\nkeyspace_misses:10\r\n\r\n# Keyspace\r\ndb0:keys=9,expires=1,avg_ttl=0\r\ndb1:keys=1,expires=0,avg_ttl=0\r\n";
 
     #[test]
     fn parses_metrics() {
@@ -114,6 +117,8 @@ mod tests {
         assert_eq!(s.used_memory, Some(1_048_576));
         assert_eq!(s.used_memory_peak, Some(2_097_152));
         assert_eq!(s.instantaneous_ops_per_sec, Some(7));
+        assert_eq!(s.instantaneous_input_kbps, Some(12.5));
+        assert_eq!(s.instantaneous_output_kbps, Some(3.25));
         assert_eq!(s.keyspace_hits, Some(90));
         assert_eq!(s.keyspace_misses, Some(10));
     }

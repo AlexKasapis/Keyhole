@@ -1409,22 +1409,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn server_details_breaks_keys_down_across_multiple_dbs() {
-        // With keys in more than one DB the per-DB breakdown is informative (the
-        // total no longer equals any single DB), so the Server Details "Keys"
-        // graph caption shows it alongside the total.
+    async fn server_details_shows_total_keys_across_dbs() {
+        // The total key count, summed across DBs, is carried as a figure on the
+        // Server Details facts line (the Keys time-series graph was retired in
+        // favour of the network graph).
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser; // Server Details is the default bottom tab.
-        app.connections[0].dashboard.keys_history.push_back(49);
         app.connections[0].dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
         });
         let text = screen_text(&mut app);
-        assert!(text.contains("49"), "the summed total across DBs");
-        assert!(text.contains("db0 42"), "per-DB breakdown for db0");
-        assert!(text.contains("db1 7"), "and db1");
+        assert!(text.contains("49 keys"), "the summed total across DBs");
     }
 
     #[tokio::test]
@@ -2025,6 +2022,8 @@ mod tests {
             uptime_seconds: Some(3661),
             connected_clients: Some(7),
             instantaneous_ops_per_sec: Some(31),
+            instantaneous_input_kbps: Some(12.0),
+            instantaneous_output_kbps: Some(4.0),
             used_memory: Some(1024 * 1024),
             maxmemory: Some(4 * 1024 * 1024),
             keyspace_hits: Some(900),
@@ -2043,20 +2042,30 @@ mod tests {
             ("total_commands_processed", "120345"),
             ("expired_keys", "42"),
             ("evicted_keys", "0"),
+            ("maxclients", "10000"),
+            ("connected_slaves", "2"),
+            ("mem_fragmentation_ratio", "1.42"),
+            ("maxmemory_policy", "allkeys-lru"),
+            ("rdb_last_bgsave_status", "ok"),
+            ("aof_enabled", "0"),
+            ("rdb_changes_since_last_save", "1280"),
+            ("blocked_clients", "1"),
+            ("rejected_connections", "3"),
         ] {
             stats.raw.insert(k.into(), v.into());
         }
-        // A short ops/keys history so the sparklines have a visible shape.
+        // A short ops/network history so the sparklines have a visible shape
+        // (network samples are bytes/sec).
         for ops in [2u64, 5, 9, 14, 22, 18, 27, 31] {
             app.connections[0].dashboard.ops_history.push_back(ops);
         }
-        for keys in [400u64, 402, 405, 405, 408, 410, 411, 412] {
-            app.connections[0].dashboard.keys_history.push_back(keys);
+        for net in [1024u64, 2048, 4096, 8192, 6000, 12000, 9000, 16384] {
+            app.connections[0].dashboard.net_history.push_back(net);
         }
         app.connections[0].dashboard.stats = Some(stats);
         // Server Details is the leftmost tab (index 0), selected by default. A
-        // taller frame gives the panel room for the metrics/facts lines, the two
-        // graphs, and the client list with their margins.
+        // taller frame gives the panel room for the metrics/facts/health lines,
+        // the two graphs, and the client list with their margins.
         insta::assert_snapshot!("browser_server_details", render_lines(&mut app, 90, 30));
     }
 }

@@ -673,6 +673,11 @@ pub struct ServerStats {
     pub used_memory_peak: Option<u64>,
     pub maxmemory: Option<u64>,
     pub instantaneous_ops_per_sec: Option<u64>,
+    /// Network read rate in KB/s (`instantaneous_input_kbps`). Feeds the Server
+    /// Details network graph alongside the write rate below.
+    pub instantaneous_input_kbps: Option<f64>,
+    /// Network write rate in KB/s (`instantaneous_output_kbps`).
+    pub instantaneous_output_kbps: Option<f64>,
     pub keyspace_hits: Option<u64>,
     pub keyspace_misses: Option<u64>,
     /// `(db index, key count)` pairs from the keyspace section.

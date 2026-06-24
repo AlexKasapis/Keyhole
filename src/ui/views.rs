@@ -1117,9 +1117,10 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
         ..area
     };
 
-    // Two fact lines (server metrics, then deployment facts), a blank spacer for
-    // margin, then the body: graphs left, clients right.
-    let [metrics_area, facts_area, _gap, body_area] = Layout::vertical([
+    // Three fact lines (server metrics, deployment facts, then health), a blank
+    // spacer for margin, then the body: graphs left, clients right.
+    let [metrics_area, facts_area, health_area, _gap, body_area] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -1131,6 +1132,10 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
         metrics_area,
     );
     frame.render_widget(Paragraph::new(server_facts_line(stats, theme)), facts_area);
+    frame.render_widget(
+        Paragraph::new(server_health_line(stats, theme)),
+        health_area,
+    );
 
     // Carve a two-column gutter out of the graphs column so it doesn't butt
     // against the client list.
@@ -1171,7 +1176,17 @@ fn server_metrics_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
     }
     if let Some(c) = stats.connected_clients {
         sep(&mut spans);
-        spans.push(Span::raw(c.to_string()));
+        // Show the cap (`7/10000`) when `maxclients` is known, so a connection
+        // count nearing the limit reads as such.
+        let max = stats
+            .raw
+            .get("maxclients")
+            .and_then(|v| v.parse::<u64>().ok());
+        let value = match max {
+            Some(m) if m > 0 => format!("{c}/{m}"),
+            _ => c.to_string(),
+        };
+        spans.push(Span::raw(value));
         spans.push(Span::styled(" clients", theme.dim));
     }
     // Memory: used / maxmemory when a cap is set, else used · peak, else just used.
@@ -1199,8 +1214,9 @@ fn server_metrics_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
 }
 
 /// A dim one-liner of server facts the metrics line above doesn't carry: the
-/// deployment mode and role, then the lifetime command / expiry / eviction
-/// counters. Values lead in the foreground; their units stay dim.
+/// deployment mode and role, a replication summary, the total key count, then the
+/// lifetime command / expiry / eviction counters. Values lead in the foreground;
+/// their units stay dim.
 fn server_facts_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
     let raw = |k: &str| stats.raw.get(k).cloned();
     let num = |k: &str| stats.raw.get(k).and_then(|v| v.parse::<u64>().ok());
@@ -1213,9 +1229,37 @@ fn server_facts_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
     if let Some(mode) = raw("redis_mode") {
         spans.push(Span::raw(mode));
     }
-    if let Some(role) = raw("role") {
+    let role = raw("role");
+    if let Some(role) = &role {
         sep(&mut spans);
-        spans.push(Span::raw(role));
+        spans.push(Span::raw(role.clone()));
+    }
+    // Replication summary: a master shows how many replicas are attached; a
+    // replica shows whether its link to the master is up (the field is only
+    // present in a replica's INFO).
+    if role.as_deref() == Some("master") {
+        if let Some(n) = num("connected_slaves").filter(|n| *n > 0) {
+            sep(&mut spans);
+            spans.push(Span::raw(n.to_string()));
+            spans.push(Span::styled(" replicas", theme.dim));
+        }
+    } else if let Some(link) = raw("master_link_status") {
+        sep(&mut spans);
+        spans.push(Span::styled("link ", theme.dim));
+        let style = if link == "up" {
+            theme.success
+        } else {
+            theme.error
+        };
+        spans.push(Span::styled(link, style));
+    }
+    // Total keys across all DBs — carried here as a figure now that the Server
+    // Details graphs no longer chart it.
+    if !stats.db_keys.is_empty() {
+        let keys: u64 = stats.db_keys.iter().map(|(_, n)| n).sum();
+        sep(&mut spans);
+        spans.push(Span::raw(human_count(keys)));
+        spans.push(Span::styled(" keys", theme.dim));
     }
     let counter = |spans: &mut Vec<Span<'static>>, key: &str, unit: &'static str| {
         if let Some(n) = num(key) {
@@ -1233,17 +1277,87 @@ fn server_facts_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
+/// A health one-liner surfacing the signals a debug tab is really for: memory
+/// fragmentation and eviction policy, the last persistence (RDB/AOF) save
+/// status, and — only when non-zero — the unsaved-change, blocked-client, and
+/// rejected-connection counters that flag trouble. A failed save status reads in
+/// the error colour; a high fragmentation ratio in the warning colour.
+fn server_health_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
+    let raw = |k: &str| stats.raw.get(k).cloned();
+    let num = |k: &str| stats.raw.get(k).and_then(|v| v.parse::<u64>().ok());
+    let float = |k: &str| stats.raw.get(k).and_then(|v| v.parse::<f64>().ok());
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let sep = |spans: &mut Vec<Span<'static>>| {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" · ", theme.dim));
+        }
+    };
+    // Memory fragmentation: RSS vs allocated. Above ~1.5 it warns.
+    if let Some(frag) = float("mem_fragmentation_ratio") {
+        spans.push(Span::styled("frag ", theme.dim));
+        let style = if frag >= 1.5 {
+            theme.warning
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(format!("{frag:.2}"), style));
+    }
+    // Eviction policy (e.g. noeviction / allkeys-lru) — explains evictions.
+    if let Some(policy) = raw("maxmemory_policy") {
+        sep(&mut spans);
+        spans.push(Span::raw(policy));
+    }
+    // Persistence: the last RDB save and, when AOF is on, the last AOF write —
+    // an `err` here means data isn't being persisted.
+    let status = |spans: &mut Vec<Span<'static>>, label: &'static str, value: String| {
+        sep(spans);
+        spans.push(Span::styled(label, theme.dim));
+        let style = if value == "ok" {
+            Style::default()
+        } else {
+            theme.error
+        };
+        spans.push(Span::styled(value, style));
+    };
+    if let Some(s) = raw("rdb_last_bgsave_status") {
+        status(&mut spans, "rdb ", s);
+    }
+    if num("aof_enabled") == Some(1) {
+        if let Some(s) = raw("aof_last_write_status").or_else(|| raw("aof_last_bgrewrite_status")) {
+            status(&mut spans, "aof ", s);
+        }
+    }
+    // Alarm counters: only shown when non-zero, so a healthy server's line stays
+    // quiet and a number here always means something to look at.
+    if let Some(n) = num("rdb_changes_since_last_save").filter(|n| *n > 0) {
+        sep(&mut spans);
+        spans.push(Span::raw(human_count(n)));
+        spans.push(Span::styled(" unsaved", theme.dim));
+    }
+    if let Some(n) = num("blocked_clients").filter(|n| *n > 0) {
+        sep(&mut spans);
+        spans.push(Span::raw(n.to_string()));
+        spans.push(Span::styled(" blocked", theme.dim));
+    }
+    if let Some(n) = num("rejected_connections").filter(|n| *n > 0) {
+        sep(&mut spans);
+        spans.push(Span::styled(human_count(n), theme.warning));
+        spans.push(Span::styled(" rejected", theme.dim));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled("server health", theme.dim));
+    }
+    Line::from(spans)
+}
+
 /// The left column of the Server Details tab: an ops/sec graph stacked over a
-/// total-keys graph, each captioned with its current value.
+/// network-throughput graph, each captioned with its current value.
 fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
-    // A blank row between the two graphs keeps their sparklines from running
-    // together — the margin asked for in the Details tab.
-    let [ops_area, _gap, keys_area] = Layout::vertical([
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Min(0),
-    ])
-    .areas(area);
+    // The two graphs split the column evenly. Each carries its own caption, so
+    // they read apart without a spacer row between them — a row the third
+    // (health) fact line above now claims on a short terminal.
+    let [ops_area, net_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Min(0)]).areas(area);
 
     let ops_now = conn
         .dashboard
@@ -1267,25 +1381,28 @@ fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect
         format!("{ops_now} · peak {ops_peak}"),
     );
 
-    // Total keys, plus a per-DB breakdown (`· db0 42 · db1 7`) when more than one
-    // DB holds keys — with a single DB the total *is* that DB's count, so the
-    // breakdown would just repeat the number.
-    let keys_now = conn.dashboard.keys_history.back().copied().unwrap_or(0);
-    let mut keys_value = keys_now.to_string();
-    if let Some(stats) = conn.dashboard.stats.as_ref() {
-        if stats.db_keys.len() > 1 {
-            for (db, n) in &stats.db_keys {
-                keys_value.push_str(&format!(" · db{db} {n}"));
-            }
-        }
-    }
+    // Network throughput: the read and write rates broken out in the caption
+    // (INFO reports them in KB/s), over a sparkline of their bytes/sec sum.
+    let stats = conn.dashboard.stats.as_ref();
+    let in_bps = (stats
+        .and_then(|s| s.instantaneous_input_kbps)
+        .unwrap_or(0.0)
+        * 1024.0) as u64;
+    let out_bps = (stats
+        .and_then(|s| s.instantaneous_output_kbps)
+        .unwrap_or(0.0)
+        * 1024.0) as u64;
     server_graph(
         frame,
         theme,
-        keys_area,
-        "Keys",
-        &conn.dashboard.keys_history,
-        keys_value,
+        net_area,
+        "Net",
+        &conn.dashboard.net_history,
+        format!(
+            "{}/s in · {}/s out",
+            human_bytes(in_bps),
+            human_bytes(out_bps)
+        ),
     );
 }
 
@@ -2198,5 +2315,86 @@ mod tests {
         // With nothing known, it degrades to a placeholder rather than a blank.
         let empty = line_text(&server_facts_line(&ServerStats::default(), &theme));
         assert_eq!(empty, "server details");
+    }
+
+    #[test]
+    fn server_facts_line_summarizes_replication_and_keys() {
+        let theme = Theme::dark();
+        // A master with replicas and keys across DBs: the replica count and the
+        // summed key total both read.
+        let mut master = ServerStats {
+            db_keys: vec![(0, 42), (1, 7)],
+            ..Default::default()
+        };
+        for (k, v) in [("role", "master"), ("connected_slaves", "2")] {
+            master.raw.insert(k.into(), v.into());
+        }
+        let text = line_text(&server_facts_line(&master, &theme));
+        assert!(text.contains("2 replicas"), "replica count: {text:?}");
+        assert!(text.contains("49 keys"), "summed keys: {text:?}");
+
+        // A replica reports its link status instead of a replica count.
+        let mut replica = ServerStats::default();
+        for (k, v) in [("role", "slave"), ("master_link_status", "down")] {
+            replica.raw.insert(k.into(), v.into());
+        }
+        let text = line_text(&server_facts_line(&replica, &theme));
+        assert!(text.contains("link down"), "link status: {text:?}");
+        assert!(
+            !text.contains("replicas"),
+            "a replica shows no replica count: {text:?}"
+        );
+    }
+
+    #[test]
+    fn server_health_line_flags_problems_and_hides_quiet_counters() {
+        let theme = Theme::dark();
+        // A healthy server: fragmentation, policy and save status show; the alarm
+        // counters are all zero, so they are omitted to keep the line quiet.
+        let mut ok = ServerStats::default();
+        for (k, v) in [
+            ("mem_fragmentation_ratio", "1.05"),
+            ("maxmemory_policy", "noeviction"),
+            ("rdb_last_bgsave_status", "ok"),
+            ("rdb_changes_since_last_save", "0"),
+            ("blocked_clients", "0"),
+            ("rejected_connections", "0"),
+        ] {
+            ok.raw.insert(k.into(), v.into());
+        }
+        let text = line_text(&server_health_line(&ok, &theme));
+        assert!(text.contains("frag 1.05"), "fragmentation: {text:?}");
+        assert!(text.contains("noeviction"), "policy: {text:?}");
+        assert!(text.contains("rdb ok"), "save status: {text:?}");
+        assert!(!text.contains("unsaved"), "zero counters hidden: {text:?}");
+        assert!(!text.contains("blocked"), "zero counters hidden: {text:?}");
+        assert!(!text.contains("rejected"), "zero counters hidden: {text:?}");
+
+        // A struggling server surfaces AOF status and the non-zero counters.
+        let mut bad = ServerStats::default();
+        for (k, v) in [
+            ("mem_fragmentation_ratio", "2.10"),
+            ("rdb_last_bgsave_status", "err"),
+            ("aof_enabled", "1"),
+            ("aof_last_write_status", "err"),
+            ("rdb_changes_since_last_save", "1280"),
+            ("blocked_clients", "3"),
+            ("rejected_connections", "5"),
+        ] {
+            bad.raw.insert(k.into(), v.into());
+        }
+        let text = line_text(&server_health_line(&bad, &theme));
+        assert!(text.contains("rdb err"), "failed save: {text:?}");
+        assert!(text.contains("aof err"), "failed aof: {text:?}");
+        assert!(text.contains("1.3k unsaved"), "unsaved changes: {text:?}");
+        assert!(text.contains("3 blocked"), "blocked clients: {text:?}");
+        assert!(
+            text.contains("5 rejected"),
+            "rejected connections: {text:?}"
+        );
+
+        // With nothing known it degrades to a placeholder rather than a blank.
+        let empty = line_text(&server_health_line(&ServerStats::default(), &theme));
+        assert_eq!(empty, "server health");
     }
 }
