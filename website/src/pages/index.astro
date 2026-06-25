@@ -3,10 +3,11 @@ const repo = 'https://github.com/AlexKasapis/Keyhole';
 const docs = 'https://docs.keyholetui.com';
 const releases = `${repo}/releases`;
 
-// Convenience install via the vanity domain (a 302 in public/_redirects sends
-// /install.sh to the latest GitHub release installer). The --proto/--tlsv1.2
-// flags are applied by curl to every hop, including the redirect, so this is as
-// safe as hitting GitHub directly.
+// Convenience install via the vanity domain: a 302 in public/_redirects sends
+// /install.sh to the latest GitHub release installer, over HTTPS end to end.
+// Integrity does not depend on the fetch path — the installer verifies the
+// SHA-256 checksum (and cosign signature) of the downloaded binary, identically
+// whether you use this alias or the GitHub URL below.
 const installVanity =
   "curl --proto '=https' --tlsv1.2 -LsSf https://keyholetui.com/install.sh | sh";
 // The verifiable path: pin the GitHub release URL and check the cosign
