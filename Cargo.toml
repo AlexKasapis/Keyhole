@@ -8,8 +8,8 @@ description = "A terminal UI to connect to message/data brokers (Redis, AMQP), b
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/AlexKasapis/Keyhole"
-homepage = "https://github.com/AlexKasapis/Keyhole"
-documentation = "https://github.com/AlexKasapis/Keyhole"
+homepage = "https://keyholetui.com"
+documentation = "https://docs.keyholetui.com"
 keywords = ["tui", "redis", "amqp", "broker", "terminal"]
 categories = ["command-line-utilities", "database"]
 # Keep the published crate slim: ship sources, README, licenses, and CHANGELOG,
@@ -18,6 +18,8 @@ exclude = [
     ".github/",
     "docs/",
     "scripts/",
+    "website/",
+    "docs-site/",
     "docker-compose.yml",
     "config.dev.toml",
     "justfile",

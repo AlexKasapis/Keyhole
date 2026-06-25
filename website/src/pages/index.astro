@@ -1,0 +1,246 @@
+---
+const repo = 'https://github.com/AlexKasapis/Keyhole';
+const docs = 'https://docs.keyholetui.com';
+const releases = `${repo}/releases`;
+
+// Convenience install via the vanity domain (a 302 in public/_redirects sends
+// /install.sh to the latest GitHub release installer). The --proto/--tlsv1.2
+// flags are applied by curl to every hop, including the redirect, so this is as
+// safe as hitting GitHub directly.
+const installVanity =
+  "curl --proto '=https' --tlsv1.2 -LsSf https://keyholetui.com/install.sh | sh";
+// The verifiable path: pin the GitHub release URL and check the cosign
+// signature / SLSA provenance documented in the README.
+const installGitHub =
+  "curl --proto '=https' --tlsv1.2 -LsSf \\\n  https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh | sh";
+
+const brokers = [
+  { cap: 'Keyspace browser + value inspector', redis: '✅', amqp: '—', rabbit: '—' },
+  { cap: 'Read-only command console', redis: '✅', amqp: '—', rabbit: '—' },
+  { cap: 'Realtime tails', redis: '✅', amqp: '✅', rabbit: '✅' },
+  { cap: 'Record live tail → JSONL', redis: '✅', amqp: '✅', rabbit: '✅' },
+];
+
+const features = [
+  { title: 'Connections', body: 'Saved connection profiles in TOML. Passwords resolve at connect time from an env var, the OS keyring, or a prompt — never written to disk in plaintext.' },
+  { title: 'Browser', body: 'Navigate the Redis keyspace and inspect values, with a live server-statistics band and a pinned, read-only command console.' },
+  { title: 'Realtime', body: 'Live tails of pub/sub, streams, keyspace events and MONITOR (Redis); topic/queue tails (AMQP 1.0); and exchange taps (RabbitMQ).' },
+  { title: 'Recording', body: 'Record any live tail to a lossless JSONL file, browsable in the in-app recordings viewer.' },
+];
+
+const title = 'Keyhole — a terminal UI for message & data brokers';
+const description =
+  'Keyhole is a single self-contained terminal UI for Redis, AMQP 1.0 and RabbitMQ — browse data, watch realtime activity, and record live streams to disk.';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://keyholetui.com" />
+    <meta name="twitter:card" content="summary" />
+  </head>
+
+  <body>
+    <main>
+      <header class="hero">
+        <div class="logo" aria-hidden="true">🔑</div>
+        <h1>Keyhole</h1>
+        <p class="tagline">
+          A terminal UI for message &amp; data brokers — browse, watch live, and
+          record streams to disk.
+        </p>
+        <p class="brokers-line">
+          Redis · AMQP 1.0 · RabbitMQ — one self-contained binary.
+        </p>
+
+        <section class="install" aria-label="Install">
+          <div class="code-row">
+            <pre><code id="install-cmd">{installVanity}</code></pre>
+            <button class="copy" data-copy="install-cmd" type="button">Copy</button>
+          </div>
+          <p class="install-note">
+            Prefer the fully verifiable path?
+            <a href={`${repo}#verifying-a-download`}>Install straight from GitHub</a>
+            and check the cosign signature + SLSA provenance.
+          </p>
+        </section>
+
+        <nav class="cta">
+          <a class="btn primary" href={repo}>GitHub</a>
+          <a class="btn" href={docs}>Docs</a>
+          <a class="btn" href={releases}>Releases</a>
+        </nav>
+      </header>
+
+      <section class="panel" aria-labelledby="brokers-h">
+        <h2 id="brokers-h">Supported brokers</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Capability</th><th>Redis</th><th>AMQP 1.0</th><th>RabbitMQ</th></tr>
+            </thead>
+            <tbody>
+              {brokers.map((r) => (
+                <tr>
+                  <td>{r.cap}</td>
+                  <td class="c">{r.redis}</td>
+                  <td class="c">{r.amqp}</td>
+                  <td class="c">{r.rabbit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p class="muted">All three brokers are always built into the binary.</p>
+      </section>
+
+      <section class="panel" aria-labelledby="features-h">
+        <h2 id="features-h">Features</h2>
+        <div class="grid">
+          {features.map((f) => (
+            <article class="card">
+              <h3>{f.title}</h3>
+              <p>{f.body}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+
+      <section class="panel verify" aria-labelledby="verify-h">
+        <h2 id="verify-h">Trustworthy by default</h2>
+        <p>
+          Keyhole is observe-first: browsing, inspecting, tailing and recording
+          are all read-only. Every release artifact is checksummed, signed
+          (sigstore/cosign keyless) and carries SLSA build-provenance
+          attestations, alongside a CycloneDX SBOM. The canonical, verifiable
+          install command points straight at GitHub:
+        </p>
+        <pre class="block"><code>{installGitHub}</code></pre>
+      </section>
+
+      <footer>
+        <p>
+          Licensed under <a href={`${repo}/blob/main/LICENSE-MIT`}>MIT</a> or
+          <a href={`${repo}/blob/main/LICENSE-APACHE`}>Apache-2.0</a>.
+        </p>
+        <p class="muted">
+          <a href={repo}>Source</a> · <a href={docs}>Docs</a> ·
+          <a href={releases}>Releases</a> ·
+          <a href={`${repo}/security/policy`}>Security</a>
+        </p>
+      </footer>
+    </main>
+
+    <script>
+      document.querySelectorAll('button.copy').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          const id = btn.getAttribute('data-copy');
+          const el = id ? document.getElementById(id) : null;
+          if (!el || !el.textContent) return;
+          try {
+            await navigator.clipboard.writeText(el.textContent);
+            const prev = btn.textContent;
+            btn.textContent = 'Copied';
+            setTimeout(() => (btn.textContent = prev), 1500);
+          } catch {
+            /* clipboard unavailable; ignore */
+          }
+        });
+      });
+    </script>
+
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --fg: #e6edf3;
+        --muted: #9198a1;
+        --accent: #f2cc60;
+        --accent-2: #58a6ff;
+        --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html { color-scheme: dark; }
+      body {
+        margin: 0;
+        background: radial-gradient(1200px 600px at 50% -10%, #1b2330 0%, var(--bg) 60%);
+        color: var(--fg);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+      main { max-width: 880px; margin: 0 auto; padding: 0 1.25rem 4rem; }
+      a { color: var(--accent-2); }
+
+      .hero { text-align: center; padding: 4.5rem 0 2.5rem; }
+      .logo { font-size: 4rem; line-height: 1; }
+      h1 { font-size: 3rem; margin: 0.4rem 0 0; letter-spacing: -0.02em; }
+      .tagline { font-size: 1.25rem; max-width: 38ch; margin: 1rem auto 0.4rem; }
+      .brokers-line { color: var(--muted); margin: 0 0 1.75rem; }
+
+      .install { max-width: 640px; margin: 0 auto; }
+      .code-row { display: flex; align-items: stretch; gap: 0.5rem; }
+      .code-row pre {
+        flex: 1; margin: 0; text-align: left; overflow-x: auto;
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 0.85rem 1rem;
+      }
+      code { font-family: var(--mono); font-size: 0.92rem; }
+      .copy {
+        flex: 0 0 auto; cursor: pointer; color: var(--fg);
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 0 1rem; font-size: 0.9rem;
+      }
+      .copy:hover { border-color: var(--accent); }
+      .install-note { font-size: 0.9rem; color: var(--muted); margin: 0.6rem 0 0; }
+
+      .cta { display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.75rem; flex-wrap: wrap; }
+      .btn {
+        display: inline-block; text-decoration: none; color: var(--fg);
+        border: 1px solid var(--border); border-radius: 8px;
+        padding: 0.55rem 1.25rem; font-weight: 600;
+      }
+      .btn:hover { border-color: var(--accent); }
+      .btn.primary { background: var(--accent); color: #1a1300; border-color: var(--accent); }
+
+      .panel { margin-top: 2.5rem; }
+      .panel h2 { font-size: 1.5rem; margin: 0 0 1rem; }
+
+      .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+      table { width: 100%; border-collapse: collapse; min-width: 520px; }
+      th, td { padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--border); text-align: left; }
+      thead th { background: var(--panel); font-size: 0.9rem; color: var(--muted); }
+      tbody tr:last-child td { border-bottom: 0; }
+      td.c, th:not(:first-child) { text-align: center; }
+
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1.1rem 1.2rem; }
+      .card h3 { margin: 0 0 0.4rem; color: var(--accent); font-size: 1.05rem; }
+      .card p { margin: 0; color: var(--fg); font-size: 0.95rem; }
+
+      .verify p { color: var(--muted); }
+      pre.block {
+        background: var(--panel); border: 1px solid var(--border);
+        border-radius: 10px; padding: 1rem; overflow-x: auto; margin: 1rem 0 0;
+      }
+
+      footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); text-align: center; }
+      footer p { margin: 0.25rem 0; }
+      .muted { color: var(--muted); }
+
+      @media (max-width: 480px) {
+        h1 { font-size: 2.25rem; }
+        .tagline { font-size: 1.1rem; }
+      }
+    </style>
+  </body>
+</html>

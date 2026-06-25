@@ -1,0 +1,14 @@
+# Cloudflare Pages redirects (https://developers.cloudflare.com/pages/configuration/redirects/)
+#
+# Vanity install URL: `curl ... https://keyholetui.com/install.sh | sh` follows
+# this 302 to the latest GitHub release installer. curl applies the caller's
+# --proto/--tlsv1.2 to the redirect hop too, so it is as safe as hitting GitHub.
+# The installer asset is published by .github/workflows/release.yml (it copies
+# scripts/install.sh -> keyhole-installer.sh on every release).
+/install.sh   https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh   302
+/install      https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh   302
+
+# Short links to common GitHub destinations.
+/releases     https://github.com/AlexKasapis/Keyhole/releases   302
+/repo         https://github.com/AlexKasapis/Keyhole            302
+/security     https://github.com/AlexKasapis/Keyhole/security/policy   302
