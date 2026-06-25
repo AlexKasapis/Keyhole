@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Keyhole">
+  <rect width="32" height="32" rx="7" fill="#0d1117"/>
+  <path d="M16 6a6 6 0 0 0-3.2 11.07L10.5 26h11l-2.3-8.93A6 6 0 0 0 16 6Z"
+        fill="none" stroke="#f2cc60" stroke-width="2.2" stroke-linejoin="round"/>
+  <circle cx="16" cy="12" r="2.4" fill="#f2cc60"/>
+</svg>
