@@ -62,8 +62,8 @@ fn unique_config_path() -> PathBuf {
 }
 
 /// Attach a live mock-backed connection and return its id.
-async fn connect(app: &mut App, id: u32, name: &str, databases: u32) -> ConnId {
-    let handle = mock::handle(id, name, databases).await;
+async fn connect(app: &mut App, id: u32, name: &str) -> ConnId {
+    let handle = mock::handle(id, name).await;
     app.handle_event(AppEvent::Connected { handle });
     ConnId(id)
 }
@@ -175,7 +175,7 @@ async fn on_start_known_profile_starts_connecting() {
 #[tokio::test]
 async fn on_connected_activates_and_opens_browser() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     assert_eq!(app.connections.len(), 1);
     assert_eq!(app.active, Some(0));
     assert_eq!(app.screen, Screen::Browser);
@@ -199,7 +199,7 @@ async fn conn_health_tracks_the_connection_lifecycle() {
     assert_eq!(app.conn_health(), ConnHealth::Connecting);
 
     // … flips to connected once the handle lands …
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     assert_eq!(app.conn_health(), ConnHealth::Connected);
 
     // … and turns to an error when the last connection drops.
@@ -215,7 +215,7 @@ async fn conn_health_stays_connected_on_a_non_fatal_error() {
     // An error raised while a connection is live (e.g. a rejected command)
     // must not flip the health indicator away from connected.
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.handle_event(AppEvent::ConnError {
         id: ConnId(1),
         context: "command".into(),
@@ -243,8 +243,8 @@ async fn conn_health_keeps_green_when_one_of_several_drops() {
     // Dropping a non-active connection while others remain leaves the
     // indicator green — there is still a live, active connection.
     let (mut app, _rx) = test_app();
-    let first = connect(&mut app, 1, "a", 16).await;
-    connect(&mut app, 2, "b", 16).await;
+    let first = connect(&mut app, 1, "a").await;
+    connect(&mut app, 2, "b").await;
     app.handle_event(AppEvent::Disconnected {
         id: first,
         reason: "x".into(),
@@ -255,7 +255,7 @@ async fn conn_health_keeps_green_when_one_of_several_drops() {
 #[tokio::test]
 async fn value_pane_is_not_scrollable() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     assert_eq!(app.active_conn().unwrap().inspector.value_scroll, 0);
     // The value pane no longer scrolls: the Page keys are unbound on the keys
@@ -285,7 +285,7 @@ fn page_keys_are_inert_on_the_connections_list() {
 #[tokio::test]
 async fn on_disconnected_removes_and_resets_to_connections() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.handle_event(AppEvent::Disconnected {
         id,
         reason: "bye".into(),
@@ -301,7 +301,7 @@ async fn on_disconnected_removes_and_resets_to_connections() {
 #[tokio::test]
 async fn on_disconnected_unknown_id_is_noop() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.handle_event(AppEvent::Disconnected {
         id: ConnId(999),
         reason: "x".into(),
@@ -312,8 +312,8 @@ async fn on_disconnected_unknown_id_is_noop() {
 #[tokio::test]
 async fn on_disconnected_keeps_others_when_multiple() {
     let (mut app, _rx) = test_app();
-    let first = connect(&mut app, 1, "a", 16).await;
-    connect(&mut app, 2, "b", 16).await;
+    let first = connect(&mut app, 1, "a").await;
+    connect(&mut app, 2, "b").await;
     app.handle_event(AppEvent::Disconnected {
         id: first,
         reason: "x".into(),
@@ -327,7 +327,7 @@ async fn on_disconnected_keeps_others_when_multiple() {
 #[tokio::test]
 async fn connect_selected_focuses_existing_connection() {
     let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Home;
     app.profile_state.select(Some(0));
     app.apply(Action::Enter);
@@ -341,7 +341,7 @@ async fn connect_selected_focuses_existing_connection() {
 #[tokio::test]
 async fn keys_page_extends_and_tracks_cursor() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     // The initial (foreground) scan was kicked off on connect; its pages
     // carry the current scan epoch.
     let epoch = app.active_conn().unwrap().browser.scan_epoch;
@@ -378,7 +378,7 @@ async fn keys_page_extends_and_tracks_cursor() {
 #[tokio::test]
 async fn keys_page_from_stale_db_is_ignored() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     let epoch = app.active_conn().unwrap().browser.scan_epoch;
     app.connections[0].db = 1;
     app.handle_event(AppEvent::KeysPage {
@@ -396,7 +396,7 @@ async fn keys_page_from_stale_db_is_ignored() {
 #[tokio::test]
 async fn keys_page_from_superseded_scan_is_ignored() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     // A page stamped with an older epoch (e.g. from a scan abandoned when
     // the user changed the filter) must not contaminate the current scan.
     let stale_epoch = app
@@ -443,7 +443,7 @@ async fn keys_page_builds_the_view_so_render_need_not_rebuild() {
     // update phase keeping it current. Pin that: applying a SCAN page must leave
     // a non-empty view whenever keys were loaded.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "local", 16).await;
+    let id = connect(&mut app, 1, "local").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -463,7 +463,7 @@ async fn keys_page_builds_the_view_so_render_need_not_rebuild() {
 #[tokio::test]
 async fn first_scan_starts_with_groups_collapsed() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -525,7 +525,7 @@ fn refresh_ticks_rounds_up_and_disables_on_zero() {
 #[tokio::test]
 async fn navigation_does_not_trigger_a_scan() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -558,7 +558,7 @@ async fn navigation_does_not_trigger_a_scan() {
 #[tokio::test]
 async fn tick_auto_refreshes_keys_independently_of_navigation() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(&mut app, id, vec![stream_entry("a", ValueType::String)]);
     let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
@@ -583,7 +583,7 @@ async fn tick_auto_refreshes_keys_independently_of_navigation() {
 #[tokio::test]
 async fn auto_refresh_is_disabled_when_interval_is_zero() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(&mut app, id, vec![]);
     let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
@@ -602,7 +602,7 @@ async fn auto_refresh_is_disabled_when_interval_is_zero() {
 #[tokio::test]
 async fn auto_refresh_does_not_run_off_the_browser_screen() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(&mut app, id, vec![]);
     let epoch_before = app.active_conn().unwrap().browser.scan_epoch;
 
@@ -624,7 +624,7 @@ async fn auto_refresh_does_not_run_off_the_browser_screen() {
 #[tokio::test]
 async fn background_refresh_swaps_in_atomically_without_flicker() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -692,7 +692,7 @@ async fn background_refresh_swaps_in_atomically_without_flicker() {
 #[tokio::test]
 async fn changing_filter_clears_list_and_rescans() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -724,7 +724,7 @@ async fn changing_filter_clears_list_and_rescans() {
 #[tokio::test]
 async fn value_loaded_only_applies_to_current_key() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.connections[0].inspector.value_key = Some("k".into());
 
     app.handle_event(AppEvent::ValueLoaded {
@@ -751,7 +751,7 @@ async fn value_loaded_only_applies_to_current_key() {
 #[tokio::test]
 async fn stats_updated_sets_stats() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.handle_event(AppEvent::StatsUpdated {
         id,
         stats: ServerStats {
@@ -892,7 +892,7 @@ fn goto_browser_requires_active_connection() {
 #[tokio::test]
 async fn goto_screens_switch_with_active_connection() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     // Connecting Redis lands on the Browser; Esc steps back to the home area.
     app.apply(Action::Back);
     assert_eq!(app.screen, Screen::Home);
@@ -926,7 +926,7 @@ fn profile_navigation_moves_and_clamps() {
 #[tokio::test]
 async fn browser_navigation_updates_selected_value() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].browser.keys = vec![
         stream_entry("k0", ValueType::String),
         stream_entry("k1", ValueType::String),
@@ -959,7 +959,7 @@ fn view_keys(conn: &Connection) -> Vec<String> {
 
 async fn browser_with_keys(keys: Vec<EntryMeta>) -> (App, Receiver<AppEvent>) {
     let (mut app, rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     app.connections[0].browser.keys = keys;
     app.connections[0].rebuild_view();
@@ -1132,7 +1132,7 @@ async fn browser_resort_keeps_highlight_on_same_key() {
 #[tokio::test]
 async fn apply_filter_builds_scan_patterns() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
 
     app.filter = "foo".into();
     app.apply_filter();
@@ -1183,7 +1183,7 @@ fn start_filter_requires_browser_with_connection() {
 #[tokio::test]
 async fn start_filter_enters_filter_mode() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.filter = "stale".into();
     app.apply(Action::StartFilter);
     assert_eq!(app.mode, InputMode::Filter);
@@ -1225,7 +1225,7 @@ fn submit_subscribe_without_connection_is_noop() {
 #[tokio::test]
 async fn pubsub_anchor_subscribes_to_typed_channel() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     focus_panel(&mut app, PanelTab::PubSub);
     // Type a channel into the always-shown prompt, then Enter.
     for c in "news".chars() {
@@ -1244,7 +1244,7 @@ async fn pubsub_anchor_subscribes_to_typed_channel() {
 #[tokio::test]
 async fn pubsub_anchor_empty_submit_is_noop() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     focus_panel(&mut app, PanelTab::PubSub);
     app.submit_subscribe();
     assert!(app.active_conn().unwrap().subs.is_empty());
@@ -1253,7 +1253,7 @@ async fn pubsub_anchor_empty_submit_is_noop() {
 #[tokio::test]
 async fn tail_anchor_typed_key_opens_stream_tail() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].db = 2;
     focus_panel(&mut app, PanelTab::Tail);
     app.subscribe_buf = "orders".into();
@@ -1273,7 +1273,7 @@ async fn tail_anchor_typed_key_opens_stream_tail() {
 #[tokio::test]
 async fn tail_anchor_empty_submit_tails_selected_key() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].browser.keys = vec![stream_entry("events", ValueType::Stream)];
     app.connections[0].rebuild_view();
     app.connections[0].browser.table.select(Some(1)); // row 0 is the group header
@@ -1287,7 +1287,7 @@ async fn tail_anchor_empty_submit_tails_selected_key() {
 #[tokio::test]
 async fn play_pause_toggles_focused_feed_view() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     assert!(
         !app.active_conn()
@@ -1315,7 +1315,7 @@ async fn play_pause_toggles_focused_feed_view() {
 #[tokio::test]
 async fn play_pause_on_an_anchor_reports_no_feed() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     focus_panel(&mut app, PanelTab::PubSub); // an input anchor, no feed
     app.toggle_play_pause();
     assert!(app.status.as_ref().unwrap().is_error);
@@ -1330,7 +1330,7 @@ async fn play_pause_on_an_anchor_reports_no_feed() {
 #[tokio::test]
 async fn close_stream_tab_returns_focus_to_tail_anchor() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Stream {
         key: "s".into(),
         db: 0,
@@ -1345,7 +1345,7 @@ async fn close_stream_tab_returns_focus_to_tail_anchor() {
 #[tokio::test]
 async fn start_subscribe_opens_tail_in_browser_panel() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     let next_sub = app.next_sub_id;
     app.start_subscribe(SubSpec::Channel("news".into()));
     // Pub/sub tails sit after the five leading anchors (Server Details, Console,
@@ -1367,7 +1367,7 @@ async fn start_subscribe_opens_tail_in_browser_panel() {
 #[tokio::test]
 async fn duplicate_subscribe_focuses_existing_tail() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("news".into()));
     app.start_subscribe(SubSpec::Channel("news".into()));
     assert_eq!(app.active_conn().unwrap().subs.len(), 1, "no duplicate tab");
@@ -1384,7 +1384,7 @@ async fn duplicate_subscribe_focuses_existing_tail() {
 #[tokio::test]
 async fn realtime_event_marks_tail_active_and_buffers() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
     app.handle_event(AppEvent::Realtime {
@@ -1401,7 +1401,7 @@ async fn realtime_event_marks_tail_active_and_buffers() {
 #[tokio::test]
 async fn paused_feed_marks_active_but_drops_events() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
     app.toggle_play_pause(); // pause the focused feed
@@ -1435,7 +1435,7 @@ async fn drain_events_applies_a_whole_burst_in_one_pass() {
     // The render loop drains all queued events before redrawing, so a
     // high-rate feed folds into a single frame. Every queued event must land.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
 
@@ -1464,7 +1464,7 @@ async fn drain_events_on_empty_queue_is_a_noop() {
     // Draining an empty (but open) channel must return at once without blocking
     // and without disturbing state.
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let (_tx, mut rx) = mpsc::channel::<AppEvent>(4);
     app.drain_events(&mut rx);
@@ -1477,7 +1477,7 @@ async fn drain_events_stops_at_a_quit_event() {
     // A quit handled mid-burst stops the drain immediately so the loop exits
     // promptly instead of first chewing through a firehose backlog.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
 
@@ -1515,7 +1515,7 @@ async fn drain_events_bounds_the_batch_under_a_sustained_flood() {
     // capacity), so drain returns even under a flood that never stops.
     const CAP: usize = 256;
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
 
@@ -1562,7 +1562,7 @@ async fn drain_events_bounds_the_batch_under_a_sustained_flood() {
 #[tokio::test]
 async fn sub_started_marks_active() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
     app.handle_event(AppEvent::SubscriptionStarted { id, sub_id });
@@ -1572,7 +1572,7 @@ async fn sub_started_marks_active() {
 #[tokio::test]
 async fn sub_ended_marks_ended_and_stops_recording() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
     app.handle_event(AppEvent::SubscriptionEnded {
@@ -1589,7 +1589,7 @@ async fn sub_ended_marks_ended_and_stops_recording() {
 #[tokio::test]
 async fn recording_update_transitions() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.connections[0].subs[0].sub_id;
     let path = PathBuf::from("/tmp/rec.jsonl");
@@ -1649,7 +1649,7 @@ async fn recording_update_transitions() {
 #[tokio::test]
 async fn toggle_recording_without_tail_errors() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     // No tail open and the Console tab is active, so there is nothing to record.
     app.toggle_recording();
     let status = app.status.as_ref().unwrap();
@@ -1660,7 +1660,7 @@ async fn toggle_recording_without_tail_errors() {
 #[tokio::test]
 async fn toggle_recording_on_ended_tail_errors() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     app.connections[0].subs[0].state = SubState::Ended(None);
     app.toggle_recording();
@@ -1675,7 +1675,7 @@ async fn toggle_recording_on_ended_tail_errors() {
 #[tokio::test]
 async fn toggle_recording_requests_start_on_active_tail() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     app.toggle_recording();
     assert!(app
@@ -1689,7 +1689,7 @@ async fn toggle_recording_requests_start_on_active_tail() {
 #[tokio::test]
 async fn close_active_tab_removes_focused_pubsub_tab() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     app.start_subscribe(SubSpec::Channel("d".into()));
     // "d" is the focused pub/sub tab (the last subscribe focused it).
@@ -1711,7 +1711,7 @@ async fn close_active_tab_removes_focused_pubsub_tab() {
 #[tokio::test]
 async fn close_active_tab_on_an_anchor_is_a_noop() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     // The Console anchor (and the other fixed anchors) cannot be closed.
     focus_panel(&mut app, PanelTab::Console);
@@ -1728,7 +1728,7 @@ async fn close_active_tab_on_an_anchor_is_a_noop() {
 #[tokio::test]
 async fn tab_cycles_through_fixed_anchors_and_tails() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("a".into()));
     // Slots: 0 Details, 1 Console, 2 Monitor, 3 Keyspace, 4 Pub/Sub, 5 Sub(a), 6 Tail.
     assert_eq!(app.screen, Screen::Browser);
@@ -1746,7 +1746,7 @@ async fn tab_cycles_through_fixed_anchors_and_tails() {
 #[tokio::test]
 async fn tab_does_not_cycle_off_the_browser() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("a".into()));
     let before = app.connections[0].panel_tab;
     app.screen = Screen::Home;
@@ -1762,7 +1762,7 @@ async fn tab_does_not_cycle_off_the_browser() {
 #[tokio::test]
 async fn tail_selected_key_starts_stream_tail() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].browser.keys = vec![stream_entry("orders", ValueType::Stream)];
     app.connections[0].rebuild_view();
     // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
@@ -1779,7 +1779,7 @@ async fn tail_selected_key_starts_stream_tail() {
 #[tokio::test]
 async fn tail_selected_key_rejects_non_stream() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].browser.keys = vec![stream_entry("greeting", ValueType::String)];
     app.connections[0].rebuild_view();
     // Always grouped: row 0 is the "(no prefix)" header, the key is row 1.
@@ -1797,7 +1797,7 @@ async fn tail_selected_key_rejects_non_stream() {
 #[tokio::test]
 async fn tail_selected_key_without_selection_errors() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].browser.keys.clear();
     app.tail_selected_key();
     assert!(app
@@ -2145,7 +2145,7 @@ async fn editing_an_amqp_profile_keeps_destinations_and_management_fields() {
 async fn editing_a_live_profile_reconnects_with_the_new_settings() {
     let path = unique_config_path();
     let (mut app, _rx) = build_app(config_with(&["prod"]), path.clone(), None);
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     assert!(app.is_connected("prod"));
     app.screen = Screen::Home;
     app.profile_state.select(Some(0));
@@ -2174,7 +2174,7 @@ async fn editing_a_live_profile_reconnects_with_the_new_settings() {
 #[tokio::test]
 async fn x_disconnects_the_selected_live_profile() {
     let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Home;
     app.profile_state.select(Some(0));
     app.handle_key(ch('x'));
@@ -2249,7 +2249,7 @@ async fn ctrl_d_in_the_edit_form_deletes_after_a_confirming_repeat() {
 async fn deleting_a_live_profile_disconnects_it_first() {
     let path = unique_config_path();
     let (mut app, _rx) = build_app(config_with(&["prod"]), path.clone(), None);
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Home;
     app.profile_state.select(Some(0));
     app.handle_key(ch('e'));
@@ -2644,8 +2644,8 @@ fn a_confirm_prompt_is_exempt_from_the_auto_dismiss_timer() {
 async fn b_jumps_to_the_last_viewed_browser() {
     let (mut app, _rx) = test_app();
     // Two live Redis connections; the most recently focused is "two".
-    connect(&mut app, 1, "one", 16).await;
-    connect(&mut app, 2, "two", 16).await;
+    connect(&mut app, 1, "one").await;
+    connect(&mut app, 2, "two").await;
     let two = app.active_conn().unwrap().id;
     // Step back to the home area, then `b` returns to the last-viewed browser.
     app.apply(Action::Back);
@@ -2662,7 +2662,7 @@ async fn b_jumps_to_the_last_viewed_browser() {
 #[tokio::test]
 async fn b_works_from_the_recordings_tab() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.apply(Action::Back); // Browser -> Connections
     app.apply(Action::NextTab); // -> Recordings tab
     assert_eq!(app.screen, Screen::Recordings);
@@ -2841,7 +2841,7 @@ fn recordings_view_is_cleared_when_there_are_no_recordings() {
 #[tokio::test]
 async fn focusing_monitor_tab_starts_a_monitor_feed() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     // No feed until the tab is focused.
     assert!(app.active_conn().unwrap().monitor_sub().is_none());
     focus_panel(&mut app, PanelTab::Monitor);
@@ -2870,7 +2870,7 @@ async fn monitor_feed_reveals_at_most_the_per_frame_budget() {
     // paced few per frame, so a firehose scrolls steadily instead of dumping a
     // whole batch into view; the surplus is dropped from the on-screen feed.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     let sub_id = live_monitor(&mut app);
 
     app.begin_frame();
@@ -2900,7 +2900,7 @@ async fn begin_frame_refills_the_monitor_reveal_budget() {
     // Each drawn frame refills the budget, so across frames everything within
     // budget reveals — a steady scroll rather than a one-shot cap.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     let sub_id = live_monitor(&mut app);
 
     let frames = 3;
@@ -2930,7 +2930,7 @@ async fn non_monitor_feed_ignores_the_reveal_budget() {
     // The reveal cap is monitor-only: a pub/sub feed stores every event in a
     // single frame regardless of the budget (it is not a firehose by nature).
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.active_conn().unwrap().subs[0].sub_id;
 
@@ -2955,7 +2955,7 @@ async fn feeds_are_not_scrollable() {
     // so every former scroll key is inert on a focused feed and it keeps
     // following from the bottom.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.start_subscribe(SubSpec::Channel("c".into()));
     let sub_id = app.active_conn().unwrap().subs[0].sub_id;
     app.begin_frame();
@@ -2990,7 +2990,7 @@ async fn feeds_are_not_scrollable() {
 #[tokio::test]
 async fn focus_scoped_feeds_start_paused_and_drop_events() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     focus_panel(&mut app, PanelTab::Keyspace);
     let sub_id = app.active_conn().unwrap().keyspace_sub().unwrap().sub_id;
     assert!(app.active_conn().unwrap().keyspace_sub().unwrap().paused);
@@ -3009,7 +3009,7 @@ async fn focus_scoped_feeds_start_paused_and_drop_events() {
 #[tokio::test]
 async fn leaving_monitor_tab_stops_the_feed() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     focus_panel(&mut app, PanelTab::Monitor);
     assert!(app.active_conn().unwrap().monitor_sub().is_some());
     // Cycling away stops and drops the focus-scoped feed.
@@ -3022,7 +3022,7 @@ async fn leaving_monitor_tab_stops_the_feed() {
 #[tokio::test]
 async fn keyspace_feed_uses_active_db() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.connections[0].db = 3;
     focus_panel(&mut app, PanelTab::Keyspace);
     assert_eq!(
@@ -3034,7 +3034,7 @@ async fn keyspace_feed_uses_active_db() {
 #[tokio::test]
 async fn leaving_browser_stops_focus_feeds() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     focus_panel(&mut app, PanelTab::Monitor);
     assert!(app.active_conn().unwrap().monitor_sub().is_some());
     app.apply(Action::Back); // Browser -> Connections
@@ -3048,7 +3048,7 @@ async fn leaving_browser_stops_focus_feeds() {
 #[tokio::test]
 async fn sub_notice_is_stored_on_the_tail() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     // Focusing the Keyspace tab starts its (focus-scoped) feed; a notice for
     // it lands on that tail and is surfaced as an error status.
     focus_panel(&mut app, PanelTab::Keyspace);
@@ -3480,7 +3480,7 @@ async fn console_tab_drives_command_mode() {
         "no connection → no command mode"
     );
 
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     // Console-capable, but not on the Browser screen: still inert.
     app.screen = Screen::Home;
     app.sync_panel_focus();
@@ -3509,7 +3509,7 @@ async fn console_mode_inert_without_console_capability() {
 #[tokio::test]
 async fn console_typing_and_submit_records_command() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     focus_panel(&mut app, PanelTab::Console);
     assert_eq!(app.mode, InputMode::Command);
@@ -3537,7 +3537,7 @@ async fn console_typing_and_submit_records_command() {
 #[tokio::test]
 async fn command_result_appends_entry_and_clears_pending() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.connections[0].console.pending = Some("PING".into());
     app.handle_event(AppEvent::CommandResult {
         id,
@@ -3563,7 +3563,7 @@ async fn command_result_appends_entry_and_clears_pending() {
 #[tokio::test]
 async fn console_empty_submit_is_ignored() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     focus_panel(&mut app, PanelTab::Console);
     app.handle_key(key(KeyCode::Enter)); // empty
@@ -3574,7 +3574,7 @@ async fn console_empty_submit_is_ignored() {
 #[tokio::test]
 async fn clear_console_empties_output() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     app.handle_event(AppEvent::CommandResult {
         id,
         command: "PING".into(),
@@ -3591,7 +3591,7 @@ async fn clear_console_empties_output() {
 #[tokio::test]
 async fn console_is_not_scrollable() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     // The console band always shows the newest output — it no longer scrolls,
     // so the Page keys are inert while it is focused (command mode). ↑↓ and
     // Ctrl-P/N still recall history.
@@ -3613,7 +3613,7 @@ async fn browser_opens_with_keys_focused_so_right_folds_groups() {
     // so a fold keystroke went to the console instead of the group. It now opens
     // with the keys pane focused, where Right folds the selected group.
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -3645,7 +3645,7 @@ async fn browser_opens_with_keys_focused_so_right_folds_groups() {
 #[tokio::test]
 async fn tab_focuses_bottom_then_cycles_subpanels() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     assert!(!app.bottom_focused());
 
@@ -3682,7 +3682,7 @@ async fn tab_focuses_bottom_then_cycles_subpanels() {
 #[tokio::test]
 async fn ctrl_arrows_move_focus_between_panes() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
     assert!(app.bottom_focused(), "Ctrl-↓ focuses the bottom panel");
@@ -3693,7 +3693,7 @@ async fn ctrl_arrows_move_focus_between_panes() {
 #[tokio::test]
 async fn esc_from_the_bottom_panel_leaves_the_browser() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
     assert!(app.bottom_focused());
@@ -3711,7 +3711,7 @@ async fn esc_from_the_bottom_panel_leaves_the_browser() {
 #[tokio::test]
 async fn console_focus_captures_space_without_folding_groups() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -3732,7 +3732,7 @@ async fn console_focus_captures_space_without_folding_groups() {
 #[tokio::test]
 async fn feed_focus_controls_the_feed_not_the_key_list() {
     let (mut app, _rx) = test_app();
-    let id = connect(&mut app, 1, "prod", 16).await;
+    let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
         &mut app,
         id,
@@ -3773,7 +3773,7 @@ async fn feed_focus_controls_the_feed_not_the_key_list() {
 #[tokio::test]
 async fn server_details_tab_scrolls_its_client_list_without_touching_feeds() {
     let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod", 16).await;
+    connect(&mut app, 1, "prod").await;
     app.screen = Screen::Browser;
     // The leftmost tab is Server Details; focusing the bottom lands on it and
     // stays in normal mode (no text prompt, no feed controls).

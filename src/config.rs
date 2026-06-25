@@ -135,20 +135,6 @@ impl ConnectionConfig {
         }
     }
 
-    /// The broker type this profile connects to.
-    ///
-    /// Exercised only by tests now that the headless `record` command (its sole
-    /// caller) is gone; retained for the pending TUI realtime rework.
-    #[allow(dead_code)]
-    pub fn broker_type(&self) -> crate::broker::BrokerType {
-        use crate::broker::BrokerType;
-        match self {
-            ConnectionConfig::Redis(_) => BrokerType::Redis,
-            ConnectionConfig::Amqp(_) => BrokerType::Amqp,
-            ConnectionConfig::Rabbitmq(_) => BrokerType::Rabbitmq,
-        }
-    }
-
     /// The `(secret spec, keyring account)` pair for resolving this connection's
     /// password. The account is the profile name. The per-variant match lives
     /// in exactly one place.

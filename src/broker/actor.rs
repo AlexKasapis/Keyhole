@@ -538,7 +538,6 @@ pub(crate) mod mock {
 
     /// A [`BrokerConnection`] whose every operation is scripted by its fields.
     pub struct MockBroker {
-        pub databases: u32,
         /// Report AMQP 1.0 capabilities (no browse/dashboard/console) on connect.
         pub amqp: bool,
         /// Report RabbitMQ capabilities (same shape as AMQP) on connect.
@@ -559,10 +558,9 @@ pub(crate) mod mock {
     }
 
     impl MockBroker {
-        /// A mock that succeeds at everything, reporting `databases` databases.
-        pub fn new(databases: u32) -> Self {
+        /// A mock that succeeds at everything.
+        pub fn new() -> Self {
             Self {
-                databases,
                 amqp: false,
                 rabbitmq: false,
                 connect_err: None,
@@ -583,6 +581,12 @@ pub(crate) mod mock {
         }
     }
 
+    impl Default for MockBroker {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     #[async_trait]
     impl BrokerConnection for MockBroker {
         async fn connect(&mut self) -> anyhow::Result<Capabilities> {
@@ -590,7 +594,7 @@ pub(crate) mod mock {
                 Some(e) => anyhow::bail!("{e}"),
                 None if self.rabbitmq => Ok(Capabilities::rabbitmq()),
                 None if self.amqp => Ok(Capabilities::amqp()),
-                None => Ok(Capabilities::redis(self.databases)),
+                None => Ok(Capabilities::redis()),
             }
         }
 
@@ -647,7 +651,7 @@ pub(crate) mod mock {
     /// Spawn a default mock-backed connection actor and return its live handle.
     /// The actor's emitted events are drained into the void (callers that use
     /// this assert on `App` state, not actor output), so commands never block.
-    pub async fn handle(id: u32, name: &str, databases: u32) -> ConnHandle {
+    pub async fn handle(id: u32, name: &str) -> ConnHandle {
         let (tx, mut rx) = mpsc::channel::<AppEvent>(256);
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let tracker = TaskTracker::new();
@@ -656,7 +660,7 @@ pub(crate) mod mock {
             ConnId(id),
             name.to_string(),
             "127.0.0.1:6379".to_string(),
-            MockBroker::new(databases).boxed(),
+            MockBroker::new().boxed(),
             tx,
             &tracker,
             &cancel,
@@ -673,7 +677,7 @@ pub(crate) mod mock {
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let tracker = TaskTracker::new();
         let cancel = CancellationToken::new();
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.amqp = true;
         spawn_connection(
             ConnId(id),
@@ -696,7 +700,7 @@ pub(crate) mod mock {
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let tracker = TaskTracker::new();
         let cancel = CancellationToken::new();
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.rabbitmq = true;
         spawn_connection(
             ConnId(id),
@@ -803,7 +807,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_failure_is_surfaced() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.connect_err = Some("refused".into());
         let (tx, _rx) = mpsc::channel::<AppEvent>(8);
         let tracker = TaskTracker::new();
@@ -827,7 +831,7 @@ mod tests {
 
     #[tokio::test]
     async fn browse_emits_keys_page() {
-        let mut mock = MockBroker::new(16);
+        let mut mock = MockBroker::new();
         mock.browse = Some(BrowsePage {
             db: 2,
             entries: vec![EntryMeta {
@@ -863,7 +867,7 @@ mod tests {
 
     #[tokio::test]
     async fn browse_error_emits_conn_error() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.browse_err = Some("boom".into());
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("browse-err")).await;
         handle.send(ConnCommand::Browse(BrowseReq {
@@ -884,7 +888,7 @@ mod tests {
 
     #[tokio::test]
     async fn inspect_emits_value_loaded() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.inspect = ValueView::Str {
             total_bytes: 1,
             shown_bytes: 1,
@@ -906,7 +910,7 @@ mod tests {
 
     #[tokio::test]
     async fn peek_emits_peeked_with_the_messages() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.peek = vec![ev("orders", "m1"), ev("orders", "m2")];
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("peek")).await;
         handle.send(ConnCommand::Peek {
@@ -927,7 +931,7 @@ mod tests {
 
     #[tokio::test]
     async fn peek_error_emits_conn_error() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.peek_err = Some("boom".into());
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("peekerr")).await;
         handle.send(ConnCommand::Peek {
@@ -946,7 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn stats_emits_stats_updated() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.stats = ServerStats {
             redis_version: Some("9.9".into()),
             ..Default::default()
@@ -963,7 +967,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_ok_is_silent() {
-        let (handle, mut rx, _t, _c) = spawn(MockBroker::new(1), temp_dir("ping-ok")).await;
+        let (handle, mut rx, _t, _c) = spawn(MockBroker::new(), temp_dir("ping-ok")).await;
         handle.send(ConnCommand::Ping);
         // A healthy ping emits nothing; the channel should stay quiet.
         let quiet = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
@@ -972,7 +976,7 @@ mod tests {
 
     #[tokio::test]
     async fn ping_failure_emits_disconnected() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.ping_err = Some("dead".into());
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("ping-fail")).await;
         handle.send(ConnCommand::Ping);
@@ -986,7 +990,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_forwards_events_then_ends() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Once(vec![ev("c", "a"), ev("c", "b")]));
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("sub")).await;
         handle.send(ConnCommand::Subscribe {
@@ -1016,7 +1020,7 @@ mod tests {
 
     #[tokio::test]
     async fn subscribe_failure_emits_ended() {
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Fail("nope".into()));
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("sub-fail")).await;
         handle.send(ConnCommand::Subscribe {
@@ -1039,7 +1043,7 @@ mod tests {
     #[tokio::test]
     async fn recording_writes_jsonl_file() {
         let dir = temp_dir("rec");
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Once(vec![
             ev("rec", "a"),
             ev("rec", "b"),
@@ -1094,7 +1098,7 @@ mod tests {
         // open stream and assert a Progress with that exact count arrives.
         let dir = temp_dir("progress");
         let (tx_ev, rx_ev) = mpsc::channel::<BrokerEvent>(64);
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Channel(rx_ev));
         let (handle, mut rx, _t, _c) = spawn(mock, dir.clone()).await;
         handle.send(ConnCommand::Subscribe {
@@ -1124,7 +1128,7 @@ mod tests {
     async fn set_recording_toggles_recorder() {
         let dir = temp_dir("toggle");
         let (tx_ev, rx_ev) = mpsc::channel::<BrokerEvent>(16);
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Channel(rx_ev));
         let (handle, mut rx, _t, _c) = spawn(mock, dir.clone()).await;
         handle.send(ConnCommand::Subscribe {
@@ -1178,7 +1182,7 @@ mod tests {
     #[tokio::test]
     async fn stop_subscription_halts_forwarding() {
         let (tx_ev, rx_ev) = mpsc::channel::<BrokerEvent>(16);
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Channel(rx_ev));
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("stop")).await;
         handle.send(ConnCommand::Subscribe {
@@ -1210,7 +1214,7 @@ mod tests {
         // Cancelling the parent token must stop the actor AND drain its live
         // tails (the `subs.drain()` teardown path), not just the command loop.
         let (tx_ev, rx_ev) = mpsc::channel::<BrokerEvent>(16);
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Channel(rx_ev));
         let (handle, mut rx, _t, cancel) = spawn(mock, temp_dir("pcancel")).await;
         handle.send(ConnCommand::Subscribe {
@@ -1238,7 +1242,7 @@ mod tests {
     async fn subscribe_emits_tail_notice() {
         // A broker advisory (e.g. keyspace notifications disabled) surfaces once
         // as a SubscriptionNotice after the tail starts.
-        let mut mock = MockBroker::new(1);
+        let mut mock = MockBroker::new();
         mock.sub = Some(SubBehavior::Once(Vec::new()));
         mock.notice = Some("notifications disabled".into());
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("notice")).await;
@@ -1259,7 +1263,7 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_stops_the_actor() {
-        let (handle, _rx, tracker, _c) = spawn(MockBroker::new(1), temp_dir("shutdown")).await;
+        let (handle, _rx, tracker, _c) = spawn(MockBroker::new(), temp_dir("shutdown")).await;
         handle.shutdown();
         tracker.close();
         let stopped = tokio::time::timeout(Duration::from_secs(2), tracker.wait()).await;

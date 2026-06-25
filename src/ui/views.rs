@@ -282,10 +282,10 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // Track the scroll offset on `conn.browser.table` so it persists across frames
     // (the window only shifts when the selection would leave it, matching
     // ratatui's own follow behaviour) and so a shrunken view can't strand rows.
-    // This — and the value-pane scroll clamp below — are the *only* state writes
-    // the render path performs: both derive from the rendered area's height,
-    // which the update phase (which has no layout) cannot compute. Everything
-    // else render touches is read-only.
+    // This is one of the few height-dependent scroll writes the render path makes
+    // (see also the value-pane, peek, and recording-viewer clamps): each derives
+    // from the rendered area's height, which the update phase (which has no layout)
+    // cannot compute. Everything else render touches is read-only.
     let offset = visible_offset(conn.browser.table.offset(), selected, viewport, total);
     *conn.browser.table.offset_mut() = offset;
     let end = offset.saturating_add(viewport).min(total);

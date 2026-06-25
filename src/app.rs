@@ -402,10 +402,10 @@ impl App {
     }
 }
 
-/// The screen to show a freshly-focused connection: the key browser when the
-/// broker has one (Redis). Brokers without a browser (AMQP/RabbitMQ) have no
-/// data screen yet — their realtime tails were removed pending a rework — so
-/// they stay on the Connections list, where the row shows them live.
+/// The screen to show a freshly-focused connection: the data browser when the
+/// broker has one — Redis's key browser or AMQP's curated destination browser.
+/// RabbitMQ has no browser yet (its richer realtime screen is deferred), so it
+/// stays on the Connections list, where the row shows it live.
 fn initial_screen(caps: &Capabilities) -> Screen {
     if caps.can_browse {
         Screen::Browser

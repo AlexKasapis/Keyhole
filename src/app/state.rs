@@ -2293,7 +2293,7 @@ mod tests {
     /// `ui::views::browser` (`debug_assert!`) and panics the app on connect.
     #[tokio::test]
     async fn first_page_of_live_scan_builds_view_then_throttles_the_rest() {
-        let handle = crate::broker::actor::mock::handle(1, "prod", 16).await;
+        let handle = crate::broker::actor::mock::handle(1, "prod").await;
         let mut conn = Connection::new(handle);
 
         // Start a live scan: list cleared, empty view.

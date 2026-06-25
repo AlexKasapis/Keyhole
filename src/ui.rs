@@ -538,7 +538,7 @@ mod tests {
         // a dropped one bounces back to Home — so "connected" is what it carries;
         // the full health→glyph mapping is covered by the unit test above.)
         let (mut app, _rx) = test_app();
-        let handle = mock::handle(1, "prod", 16).await;
+        let handle = mock::handle(1, "prod").await;
         app.connections.push(Connection::new(handle));
         app.active = Some(0);
         app.screen = Screen::Browser;
@@ -621,7 +621,7 @@ mod tests {
             CancellationToken::new(),
             None,
         );
-        let handle = mock::handle(1, "prod", 16).await;
+        let handle = mock::handle(1, "prod").await;
         app.connections.push(Connection::new(handle));
         // Home (Connections tab) is the default screen for this test app.
         assert!(app.is_connected("prod"), "the profile reads as connected");
@@ -1247,7 +1247,7 @@ mod tests {
             None,
         );
         // "cache" is connected with server stats; "spare" stays offline.
-        let handle = mock::handle(1, "cache", 16).await;
+        let handle = mock::handle(1, "cache").await;
         let mut conn = Connection::new(handle);
         conn.dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),
@@ -1318,7 +1318,7 @@ mod tests {
 
     async fn app_with_connection() -> (App, Receiver<AppEvent>) {
         let (mut app, rx) = test_app();
-        let handle = mock::handle(1, "prod", 16).await;
+        let handle = mock::handle(1, "prod").await;
         app.connections.push(Connection::new(handle));
         app.active = Some(0);
         (app, rx)
@@ -1984,7 +1984,7 @@ mod tests {
         );
         pin_clock(&mut app);
         // "cache" is live with stats; the AMQP brokers stay offline.
-        let handle = mock::handle(1, "cache", 16).await;
+        let handle = mock::handle(1, "cache").await;
         let mut conn = Connection::new(handle);
         conn.dashboard.stats = Some(ServerStats {
             redis_version: Some("7.4.0".into()),

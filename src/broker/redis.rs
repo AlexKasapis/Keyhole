@@ -73,22 +73,6 @@ impl RedisConnection {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("connection is not established"))
     }
-
-    /// Discover the configured number of databases (defaults to 16).
-    async fn database_count(&self) -> u32 {
-        let Ok(mut conn) = self.manager() else {
-            return 16;
-        };
-        let reply: redis::RedisResult<Vec<String>> = redis::cmd("CONFIG")
-            .arg("GET")
-            .arg("databases")
-            .query_async(&mut conn)
-            .await;
-        reply
-            .ok()
-            .and_then(|kv| kv.get(1).and_then(|v| v.parse::<u32>().ok()))
-            .unwrap_or(16)
-    }
 }
 
 #[async_trait]
@@ -103,8 +87,7 @@ impl BrokerConnection for RedisConnection {
             .map_err(|e| anyhow::anyhow!("connecting to redis: {e}"))?;
         self.conn = Some(manager);
 
-        let databases = self.database_count().await;
-        Ok(Capabilities::redis(databases))
+        Ok(Capabilities::redis())
     }
 
     async fn ping(&mut self) -> anyhow::Result<()> {
@@ -462,8 +445,7 @@ mod integration_tests {
 
     async fn connected() -> RedisConnection {
         let mut conn = RedisConnection::new(test_profile(), None, 64 * 1024);
-        let caps = conn.connect().await.expect("connect to test redis");
-        assert!(caps.databases >= 1);
+        conn.connect().await.expect("connect to test redis");
         conn
     }
 

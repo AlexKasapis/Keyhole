@@ -31,9 +31,7 @@ use time::OffsetDateTime;
 
 /// The AMQP short-string length cap (one length byte), shared by the AMQP 1.0
 /// and RabbitMQ brokers. Names longer than this make the AMQP client panic on
-/// conversion, so source specs are validated against it up front. Referenced
-/// only by the test-exercised spec parser now that headless `record` is gone.
-#[allow(dead_code)]
+/// conversion, so exchange specs are validated against it in [`SubSpec::parse`].
 pub(crate) const AMQP_SHORTSTR_MAX: usize = 255;
 
 /// A process-wide, monotonically increasing sequence for minting unique
@@ -113,11 +111,6 @@ impl BrokerType {
 #[derive(Debug, Clone)]
 pub struct Capabilities {
     pub r#type: BrokerType,
-    /// Number of databases the server reports (Redis `CONFIG GET databases`); 1
-    /// when not applicable. Discovered on connect and surfaced for reference; no
-    /// in-app database switcher consumes it (the `[`/`]` switcher was removed).
-    #[allow(dead_code)]
-    pub databases: u32,
     /// Key/destination browser (Browser screen).
     pub can_browse: bool,
     /// Server statistics (shown as a stats band atop the Browser screen).
@@ -132,11 +125,10 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Redis: full browse + dashboard + console over `databases` databases.
-    pub fn redis(databases: u32) -> Self {
+    /// Redis: full browse + dashboard + console.
+    pub fn redis() -> Self {
         Self {
             r#type: BrokerType::Redis,
-            databases,
             can_browse: true,
             can_dashboard: true,
             can_console: true,
@@ -154,7 +146,6 @@ impl Capabilities {
     pub fn amqp() -> Self {
         Self {
             r#type: BrokerType::Amqp,
-            databases: 1,
             can_browse: true,
             can_dashboard: false,
             can_console: false,
@@ -171,7 +162,6 @@ impl Capabilities {
     pub fn rabbitmq() -> Self {
         Self {
             r#type: BrokerType::Rabbitmq,
-            databases: 1,
             can_browse: false,
             can_dashboard: false,
             can_console: false,
@@ -423,21 +413,18 @@ pub enum SubSpec {
     /// An AMQP 1.0 topic — a non-destructive live subscription (each subscriber
     /// gets its own copy, so observing never steals messages). The primary AMQP tail.
     ///
-    /// `Topic`/`Queue`/`Exchange` are constructed only in tests now that the
-    /// headless `record` source-spec parser is gone; the AMQP/RabbitMQ subscribe
-    /// paths still match on them, so they are retained for the pending TUI
-    /// realtime rework that will re-expose AMQP/RabbitMQ tailing.
-    #[allow(dead_code)]
+    /// `Topic`/`Queue`/`Exchange` are built by [`SubSpec::parse`] from the
+    /// destination add/seed/tail paths (and directly by the `dev` publisher and
+    /// Jolokia discovery); the AMQP/RabbitMQ subscribe paths match on them to open
+    /// the corresponding tail.
     Topic(String),
     /// An AMQP 1.0 queue address.
-    #[allow(dead_code)]
     Queue(String),
     /// A RabbitMQ (AMQP 0.9.1) exchange tap: bind a temporary, exclusive,
     /// auto-delete queue to `exchange` with `binding_key` and consume the
     /// copies routed to it. Non-destructive — real queues and their consumers
     /// never lose a message. `binding_key` defaults to `#` (matches every
     /// routing key on a topic exchange; ignored by a fanout exchange).
-    #[allow(dead_code)]
     Exchange {
         exchange: String,
         binding_key: String,
@@ -450,10 +437,8 @@ impl SubSpec {
     /// for `stream`/`keyspace` targets. `monitor` and `keyspace` may be given
     /// bare (the latter defaults to `default_db`) or as `keyspace:N`.
     ///
-    /// Exercised only by tests now that the headless `record` command (its sole
-    /// caller) is gone; retained as the canonical spec parser for the pending
-    /// TUI realtime rework.
-    #[allow(dead_code)]
+    /// The canonical source-spec parser, driving the destination add/seed/tail
+    /// paths (`app::input`, `app::connection`, `app::realtime::submit_subscribe`).
     pub fn parse(spec: &str, default_db: u32) -> anyhow::Result<Self> {
         let spec = spec.trim();
         // Targetless / database-defaulted forms.
@@ -572,25 +557,6 @@ impl SubSpec {
                     format!("exchange:{exchange}/{binding_key}")
                 }
             }
-        }
-    }
-
-    /// The broker type this source spec targets. Each spec belongs to exactly
-    /// one broker, so a spec typed for the wrong broker can be rejected up front
-    /// (with a clear message) instead of failing later at subscribe time.
-    ///
-    /// Exercised only by tests now that the headless `record` command (its sole
-    /// caller) is gone; retained for the pending TUI realtime rework.
-    #[allow(dead_code)]
-    pub fn supported_type(&self) -> BrokerType {
-        match self {
-            SubSpec::Channel(_)
-            | SubSpec::Pattern(_)
-            | SubSpec::Stream { .. }
-            | SubSpec::Keyspace { .. }
-            | SubSpec::Monitor => BrokerType::Redis,
-            SubSpec::Topic(_) | SubSpec::Queue(_) => BrokerType::Amqp,
-            SubSpec::Exchange { .. } => BrokerType::Rabbitmq,
         }
     }
 }
@@ -936,35 +902,6 @@ mod tests {
     }
 
     #[test]
-    fn sub_spec_supported_kind_maps_each_spec_to_its_broker() {
-        assert_eq!(
-            SubSpec::Channel("c".into()).supported_type(),
-            BrokerType::Redis
-        );
-        assert_eq!(SubSpec::Monitor.supported_type(), BrokerType::Redis);
-        assert_eq!(
-            SubSpec::Keyspace { db: 0 }.supported_type(),
-            BrokerType::Redis
-        );
-        assert_eq!(
-            SubSpec::Topic("t".into()).supported_type(),
-            BrokerType::Amqp
-        );
-        assert_eq!(
-            SubSpec::Queue("q".into()).supported_type(),
-            BrokerType::Amqp
-        );
-        assert_eq!(
-            SubSpec::Exchange {
-                exchange: "e".into(),
-                binding_key: "#".into()
-            }
-            .supported_type(),
-            BrokerType::Rabbitmq
-        );
-    }
-
-    #[test]
     fn amqp_base_url_encodes_creds_and_brackets_ipv6() {
         // Percent-encodes userinfo (shared by both AMQP brokers).
         assert_eq!(
@@ -1000,16 +937,14 @@ mod tests {
 
     #[test]
     fn capabilities_constructors() {
-        let r = Capabilities::redis(16);
+        let r = Capabilities::redis();
         assert_eq!(r.r#type, BrokerType::Redis);
-        assert_eq!(r.databases, 16);
         assert!(r.can_browse && r.can_dashboard && r.can_console);
         // Redis browses via SCAN and tails alongside its console.
         assert!(r.uses_key_scan() && r.can_tail());
 
         let a = Capabilities::amqp();
         assert_eq!(a.r#type, BrokerType::Amqp);
-        assert_eq!(a.databases, 1);
         // AMQP has a (curated) destination browser and tails, but no dashboard
         // or console — and it never runs the Redis SCAN cadence.
         assert!(a.can_browse && a.can_tail());
@@ -1020,7 +955,6 @@ mod tests {
         // RabbitMQ phase, so it stays off the Browser screen.
         let rmq = Capabilities::rabbitmq();
         assert_eq!(rmq.r#type, BrokerType::Rabbitmq);
-        assert_eq!(rmq.databases, 1);
         assert!(!rmq.can_browse && !rmq.can_dashboard && !rmq.can_console);
         assert!(!rmq.uses_key_scan());
     }
