@@ -18,8 +18,9 @@ mod settings;
 
 pub use state::{
     ConnForm, ConnHealth, Connection, Console, ConsoleEntry, DestKind, Destination, InputMode,
-    PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile, ScanStep,
-    Screen, SettingsRow, SettingsState, Status, StatusKind, SubState, Subscription, ViewRow,
+    PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile, RecordingsFocus,
+    ScanStep, Screen, SettingsRow, SettingsState, Status, StatusKind, SubState, Subscription,
+    ViewRow,
 };
 
 use std::path::PathBuf;
@@ -133,6 +134,10 @@ pub struct App {
     pub(crate) mouse_capture: bool,
     pub(crate) recordings: Vec<RecordingFile>,
     pub(crate) recordings_state: ListState,
+    /// Which Recordings-tab pane has the keyboard: the list (left) or the viewer
+    /// (right). Ctrl-←/→ move focus; the focused pane decides what ↑/↓ do (move
+    /// the selection vs. scroll the viewer). Reset to the list on tab entry.
+    pub(crate) recordings_focus: RecordingsFocus,
     /// Loaded view of the selected recording: `(file name, parsed records)`.
     /// Reloaded only when the selection lands on a different file, so it is
     /// cheap to refresh after every navigation step. Unlike a bounded preview,
@@ -216,6 +221,7 @@ impl App {
             mouse_capture: true,
             recordings: Vec::new(),
             recordings_state: ListState::default(),
+            recordings_focus: RecordingsFocus::List,
             recording_view: None,
             recordings_scroll: 0,
             rename_buf: String::new(),

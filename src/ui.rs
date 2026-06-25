@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, ConnHealth, InputMode, PaneFocus, PanelTab, Screen};
+use crate::app::{App, ConnHealth, InputMode, PaneFocus, PanelTab, RecordingsFocus, Screen};
 use crate::broker::BrokerType;
 use crate::theme::Theme;
 
@@ -304,16 +304,30 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 ]
             }
         }
-        Screen::Recordings => owned(&[
-            ("↑↓", "move"),
-            ("r", "rename"),
-            ("dd", "delete"),
-            ("Tab", "connections"),
-            ("b", "browser"),
-            (":", "palette"),
-            ("?", "help"),
-            ("Esc", "back"),
-        ]),
+        // The footer follows the focused pane: the list moves/renames/deletes,
+        // while the viewer scrolls. Ctrl-←/→ swap focus between them.
+        Screen::Recordings => match app.recordings_focus {
+            RecordingsFocus::Viewer => owned(&[
+                ("↑↓", "scroll"),
+                ("Ctrl-←", "list"),
+                ("Tab", "connections"),
+                ("b", "browser"),
+                (":", "palette"),
+                ("?", "help"),
+                ("Esc", "back"),
+            ]),
+            RecordingsFocus::List => owned(&[
+                ("↑↓", "move"),
+                ("r", "rename"),
+                ("dd", "delete"),
+                ("Ctrl-→", "viewer"),
+                ("Tab", "connections"),
+                ("b", "browser"),
+                (":", "palette"),
+                ("?", "help"),
+                ("Esc", "back"),
+            ]),
+        },
     }
 }
 
@@ -787,6 +801,37 @@ mod tests {
                 "{screen:?} footer must not offer a `b browser` jump: {pairs:?}"
             );
         }
+    }
+
+    #[test]
+    fn recordings_footer_follows_the_focused_pane() {
+        // List focused (the default): ↑↓ move the selection and Ctrl-→ steps into
+        // the viewer.
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Recordings;
+        app.recordings_focus = RecordingsFocus::List;
+        let pairs = hint_sections(&app);
+        let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
+        assert!(has("↑↓", "move"), "list footer moves with ↑↓: {pairs:?}");
+        assert!(
+            has("Ctrl-→", "viewer"),
+            "list footer steps right: {pairs:?}"
+        );
+        assert!(!has("↑↓", "scroll"), "the list does not scroll: {pairs:?}");
+
+        // Viewer focused: ↑↓ scroll and Ctrl-← steps back to the list. The
+        // list-only controls (rename / delete) drop off.
+        app.recordings_focus = RecordingsFocus::Viewer;
+        let pairs = hint_sections(&app);
+        let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
+        assert!(
+            has("↑↓", "scroll"),
+            "viewer footer scrolls with ↑↓: {pairs:?}"
+        );
+        assert!(has("Ctrl-←", "list"), "viewer footer steps back: {pairs:?}");
+        assert!(!has("r", "rename"), "viewer footer drops rename: {pairs:?}");
+        // Palette / help / back stay available regardless of focus.
+        assert!(has(":", "palette") && has("?", "help") && has("Esc", "back"));
     }
 
     #[test]

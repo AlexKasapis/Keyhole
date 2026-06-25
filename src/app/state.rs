@@ -140,6 +140,19 @@ pub enum PaneFocus {
     Bottom,
 }
 
+/// Which Recordings-tab pane currently owns the keyboard. The left pane is the
+/// recordings list (↑/↓ move the selection); the right pane is the viewer (↑/↓
+/// scroll the loaded recording). Ctrl-←/→ move focus between them. Reset to
+/// [`RecordingsFocus::List`] on every entry to the tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecordingsFocus {
+    /// The recordings list (left). The default on entering the tab.
+    #[default]
+    List,
+    /// The recording viewer (right).
+    Viewer,
+}
+
 /// One tab in the Browser's bottom panel. The first six are fixed and always
 /// present; [`PanelTab::Sub`] is one tab per live pub/sub or stream tail, placed
 /// immediately after its anchor ([`PanelTab::PubSub`] for pub/sub channels and

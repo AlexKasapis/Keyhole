@@ -34,13 +34,52 @@ impl App {
         }
         match self.screen {
             Screen::Browser => self.handle_browser_key(key),
-            // The home screens have a single navigable list; keys map straight to
-            // actions (the bottom-panel focus model is Browser-only).
-            Screen::Home | Screen::Recordings => {
+            // The Recordings tab is a two-pane browser (list + viewer) with its
+            // own pane-focus model (Ctrl-←/→); see `handle_recordings_key`.
+            Screen::Recordings => self.handle_recordings_key(key),
+            // The Connections home screen has a single navigable list; keys map
+            // straight to actions (the pane-focus model is Browser/Recordings-only).
+            Screen::Home => {
                 if let Some(action) = action::map_key(&key) {
                     self.apply(action);
                 }
             }
+        }
+    }
+
+    /// Dispatch a Recordings-tab key by the focused pane. Ctrl-←/→ move the
+    /// keyboard between the recordings list (left) and the viewer (right). With
+    /// the viewer focused, ↑/↓ and Home/End scroll the loaded recording rather
+    /// than moving the list selection; every other key (and all keys while the
+    /// list is focused) falls through to the shared home-screen keymap, so Tab,
+    /// `b`, `r`, `d`, `:`, `?`, and Esc work regardless of focus.
+    fn handle_recordings_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            // Ctrl-C always quits (even while a text modal would otherwise hold
+            // the keyboard — though none does on this tab).
+            (true, KeyCode::Char('c')) => {
+                self.running = false;
+                return;
+            }
+            // Ctrl-←/→ move focus between the list and the viewer.
+            (true, KeyCode::Left) => return self.set_recordings_focus(RecordingsFocus::List),
+            (true, KeyCode::Right) => return self.set_recordings_focus(RecordingsFocus::Viewer),
+            _ => {}
+        }
+        // With the viewer focused, the arrows scroll it; Home/End jump to the
+        // ends (clamped against the content height when rendered).
+        if self.recordings_focus == RecordingsFocus::Viewer {
+            match (ctrl, key.code) {
+                (false, KeyCode::Up) => return self.scroll_recording(-1),
+                (false, KeyCode::Down) => return self.scroll_recording(1),
+                (false, KeyCode::Home) => return self.scroll_recording(i32::MIN),
+                (false, KeyCode::End) => return self.scroll_recording(i32::MAX),
+                _ => {}
+            }
+        }
+        if let Some(action) = action::map_key(&key) {
+            self.apply(action);
         }
     }
 
@@ -853,6 +892,27 @@ impl App {
         }
     }
 
+    /// Move the keyboard between the Recordings list (left) and the viewer
+    /// (right). Focusing the viewer is a no-op when no recording is loaded (an
+    /// empty tab has nothing to scroll), so the key is harmless there.
+    pub(super) fn set_recordings_focus(&mut self, focus: RecordingsFocus) {
+        if focus == RecordingsFocus::Viewer && self.recording_view.is_none() {
+            return;
+        }
+        self.recordings_focus = focus;
+    }
+
+    /// Scroll the recording viewer by `delta` logical lines (negative = up).
+    /// `i32::MIN`/`i32::MAX` jump to the top/bottom. The offset is clamped
+    /// against the content height when rendered, so an over-scroll rests at the
+    /// end (mirroring [`Self::scroll_details`]).
+    pub(super) fn scroll_recording(&mut self, delta: i32) {
+        // Saturating: Home/End pass i32::MIN/MAX to jump to the ends, which a
+        // plain add would overflow.
+        let next = (self.recordings_scroll as i32).saturating_add(delta);
+        self.recordings_scroll = next.clamp(0, u16::MAX as i32) as u16;
+    }
+
     /// Apply a view-setting mutation to the active connection while on the
     /// Browser, surfacing the status string `f` returns. No-op off the Browser
     /// or without an active connection.
@@ -935,14 +995,18 @@ impl App {
         self.mode = InputMode::Normal;
         self.recordings_delete_armed = false;
         self.rename_buf.clear();
+        // Always land on the list, so ↑/↓ move the selection on entry.
+        self.recordings_focus = RecordingsFocus::List;
         self.screen = Screen::Recordings;
         self.scan_recordings();
     }
 
-    /// Leave the Recordings tab: drop any in-progress rename / delete-arm.
+    /// Leave the Recordings tab: drop any in-progress rename / delete-arm and
+    /// return focus to the list so re-entry starts there.
     fn leave_recordings_tab(&mut self) {
         self.mode = InputMode::Normal;
         self.recordings_delete_armed = false;
         self.rename_buf.clear();
+        self.recordings_focus = RecordingsFocus::List;
     }
 }

@@ -1,6 +1,5 @@
 ---
 source: src/ui.rs
-assertion_line: 1935
 expression: "render_lines(&mut app, 90, 40)"
 ---
 ┌ Connection┌ Help ──────────────────────────────────────────────────────────┐───────────┐
@@ -12,6 +11,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │  Tab / Shift-Tab switch tabs   b jump to last-viewed browser   │           │
 │           │  Connections: Enter connect · a add · e edit/delete · x disconn│           │
 │           │  Recordings: ↑↓ select · r rename · dd delete                  │           │
+│           │    Ctrl-←/→ focus list / viewer · viewer: ↑↓ scroll            │           │
 │           │                                                                │           │
 │           │Browser — focus follows the pane                                │           │
 │           │  the focused pane has a highlighted border; the footer lists it│           │
@@ -40,6 +40,5 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │                                                                │           │
 │           │General                                                         │           │
 │           │  : command palette   a add connection   ? toggle help          │           │
-│           │  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)   │           │
-└───────────└────────────────────────────────────────────────────────────────┘───────────┘
- ↑↓ move · Enter connect · a add · Tab recordings · : palette · ? help · Esc Esc quit
+└───────────│  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)   │───────────┘
+ ↑↓ move · E└────────────────────────────────────────────────────────────────┘sc quit

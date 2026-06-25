@@ -97,6 +97,10 @@ fn ctrl_ch(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+fn ctrl_key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
 fn broker_event(body: &str) -> BrokerEvent {
     BrokerEvent {
         ts: OffsetDateTime::UNIX_EPOCH,
@@ -2676,14 +2680,106 @@ fn recordings_view_follows_the_selection() {
         app.recordings[0].name
     );
     // Moving the selection re-targets the viewer at the newly selected
-    // recording; the viewer itself is not scrollable.
+    // recording and resets its scroll to the top.
+    app.recordings_scroll = 7; // pretend the previous file was scrolled down
     app.apply(Action::Down);
     assert_eq!(
         app.recording_view.as_ref().unwrap().0,
         app.recordings[1].name,
         "the viewer tracks the selected recording"
     );
-    assert_eq!(app.recordings_scroll, 0, "the viewer is not scrollable");
+    assert_eq!(
+        app.recordings_scroll, 0,
+        "a different recording starts at the top"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ctrl_arrows_move_focus_between_the_recordings_list_and_viewer() {
+    let (mut app, _rx) = test_app();
+    let dir = open_recordings(
+        &mut app,
+        "rec-focus",
+        &[("a.jsonl", format!("{}\n", recording_line(0, "a", "s", "p")))],
+    );
+    // The tab opens on the list.
+    assert_eq!(app.recordings_focus, RecordingsFocus::List);
+
+    // Ctrl-→ moves the keyboard into the viewer; Ctrl-← back to the list.
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert_eq!(app.recordings_focus, RecordingsFocus::Viewer);
+    app.handle_key(ctrl_key(KeyCode::Left));
+    assert_eq!(app.recordings_focus, RecordingsFocus::List);
+
+    // Switching away and back resets focus to the list.
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert_eq!(app.recordings_focus, RecordingsFocus::Viewer);
+    app.apply(Action::PrevTab); // -> Connections
+    app.apply(Action::NextTab); // -> Recordings again
+    assert_eq!(
+        app.recordings_focus,
+        RecordingsFocus::List,
+        "re-entering the tab lands on the list"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn arrows_scroll_the_viewer_when_it_is_focused_and_move_the_list_otherwise() {
+    let (mut app, _rx) = test_app();
+    let dir = open_recordings(
+        &mut app,
+        "rec-scroll",
+        &[
+            ("a.jsonl", format!("{}\n", recording_line(0, "a", "s", "p"))),
+            ("b.jsonl", format!("{}\n", recording_line(0, "b", "s", "p"))),
+        ],
+    );
+    let first = app.recordings_state.selected();
+
+    // List focused: ↓ moves the selection, leaving the scroll at the top.
+    app.handle_key(key(KeyCode::Down));
+    assert_ne!(app.recordings_state.selected(), first, "the list moved");
+    assert_eq!(app.recordings_scroll, 0);
+
+    // Viewer focused: ↓/↑ scroll the recording and leave the selection put.
+    app.handle_key(ctrl_key(KeyCode::Right));
+    let sel = app.recordings_state.selected();
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        app.recordings_scroll, 2,
+        "the viewer scrolled down two lines"
+    );
+    assert_eq!(
+        app.recordings_state.selected(),
+        sel,
+        "scrolling the viewer does not move the list selection"
+    );
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.recordings_scroll, 1, "↑ scrolls back up");
+    // Home pins the viewer to the top.
+    app.handle_key(key(KeyCode::Home));
+    assert_eq!(app.recordings_scroll, 0, "Home jumps to the top");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn focusing_the_viewer_is_a_no_op_without_a_loaded_recording() {
+    let (mut app, _rx) = test_app();
+    // An empty recordings dir: there is nothing to scroll, so Ctrl-→ is inert.
+    let dir = open_recordings(&mut app, "rec-empty-focus", &[]);
+    assert!(app.recording_view.is_none());
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert_eq!(
+        app.recordings_focus,
+        RecordingsFocus::List,
+        "no recording loaded -> focus stays on the list"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

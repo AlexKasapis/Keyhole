@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
     App, ConnForm, ConnHealth, Connection, DestKind, InputMode, PaletteCommand, PaneFocus,
-    PanelTab, RecordState, Screen, SettingsRow, SubState, Subscription, ViewRow,
+    PanelTab, RecordState, RecordingsFocus, Screen, SettingsRow, SubState, Subscription, ViewRow,
 };
 use crate::broker::{BrokerEvent, BrokerType, ClientInfo, Payload, ServerStats, Ttl, ValueView};
 use crate::config::AnimationSpeed;
@@ -1068,7 +1068,10 @@ fn recordings_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
 
 /// The left pane: one row per recording. The name column flexes to the pane
 /// width; the size and modified-time columns are fixed-width tails. Borderless.
+/// While the viewer (right) holds the keyboard the selection dims to read as a
+/// parked cursor — the focus cue for this borderless pane.
 fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let list_focused = app.recordings_focus == RecordingsFocus::List;
     // Inner width minus the highlight symbol (2); no border now.
     let inner_w = area.width.saturating_sub(2) as usize;
     const SIZE_COL: usize = 12; // right-aligned size + two trailing spaces
@@ -1089,20 +1092,29 @@ fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
             ]))
         })
         .collect();
+    // Bright selection while the list is focused; a dim, "parked" cursor when
+    // the viewer has the keyboard.
+    let highlight = if list_focused {
+        theme.selected
+    } else {
+        theme.dim
+    };
     let list = List::new(items)
-        .highlight_style(theme.selected)
+        .highlight_style(highlight)
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
 }
 
 /// The right pane: a metadata header plus every record of the selected
-/// recording. A single left border rules it off from the list. Not a bounded
-/// preview — the whole file is loaded, so the record count is exact (it shows
-/// what fits the pane; selecting another recording re-targets the viewer).
+/// recording. A single left border rules it off from the list — it brightens
+/// (the focus cue) while the viewer holds the keyboard. Not a bounded preview —
+/// the whole file is loaded, so the record count is exact (it shows what fits
+/// the pane; selecting another recording re-targets the viewer).
 fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let focused = app.recordings_focus == RecordingsFocus::Viewer;
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(theme.border)
+        .border_style(border_style(theme, focused))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -1871,6 +1883,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Tab / Shift-Tab switch tabs   b jump to last-viewed browser"),
         Line::from("  Connections: Enter connect · a add · e edit/delete · x disconnect"),
         Line::from("  Recordings: ↑↓ select · r rename · dd delete"),
+        Line::from("    Ctrl-←/→ focus list / viewer · viewer: ↑↓ scroll"),
         Line::from(""),
         Line::styled("Browser — focus follows the pane", theme.heading),
         Line::from("  the focused pane has a highlighted border; the footer lists its keys"),
