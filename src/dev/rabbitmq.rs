@@ -81,7 +81,11 @@ pub async fn publish(
             }
         }
     }
-    conn.close(200, "bye".into()).await.ok();
+    // Best-effort close on shutdown; surface (don't swallow) a failure so a
+    // misbehaving broker is at least visible, without failing the command.
+    if let Err(e) = conn.close(200, "bye".into()).await {
+        eprintln!("warning: failed to close the RabbitMQ connection cleanly: {e}");
+    }
     Ok(())
 }
 
@@ -103,6 +107,55 @@ pub async fn publish_once(channel: &Channel, seq: u64) -> anyhow::Result<()> {
         .await
         .context("confirming publish")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    fn profile() -> RabbitmqProfile {
+        RabbitmqProfile {
+            name: "dev".into(),
+            host: "localhost".into(),
+            port: 5672,
+            vhost: "/".into(),
+            username: None,
+            password: None,
+            tls: false,
+        }
+    }
+
+    #[test]
+    fn default_vhost_is_percent_encoded() {
+        assert_eq!(url(&profile(), None), "amqp://localhost:5672/%2F");
+    }
+
+    #[test]
+    fn named_vhost_passes_through() {
+        let p = RabbitmqProfile {
+            vhost: "prod".into(),
+            ..profile()
+        };
+        assert_eq!(url(&p, None), "amqp://localhost:5672/prod");
+    }
+
+    #[test]
+    fn url_percent_encodes_credentials() {
+        let p = RabbitmqProfile {
+            username: Some("u".into()),
+            ..profile()
+        };
+        assert_eq!(url(&p, Some("p@ss")), "amqp://u:p%40ss@localhost:5672/%2F");
+    }
+
+    #[test]
+    fn tls_selects_the_amqps_scheme() {
+        let p = RabbitmqProfile {
+            tls: true,
+            ..profile()
+        };
+        assert!(url(&p, None).starts_with("amqps://"));
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]

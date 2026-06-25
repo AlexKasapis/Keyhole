@@ -1,8 +1,9 @@
 //! Keyhole — a terminal UI for connecting to message/data brokers, browsing
 //! their data, watching realtime activity, and recording live streams to disk.
 //!
-//! With no subcommand this launches the TUI render loop. The only subcommand is
-//! the hidden `gen` packaging helper (man page + shell completions).
+//! With no subcommand this launches the TUI render loop. Two hidden subcommands
+//! exist: `gen` (the packaging helper — man page + shell completions) and `dev`
+//! (headless fake-data publishers/seeders for local brokers).
 
 mod app;
 mod broker;
@@ -43,7 +44,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// redis `MONITOR`) the render loop coalesces every queued event into one frame
 /// and holds repaints to this budget, so a firehose can't drive the renderer at
 /// the event rate and starve input. It sits far below the cost of per-event
-/// redraws yet far above the 250 ms `TICK_PERIOD` that paces stats/animation, so
+/// redraws yet far above the 33 ms `TICK_PERIOD` that paces stats/animation, so
 /// nothing visible is lost. Sparse, interactive events never reach the cap (the
 /// previous frame is already older than the budget), so typing/navigation latency
 /// is unchanged.

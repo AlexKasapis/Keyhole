@@ -1,5 +1,6 @@
-//! Command-line interface. With no subcommand the TUI launches. The only
-//! subcommand is the hidden `gen` packaging helper (man page + completions).
+//! Command-line interface. With no subcommand the TUI launches. Two hidden
+//! subcommands exist: `gen` (packaging — man page + completions) and `dev`
+//! (local fake-data publishers/seeders).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -323,14 +324,20 @@ mod tests {
         // The roff `.TH` title header and the binary name must be present.
         assert!(man.contains(".TH"), "missing roff title header");
         assert!(man.contains("keyhole"), "man page omits the binary name");
-        // The subcommands surface; the hidden `gen` command must not leak.
+        // The `about` tagline renders into the description (there are no visible
+        // subcommands — both `gen` and `dev` are hidden — so this is the body).
         assert!(
-            man.contains("record"),
-            "man page omits the record subcommand"
+            man.contains("browse data"),
+            "man page omits the about tagline"
         );
+        // Both subcommands are hidden maintainer/dev helpers; neither may leak.
         assert!(
             !man.contains("\\fIgen\\fR") && !man.contains("gen man"),
             "hidden gen subcommand leaked into the man page"
+        );
+        assert!(
+            !man.contains("\\fIdev\\fR"),
+            "hidden dev subcommand leaked into the man page"
         );
     }
 

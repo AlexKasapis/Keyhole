@@ -216,6 +216,63 @@ pub async fn publish_once(
     Ok(())
 }
 
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    fn profile() -> RedisProfile {
+        RedisProfile {
+            name: "dev".into(),
+            host: "localhost".into(),
+            port: 6379,
+            db: 0,
+            username: None,
+            password: None,
+            tls: false,
+        }
+    }
+
+    #[test]
+    fn plain_url_has_no_userinfo() {
+        assert_eq!(url(&profile(), None), "redis://localhost:6379/0");
+    }
+
+    #[test]
+    fn url_includes_the_selected_db() {
+        let p = RedisProfile { db: 3, ..profile() };
+        assert_eq!(url(&p, None), "redis://localhost:6379/3");
+    }
+
+    #[test]
+    fn url_percent_encodes_credentials() {
+        let p = RedisProfile {
+            username: Some("u".into()),
+            ..profile()
+        };
+        assert_eq!(
+            url(&p, Some("p@ss/word")),
+            "redis://u:p%40ss%2Fword@localhost:6379/0"
+        );
+    }
+
+    #[test]
+    fn url_with_username_only() {
+        let p = RedisProfile {
+            username: Some("admin".into()),
+            ..profile()
+        };
+        assert_eq!(url(&p, None), "redis://admin@localhost:6379/0");
+    }
+
+    #[test]
+    fn url_with_password_only() {
+        assert_eq!(
+            url(&profile(), Some("secret")),
+            "redis://:secret@localhost:6379/0"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
     //! Run against a dockerized Redis: `just test-int`, or
