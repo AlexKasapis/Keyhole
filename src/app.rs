@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::app::action::Action;
-use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle};
+use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle, SpawnParams};
 use crate::broker::factory::connection_for;
 use crate::broker::{
     BrokerEvent, BrokerType, BrowsePage, Capabilities, ConnId, InspectReq, ServerStats, SubSpec,
@@ -161,7 +161,6 @@ pub struct App {
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
         config_path: PathBuf,

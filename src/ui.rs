@@ -1377,7 +1377,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a live Redis (just test-int)"]
     async fn browser_survives_mid_scan_render_on_real_redis() {
-        use crate::broker::actor::spawn_connection;
+        use crate::broker::actor::{spawn_connection, SpawnParams};
         use crate::broker::redis::RedisConnection;
         use crate::broker::ConnId;
         use crate::config::RedisProfile;
@@ -1425,16 +1425,16 @@ mod tests {
             password: None,
             tls: false,
         };
-        let handle = spawn_connection(
-            ConnId(1),
-            "it-render".into(),
-            format!("127.0.0.1:{port}"),
-            Box::new(RedisConnection::new(profile, None, 64 * 1024)),
-            tx,
-            &tracker,
-            &cancel,
-            std::env::temp_dir(),
-        )
+        let handle = spawn_connection(SpawnParams {
+            id: ConnId(1),
+            name: "it-render".into(),
+            addr: format!("127.0.0.1:{port}"),
+            conn: Box::new(RedisConnection::new(profile, None, 64 * 1024)),
+            events: tx,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: std::env::temp_dir(),
+        })
         .await
         .expect("connect to test redis");
 

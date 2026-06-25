@@ -113,19 +113,34 @@ struct SubEntry {
     cancel: CancellationToken,
 }
 
+/// The inputs to [`spawn_connection`]: the connection's identity and endpoint,
+/// the already-built broker client, the UI event channel, and the tracker /
+/// cancel handles used to spawn cancellable tasks. `tracker` and `parent_cancel`
+/// are borrowed (the caller keeps ownership); everything else is moved in.
+pub(crate) struct SpawnParams<'a> {
+    pub(crate) id: ConnId,
+    pub(crate) name: String,
+    pub(crate) addr: String,
+    pub(crate) conn: Box<dyn BrokerConnection>,
+    pub(crate) events: Sender<AppEvent>,
+    pub(crate) tracker: &'a TaskTracker,
+    pub(crate) parent_cancel: &'a CancellationToken,
+    pub(crate) recordings_dir: PathBuf,
+}
+
 /// Connect, then spawn the actor loop. Returns the handle once connected so the
 /// caller learns capabilities (and connection errors) synchronously.
-#[allow(clippy::too_many_arguments)]
-pub async fn spawn_connection(
-    id: ConnId,
-    name: String,
-    addr: String,
-    mut conn: Box<dyn BrokerConnection>,
-    events: Sender<AppEvent>,
-    tracker: &TaskTracker,
-    parent_cancel: &CancellationToken,
-    recordings_dir: PathBuf,
-) -> anyhow::Result<ConnHandle> {
+pub(crate) async fn spawn_connection(p: SpawnParams<'_>) -> anyhow::Result<ConnHandle> {
+    let SpawnParams {
+        id,
+        name,
+        addr,
+        mut conn,
+        events,
+        tracker,
+        parent_cancel,
+        recordings_dir,
+    } = p;
     let caps = conn.connect().await?;
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<ConnCommand>(64);
     let cancel = parent_cancel.child_token();
@@ -141,12 +156,16 @@ pub async fn spawn_connection(
                 _ = task_cancel.cancelled() => break,
                 maybe_cmd = cmd_rx.recv() => match maybe_cmd {
                     Some(ConnCommand::Subscribe { sub_id, spec, record }) => {
-                        start_subscription(
-                            id, sub_id, spec, record, conn.as_mut(),
-                            &actor_events, &tail_tracker, &task_cancel,
-                            &recordings_dir, &conn_name, &mut subs,
-                        )
-                        .await;
+                        let ctx = SubscribeCtx {
+                            id,
+                            events: &actor_events,
+                            tracker: &tail_tracker,
+                            conn_cancel: &task_cancel,
+                            recordings_dir: &recordings_dir,
+                            connection: &conn_name,
+                        };
+                        start_subscription(&ctx, sub_id, spec, record, conn.as_mut(), &mut subs)
+                            .await;
                     }
                     Some(ConnCommand::SetRecording { sub_id, on }) => {
                         if let Some(entry) = subs.get(&sub_id) {
@@ -180,20 +199,27 @@ pub async fn spawn_connection(
     })
 }
 
+/// The per-actor context every subscription needs: the connection's identity,
+/// the UI event channel, the task tracker, the actor's cancel token, where
+/// recordings go, and the connection name. Borrowed from the actor loop's
+/// owned state, so it doesn't change across the actor's lifetime.
+struct SubscribeCtx<'a> {
+    id: ConnId,
+    events: &'a Sender<AppEvent>,
+    tracker: &'a TaskTracker,
+    conn_cancel: &'a CancellationToken,
+    recordings_dir: &'a std::path::Path,
+    connection: &'a str,
+}
+
 /// Open a tail for `spec` and register it. On failure, report it and register
 /// nothing so the UI can mark the tab ended.
-#[allow(clippy::too_many_arguments)]
 async fn start_subscription(
-    id: ConnId,
+    ctx: &SubscribeCtx<'_>,
     sub_id: u32,
     spec: SubSpec,
     record: bool,
     conn: &mut dyn BrokerConnection,
-    events: &Sender<AppEvent>,
-    tracker: &TaskTracker,
-    conn_cancel: &CancellationToken,
-    recordings_dir: &std::path::Path,
-    connection: &str,
     subs: &mut HashMap<u32, SubEntry>,
 ) {
     match conn.subscribe(spec.clone()).await {
@@ -203,30 +229,38 @@ async fn start_subscription(
             // never written to the recording.
             let notice = conn.tail_notice(&spec).await;
             let (record_tx, record_rx) = watch::channel(record);
-            let cancel = conn_cancel.child_token();
+            let cancel = ctx.conn_cancel.child_token();
             let params = TailParams {
-                id,
+                id: ctx.id,
                 sub_id,
                 spec,
-                events: events.clone(),
-                recordings_dir: recordings_dir.to_path_buf(),
-                connection: connection.to_string(),
+                events: ctx.events.clone(),
+                recordings_dir: ctx.recordings_dir.to_path_buf(),
+                connection: ctx.connection.to_string(),
             };
-            tracker.spawn(run_tail(params, stream, record_rx, cancel.clone()));
+            ctx.tracker
+                .spawn(run_tail(params, stream, record_rx, cancel.clone()));
             subs.insert(sub_id, SubEntry { record_tx, cancel });
-            let _ = events
-                .send(AppEvent::SubscriptionStarted { id, sub_id })
+            let _ = ctx
+                .events
+                .send(AppEvent::SubscriptionStarted { id: ctx.id, sub_id })
                 .await;
             if let Some(notice) = notice {
-                let _ = events
-                    .send(AppEvent::SubscriptionNotice { id, sub_id, notice })
+                let _ = ctx
+                    .events
+                    .send(AppEvent::SubscriptionNotice {
+                        id: ctx.id,
+                        sub_id,
+                        notice,
+                    })
                     .await;
             }
         }
         Err(e) => {
-            let _ = events
+            let _ = ctx
+                .events
                 .send(AppEvent::SubscriptionEnded {
-                    id,
+                    id: ctx.id,
                     sub_id,
                     // `{:#}` renders the full cause chain (e.g. a RabbitMQ tap's
                     // context plus the broker's AMQP reply code), not just the
@@ -519,7 +553,7 @@ pub(crate) mod mock {
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::TaskTracker;
 
-    use super::{spawn_connection, ConnHandle};
+    use super::{spawn_connection, ConnHandle, SpawnParams};
     use crate::broker::{
         BrokerConnection, BrokerEvent, BrokerEventStream, BrowsePage, BrowseReq, Capabilities,
         ConnId, InspectReq, PeekReq, ServerStats, SubSpec, ValueView,
@@ -656,16 +690,16 @@ pub(crate) mod mock {
         tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let tracker = TaskTracker::new();
         let cancel = CancellationToken::new();
-        spawn_connection(
-            ConnId(id),
-            name.to_string(),
-            "127.0.0.1:6379".to_string(),
-            MockBroker::new().boxed(),
-            tx,
-            &tracker,
-            &cancel,
-            std::env::temp_dir(),
-        )
+        spawn_connection(SpawnParams {
+            id: ConnId(id),
+            name: name.to_string(),
+            addr: "127.0.0.1:6379".to_string(),
+            conn: MockBroker::new().boxed(),
+            events: tx,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: std::env::temp_dir(),
+        })
         .await
         .expect("mock connect")
     }
@@ -679,16 +713,16 @@ pub(crate) mod mock {
         let cancel = CancellationToken::new();
         let mut mock = MockBroker::new();
         mock.amqp = true;
-        spawn_connection(
-            ConnId(id),
-            name.to_string(),
-            "127.0.0.1:5672".to_string(),
-            mock.boxed(),
-            tx,
-            &tracker,
-            &cancel,
-            std::env::temp_dir(),
-        )
+        spawn_connection(SpawnParams {
+            id: ConnId(id),
+            name: name.to_string(),
+            addr: "127.0.0.1:5672".to_string(),
+            conn: mock.boxed(),
+            events: tx,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: std::env::temp_dir(),
+        })
         .await
         .expect("mock amqp connect")
     }
@@ -702,16 +736,16 @@ pub(crate) mod mock {
         let cancel = CancellationToken::new();
         let mut mock = MockBroker::new();
         mock.rabbitmq = true;
-        spawn_connection(
-            ConnId(id),
-            name.to_string(),
-            "127.0.0.1:5672".to_string(),
-            mock.boxed(),
-            tx,
-            &tracker,
-            &cancel,
-            std::env::temp_dir(),
-        )
+        spawn_connection(SpawnParams {
+            id: ConnId(id),
+            name: name.to_string(),
+            addr: "127.0.0.1:5672".to_string(),
+            conn: mock.boxed(),
+            events: tx,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: std::env::temp_dir(),
+        })
         .await
         .expect("mock rabbitmq connect")
     }
@@ -762,16 +796,16 @@ mod tests {
         let (tx, rx) = mpsc::channel::<AppEvent>(256);
         let tracker = TaskTracker::new();
         let cancel = CancellationToken::new();
-        let handle = spawn_connection(
-            ConnId(1),
-            "c".into(),
-            "127.0.0.1:6379".into(),
-            mock.boxed(),
-            tx,
-            &tracker,
-            &cancel,
-            dir,
-        )
+        let handle = spawn_connection(SpawnParams {
+            id: ConnId(1),
+            name: "c".into(),
+            addr: "127.0.0.1:6379".into(),
+            conn: mock.boxed(),
+            events: tx,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: dir,
+        })
         .await
         .expect("connect");
         (handle, rx, tracker, cancel)
@@ -812,16 +846,16 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<AppEvent>(8);
         let tracker = TaskTracker::new();
         let cancel = CancellationToken::new();
-        let result = spawn_connection(
-            ConnId(1),
-            "c".into(),
-            "127.0.0.1:6379".into(),
-            mock.boxed(),
-            tx,
-            &tracker,
-            &cancel,
-            std::env::temp_dir(),
-        )
+        let result = spawn_connection(SpawnParams {
+            id: ConnId(1),
+            name: "c".into(),
+            addr: "127.0.0.1:6379".into(),
+            conn: mock.boxed(),
+            events: tx,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: std::env::temp_dir(),
+        })
         .await;
         assert!(
             result.is_err(),

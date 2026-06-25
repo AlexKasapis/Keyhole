@@ -75,16 +75,16 @@ impl App {
                     return;
                 }
             };
-            match spawn_connection(
+            match spawn_connection(SpawnParams {
                 id,
                 name,
                 addr,
                 conn,
-                events.clone(),
-                &tracker,
-                &cancel,
+                events: events.clone(),
+                tracker: &tracker,
+                parent_cancel: &cancel,
                 recordings_dir,
-            )
+            })
             .await
             {
                 Ok(handle) => {
