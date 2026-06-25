@@ -16,7 +16,7 @@ Please report security issues **privately** — do not open a public issue.
 
 - Preferred: GitHub [private vulnerability reporting][advisory]
   (the repo's *Security → Report a vulnerability*).
-- Or email: apkasapis@gmail.com.
+- Or email: security@keyholetui.com.
 
 Expect an initial response within a few days. Once a fix is ready it is released
 and a public advisory is published.
