@@ -3324,19 +3324,14 @@ async fn console_typing_and_submit_records_command() {
     assert_eq!(console.history, vec!["GET k"]);
     assert!(console.input.is_empty(), "input cleared after submit");
     assert_eq!(app.mode, InputMode::Command, "stays in command mode");
-    // Esc is inert while the console is focused now (focus moves are Ctrl-↑↓ /
-    // Tab); Ctrl-↑ steps back to the keys pane, and Esc from there leaves.
+    // Esc is the global back even with the console focused: it leaves the
+    // Browser straight to the home area (no intermediate step to the keys pane).
     app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Browser);
-    assert!(
-        app.bottom_focused(),
-        "Esc does not move focus off the console"
+    assert_eq!(
+        app.screen,
+        Screen::Home,
+        "Esc from the console leaves the Browser"
     );
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
-    assert!(!app.bottom_focused(), "Ctrl-↑ returns to the keys pane");
-    assert_eq!(app.mode, InputMode::Normal);
-    app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Home);
     assert_eq!(app.mode, InputMode::Normal);
 }
 
@@ -3497,25 +3492,21 @@ async fn ctrl_arrows_move_focus_between_panes() {
 }
 
 #[tokio::test]
-async fn esc_is_inert_on_the_bottom_panel_then_leaves_from_the_keys_pane() {
+async fn esc_from_the_bottom_panel_leaves_the_browser() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod", 16).await;
     app.screen = Screen::Browser;
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
     assert!(app.bottom_focused());
-    // Esc no longer steps focus back to the keys pane — it is inert while a
-    // bottom subpanel is focused (focus moves are Ctrl-↑↓ / Tab now).
+    // Esc is the global back from any focus: a single press leaves the Browser
+    // straight to the home area, without an intermediate step to the keys pane.
     app.handle_key(key(KeyCode::Esc));
-    assert!(
-        app.bottom_focused(),
-        "Esc does not move focus off the bottom panel"
+    assert_eq!(
+        app.screen,
+        Screen::Home,
+        "Esc from the bottom panel leaves the Browser in one press"
     );
-    assert_eq!(app.screen, Screen::Browser, "still on the Browser");
-    // Ctrl-↑ returns to the keys pane; from there Esc is the global back.
-    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
-    assert!(!app.bottom_focused());
-    app.handle_key(key(KeyCode::Esc));
-    assert_eq!(app.screen, Screen::Home, "Esc from the keys pane leaves");
+    assert_eq!(app.mode, InputMode::Normal);
 }
 
 #[tokio::test]

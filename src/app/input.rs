@@ -114,15 +114,16 @@ impl App {
                 self.focus_or_cycle_panel(-1);
                 return;
             }
-            // Esc leaves the Browser (the global "back"). While a bottom subpanel
-            // is focused it is inert — focus moves are Ctrl-↑↓ / Tab now, so Esc
-            // no longer steps back to the keys pane.
+            // Esc is the global "back": from any Browser focus it steps out
+            // toward Connections. The keys pane, the AMQP destination list, and
+            // a focused bottom subpanel (Console / Pub-Sub / Tail / feed) all
+            // leave the Browser here — focus moves are Ctrl-↑↓ / Tab. Only the
+            // AMQP message pane handles Esc itself, walking back through its
+            // detail view and message list before it too leaves.
             (false, KeyCode::Esc) => {
                 if self.peek_focused() {
-                    // The AMQP message pane: Esc closes the detail view, then
-                    // steps back to the destination list — not out of the Browser.
                     self.handle_message_key(key);
-                } else if !self.bottom_focused() {
+                } else {
                     self.apply(Action::Back);
                 }
                 return;

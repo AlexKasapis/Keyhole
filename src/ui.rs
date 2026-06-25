@@ -108,7 +108,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
                 Span::styled(
-                    format!("   {hint}   Enter start · Ctrl-↑↓ Tab nav"),
+                    format!("   {hint}   Enter start · Ctrl-↑↓ Tab nav · Esc back"),
                     theme.dim,
                 ),
             ]);
@@ -219,19 +219,23 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 // The footer follows the focused bottom tab. A shared focus-nav
                 // hint leads every tab (Ctrl-↑↓ moves between the keys pane and
                 // the bottom subpanel, Tab cycles the tabs); nothing pages, and
-                // Esc no longer steps back to the keys pane.
+                // Esc is the global back — it leaves the Browser from here too.
                 match app.active_conn().map(|c| c.active_panel()) {
                     Some(PanelTab::Console) => owned(&[
                         ("Enter", "run"),
                         ("↑↓ / Ctrl-P/N", "history"),
                         ("Ctrl-L", "clear"),
                         ("Ctrl-↑↓ Tab", "nav"),
+                        ("Esc", "back"),
                     ]),
                     // The Server Details tab is a passive overview: ↑↓ scroll its
                     // client list — there is no feed to play/pause, record, close.
-                    Some(PanelTab::ServerDetails) => {
-                        owned(&[("Ctrl-↑↓ Tab", "nav"), ("↑↓", "scroll"), ("?", "help")])
-                    }
+                    Some(PanelTab::ServerDetails) => owned(&[
+                        ("Ctrl-↑↓ Tab", "nav"),
+                        ("↑↓", "scroll"),
+                        ("?", "help"),
+                        ("Esc", "back"),
+                    ]),
                     // A live-feed tab (Monitor / Keyspace / a pub-sub or stream
                     // tail): it follows newest (not scrollable). p/r play-pause /
                     // record it; only a runtime tail (`Sub`) can be closed with x.
@@ -245,6 +249,7 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                             pairs.push(("x", "close".to_string()));
                         }
                         pairs.push(("?", "help".to_string()));
+                        pairs.push(("Esc", "back".to_string()));
                         pairs
                     }
                 }
@@ -903,14 +908,19 @@ mod tests {
             pairs.iter().any(|(k, a)| *k == key && a == action)
         };
 
-        // Every bottom tab leads with the combined focus-nav hint, and none of
-        // them page or advertise the old Esc-to-keys step.
+        // Every bottom tab leads with the combined focus-nav hint, advertises
+        // Esc as the global back, and none of them page or carry the old
+        // Esc-to-keys step (Esc leaves the Browser now, it doesn't move focus).
         for tab in [0usize, 1, 2, 5] {
             app.connections[0].panel_tab = tab;
             let pairs = hint_sections(&app);
             assert!(
                 has(&pairs, "Ctrl-↑↓ Tab", "nav"),
                 "tab {tab} footer carries the nav hint: {pairs:?}"
+            );
+            assert!(
+                has(&pairs, "Esc", "back"),
+                "tab {tab} footer advertises Esc back: {pairs:?}"
             );
             assert!(
                 !pairs.iter().any(|(k, _)| k.contains("PgUp")),
