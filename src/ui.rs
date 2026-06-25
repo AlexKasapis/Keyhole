@@ -357,7 +357,7 @@ fn hint_line(app: &App, theme: &Theme) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::app::{
-        ConnForm, Connection, RecordState, Status, StatusKind, SubState, Subscription,
+        ConnForm, Connection, RecordState, ScanPhase, Status, StatusKind, SubState, Subscription,
     };
     use crate::broker::actor::mock;
     use crate::broker::{
@@ -1459,10 +1459,10 @@ mod tests {
             if is_page {
                 pages += 1;
                 let b = &app.connections[0].browser;
-                if b.scanning && !b.keys.is_empty() {
+                if b.phase == ScanPhase::InProgress && !b.keys.is_empty() {
                     rendered_mid_scan = true;
                 }
-                if b.complete {
+                if b.phase == ScanPhase::Complete {
                     break;
                 }
             }
@@ -2036,7 +2036,7 @@ mod tests {
             entry("session:abc", ValueType::Hash),
         ];
         app.connections[0].rebuild_view();
-        app.connections[0].browser.complete = true;
+        app.connections[0].browser.phase = ScanPhase::Complete;
         app.connections[0].browser.table.select(Some(0));
         // Show the Console tab (Server Details is the leftmost/default tab now).
         app.connections[0].panel_tab = 1;
@@ -2108,7 +2108,7 @@ mod tests {
             entry("session:abc", ValueType::Hash),
         ];
         app.connections[0].rebuild_view();
-        app.connections[0].browser.complete = true;
+        app.connections[0].browser.phase = ScanPhase::Complete;
         // Rows: [session hdr, session:abc, user hdr, user:1] — select the user:1
         // key (row 3) so the value pane shows its string value, not the prompt.
         app.connections[0].browser.table.select(Some(3));
@@ -2147,7 +2147,7 @@ mod tests {
         app.screen = Screen::Browser;
         app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
         app.connections[0].rebuild_view();
-        app.connections[0].browser.complete = true;
+        app.connections[0].browser.phase = ScanPhase::Complete;
         app.connections[0].browser.table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Keyspace { db: 0 }, 100);
         sub.state = SubState::Active;
@@ -2171,7 +2171,7 @@ mod tests {
         app.screen = Screen::Browser;
         app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
         app.connections[0].rebuild_view();
-        app.connections[0].browser.complete = true;
+        app.connections[0].browser.phase = ScanPhase::Complete;
         app.connections[0].browser.table.select(Some(0));
         let mut sub = Subscription::new(1, SubSpec::Channel("orders".into()), 100);
         sub.state = SubState::Active;
@@ -2211,7 +2211,7 @@ mod tests {
         app.screen = Screen::Browser;
         app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
         app.connections[0].rebuild_view();
-        app.connections[0].browser.complete = true;
+        app.connections[0].browser.phase = ScanPhase::Complete;
         app.connections[0].browser.table.select(Some(0));
 
         let client = |id, name: &str, addr: &str, idle, cmd: &str| ClientInfo {

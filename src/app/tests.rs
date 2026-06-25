@@ -357,8 +357,11 @@ async fn keys_page_extends_and_tracks_cursor() {
     let conn = app.active_conn().unwrap();
     assert_eq!(conn.browser.keys.len(), 1);
     assert_eq!(conn.browser.next_cursor, 5);
-    assert!(!conn.browser.complete);
-    assert!(conn.browser.scanning, "scan still in progress mid-page");
+    assert!(conn.browser.phase != ScanPhase::Complete);
+    assert!(
+        conn.browser.phase == ScanPhase::InProgress,
+        "scan still in progress mid-page"
+    );
 
     app.handle_event(AppEvent::KeysPage {
         id,
@@ -371,8 +374,11 @@ async fn keys_page_extends_and_tracks_cursor() {
     });
     let conn = app.active_conn().unwrap();
     assert_eq!(conn.browser.keys.len(), 2, "second page appended");
-    assert!(conn.browser.complete, "cursor 0 marks the scan complete");
-    assert!(!conn.browser.scanning, "scan finished");
+    assert!(
+        conn.browser.phase == ScanPhase::Complete,
+        "cursor 0 marks the scan complete"
+    );
+    assert!(conn.browser.phase != ScanPhase::InProgress, "scan finished");
 }
 
 #[tokio::test]
@@ -433,8 +439,8 @@ fn finish_initial_scan(app: &mut App, id: ConnId, entries: Vec<EntryMeta>) {
             epoch,
         },
     });
-    assert!(app.active_conn().unwrap().browser.complete);
-    assert!(!app.active_conn().unwrap().browser.scanning);
+    assert!(app.active_conn().unwrap().browser.phase == ScanPhase::Complete);
+    assert!(app.active_conn().unwrap().browser.phase != ScanPhase::InProgress);
 }
 
 #[tokio::test]
@@ -550,7 +556,7 @@ async fn navigation_does_not_trigger_a_scan() {
         "navigation must not start a scan"
     );
     assert!(
-        !conn.browser.scanning,
+        conn.browser.phase != ScanPhase::InProgress,
         "navigation must not leave a scan running"
     );
 }
@@ -573,7 +579,10 @@ async fn tick_auto_refreshes_keys_independently_of_navigation() {
         epoch_before + 1,
         "the tick started a new scan"
     );
-    assert!(conn.browser.scanning, "background scan in progress");
+    assert!(
+        conn.browser.phase == ScanPhase::InProgress,
+        "background scan in progress"
+    );
     assert!(
         !conn.browser.scan_live,
         "auto-refresh stages into scan_buf rather than clearing the list"
@@ -639,7 +648,7 @@ async fn background_refresh_swaps_in_atomically_without_flicker() {
     app.browse_refresh_ticks = 1;
     app.on_tick();
     let refresh_epoch = app.active_conn().unwrap().browser.scan_epoch;
-    assert!(app.active_conn().unwrap().browser.scanning);
+    assert!(app.active_conn().unwrap().browser.phase == ScanPhase::InProgress);
 
     // The first page of the refresh arrives, but the scan is not finished:
     // the visible list must stay exactly as it was — no empty frame, no
@@ -686,7 +695,7 @@ async fn background_refresh_swaps_in_atomically_without_flicker() {
         ["new1", "new2"],
         "fresh set swapped in atomically on completion"
     );
-    assert!(conn.browser.complete);
+    assert!(conn.browser.phase == ScanPhase::Complete);
 }
 
 #[tokio::test]
@@ -709,7 +718,10 @@ async fn changing_filter_clears_list_and_rescans() {
         conn.browser.keys.is_empty(),
         "foreground rescan clears the previous result immediately"
     );
-    assert!(conn.browser.scanning, "a fresh scan is underway");
+    assert!(
+        conn.browser.phase == ScanPhase::InProgress,
+        "a fresh scan is underway"
+    );
     assert!(
         conn.browser.scan_live,
         "filter change is a live (foreground) scan"
@@ -2457,12 +2469,18 @@ fn double_d_deletes_the_selected_recording() {
 
     // A single `d` only arms the confirmation — nothing is deleted yet.
     app.apply(Action::DeleteRecording);
-    assert!(app.recordings_delete_armed, "first d arms the confirmation");
+    assert!(
+        app.confirm == ConfirmState::DeleteRecording,
+        "first d arms the confirmation"
+    );
     assert_eq!(app.recordings.len(), 2, "nothing deleted on the first d");
 
     // A second consecutive `d` deletes and rescans.
     app.apply(Action::DeleteRecording);
-    assert!(!app.recordings_delete_armed, "delete disarms after firing");
+    assert!(
+        app.confirm != ConfirmState::DeleteRecording,
+        "delete disarms after firing"
+    );
     assert!(!dir.join(&target).exists(), "the file is removed");
     assert_eq!(app.recordings.len(), 1);
 
@@ -2482,9 +2500,9 @@ fn intervening_input_disarms_the_recording_delete() {
     );
 
     app.apply(Action::DeleteRecording); // arm
-    assert!(app.recordings_delete_armed);
+    assert!(app.confirm == ConfirmState::DeleteRecording);
     app.apply(Action::Down); // any other input disarms
-    assert!(!app.recordings_delete_armed);
+    assert!(app.confirm != ConfirmState::DeleteRecording);
     app.apply(Action::DeleteRecording); // re-arms rather than deleting
     assert_eq!(app.recordings.len(), 2, "no delete after disarm");
 
@@ -2597,7 +2615,7 @@ fn breaking_the_delete_chord_clears_the_prompt_without_replacement() {
     // A chord-breaking key (a navigation move, which posts no notification of
     // its own) disarms and clears the prompt at once — nothing replaces it.
     app.apply(Action::Down);
-    assert!(!app.recordings_delete_armed);
+    assert!(app.confirm != ConfirmState::DeleteRecording);
     assert!(
         app.status.is_none(),
         "breaking the chord clears the confirm prompt with no replacement"
@@ -2615,7 +2633,7 @@ fn breaking_the_quit_chord_clears_the_prompt_without_replacement() {
     assert!(status.message.contains("Press Esc again"));
 
     app.apply(Action::Down); // a non-Esc key breaks the chord
-    assert!(!app.quit_armed);
+    assert!(app.confirm != ConfirmState::Quit);
     assert!(
         app.status.is_none(),
         "breaking the quit chord clears the prompt with no replacement"
@@ -2637,7 +2655,10 @@ fn a_confirm_prompt_is_exempt_from_the_auto_dismiss_timer() {
         app.status.is_some(),
         "a confirmation prompt does not time out"
     );
-    assert!(app.quit_armed, "and the chord stays armed");
+    assert!(
+        app.confirm == ConfirmState::Quit,
+        "and the chord stays armed"
+    );
 }
 
 #[tokio::test]

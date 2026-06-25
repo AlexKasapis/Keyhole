@@ -3,6 +3,41 @@
 
 use super::*;
 
+/// The outcome of feeding one key to a single-line text-entry buffer. The
+/// helper only appends to / pops from the buffer; the caller owns the mode
+/// change and the cancel/submit actions (which need `&mut self`), so this
+/// returns *what happened* rather than acting on `App`.
+enum TextEdit {
+    /// A character was typed, a backspace applied, or the key was ignored —
+    /// stay in the current text mode.
+    Editing,
+    /// Esc: the caller should leave the text mode (and clear the buffer if it
+    /// is a scratch buffer rather than persistent state like the filter).
+    Cancelled,
+    /// Enter: the caller should run its submit action.
+    Submitted,
+}
+
+/// Apply one key to a single-line text buffer: append a typed char, pop on
+/// backspace, and report Esc/Enter so the caller can cancel or submit. A free
+/// function (not a method) so the `&mut String` borrow ends on return, leaving
+/// the caller free to touch the rest of `&mut self`.
+fn handle_text_input(buf: &mut String, key: KeyEvent) -> TextEdit {
+    match key.code {
+        KeyCode::Esc => TextEdit::Cancelled,
+        KeyCode::Enter => TextEdit::Submitted,
+        KeyCode::Char(c) => {
+            buf.push(c);
+            TextEdit::Editing
+        }
+        KeyCode::Backspace => {
+            buf.pop();
+            TextEdit::Editing
+        }
+        _ => TextEdit::Editing,
+    }
+}
+
 impl App {
     // -- input ---------------------------------------------------------------
 
@@ -242,57 +277,55 @@ impl App {
     /// a queue with peeked messages to browse. A no-op otherwise (so the key is
     /// harmless on a topic or an empty/unpeeked queue).
     fn focus_messages(&mut self) {
-        if let Some(conn) = self.active_conn_mut() {
+        self.with_active_conn(|conn| {
             if !conn.peek.events.is_empty() {
                 conn.peek.focused = true;
                 conn.peek.clamp_selection();
                 conn.peek.scroll = 0;
             }
-        }
+        });
     }
 
     /// Return the keyboard to the destination list, closing any detail view.
     fn unfocus_messages(&mut self) {
-        if let Some(conn) = self.active_conn_mut() {
+        self.with_active_conn(|conn| {
             conn.peek.focused = false;
             conn.peek.detail = false;
             conn.peek.scroll = 0;
-        }
+        });
     }
 
     /// Move the message-list cursor by `delta`, resetting the scroll so the
     /// (single-line) selection stays in view.
     fn move_message(&mut self, delta: i32) {
-        if let Some(conn) = self.active_conn_mut() {
-            conn.peek.move_selection(delta);
-        }
+        self.with_active_conn(|conn| conn.peek.move_selection(delta));
     }
 
     /// Jump the message-list cursor to the first/last filtered message.
     fn message_to_edge(&mut self, top: bool) {
-        if let Some(conn) = self.active_conn_mut() {
+        self.with_active_conn(|conn| {
             let len = conn.peek.filtered_len();
             conn.peek.selected = if top || len == 0 { 0 } else { len - 1 };
-        }
+        });
     }
 
     /// Open the full-message detail view for the selected message (a no-op when
     /// the filtered list is empty).
     fn open_detail(&mut self) {
-        if let Some(conn) = self.active_conn_mut() {
+        self.with_active_conn(|conn| {
             if conn.peek.selected_event().is_some() {
                 conn.peek.detail = true;
                 conn.peek.scroll = 0;
             }
-        }
+        });
     }
 
     /// Close the detail view, returning to the message list.
     fn close_detail(&mut self) {
-        if let Some(conn) = self.active_conn_mut() {
+        self.with_active_conn(|conn| {
             conn.peek.detail = false;
             conn.peek.scroll = 0;
-        }
+        });
     }
 
     /// Enter the message-list search-filter prompt (live: the list narrows as you
@@ -369,12 +402,13 @@ impl App {
 
     /// The destination-add prompt's keys: type a spec, Enter adds it, Esc cancels.
     pub(super) fn handle_add_destination_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        match handle_text_input(&mut self.subscribe_buf, key) {
+            TextEdit::Editing => {}
+            TextEdit::Cancelled => {
                 self.subscribe_buf.clear();
                 self.mode = InputMode::Normal;
             }
-            KeyCode::Enter => {
+            TextEdit::Submitted => {
                 let raw = self.subscribe_buf.trim().to_string();
                 self.subscribe_buf.clear();
                 self.mode = InputMode::Normal;
@@ -385,11 +419,6 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char(c) => self.subscribe_buf.push(c),
-            KeyCode::Backspace => {
-                self.subscribe_buf.pop();
-            }
-            _ => {}
         }
     }
 
@@ -397,21 +426,17 @@ impl App {
     /// selected destination, Esc cancels. An empty body is a valid (empty)
     /// message, so it is not rejected.
     pub(super) fn handle_publish_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        match handle_text_input(&mut self.publish_buf, key) {
+            TextEdit::Editing => {}
+            TextEdit::Cancelled => {
                 self.publish_buf.clear();
                 self.mode = InputMode::Normal;
             }
-            KeyCode::Enter => {
+            TextEdit::Submitted => {
                 let body = std::mem::take(&mut self.publish_buf);
                 self.mode = InputMode::Normal;
                 self.publish_to_selected(body);
             }
-            KeyCode::Char(c) => self.publish_buf.push(c),
-            KeyCode::Backspace => {
-                self.publish_buf.pop();
-            }
-            _ => {}
         }
     }
 
@@ -530,36 +555,29 @@ impl App {
     }
 
     pub(super) fn handle_rename_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => {
+        match handle_text_input(&mut self.rename_buf, key) {
+            TextEdit::Editing => {}
+            TextEdit::Cancelled => {
                 self.mode = InputMode::Normal;
                 self.rename_buf.clear();
             }
-            KeyCode::Enter => self.submit_rename(),
-            KeyCode::Char(c) => self.rename_buf.push(c),
-            KeyCode::Backspace => {
-                self.rename_buf.pop();
-            }
-            _ => {}
+            TextEdit::Submitted => self.submit_rename(),
         }
     }
 
     pub(super) fn apply(&mut self, action: Action) {
         // A pending chord confirmation ("Press X again …") is shown as a
-        // `Confirm` notification. Any key that isn't the chord's own repeat
-        // breaks the chord, so the prompt must vanish at once — with nothing
-        // taking its place (`clear_confirm` leaves any other status alone).
-        //
-        // Any input other than a repeated Back cancels a pending quit
-        // confirmation (see `Action::Back`).
-        if action != Action::Back && self.quit_armed {
-            self.quit_armed = false;
-            self.clear_confirm();
-        }
-        // Likewise, any input other than a repeated `d` cancels a pending
-        // recording-delete confirmation (see `Action::DeleteRecording`).
-        if action != Action::DeleteRecording && self.recordings_delete_armed {
-            self.recordings_delete_armed = false;
+        // `Confirm` notification. Any action that isn't the chord's own repeat
+        // (Back repeats a pending quit; DeleteRecording repeats a pending delete)
+        // breaks the chord, so the prompt vanishes at once — with nothing taking
+        // its place (`clear_confirm` leaves any other status alone).
+        let is_chord_repeat = match self.confirm {
+            ConfirmState::Quit => action == Action::Back,
+            ConfirmState::DeleteRecording => action == Action::DeleteRecording,
+            ConfirmState::None => true,
+        };
+        if !is_chord_repeat {
+            self.confirm = ConfirmState::None;
             self.clear_confirm();
         }
         match action {
@@ -572,18 +590,18 @@ impl App {
             Action::Back => {
                 if self.show_help {
                     self.show_help = false;
-                    self.quit_armed = false;
+                    self.confirm = ConfirmState::None;
                 } else if self.screen != Screen::Home {
                     // Leaving the Browser unfocuses the panel: stop the
                     // focus-scoped feeds and drop back to normal navigation.
                     self.stop_focus_feeds();
                     self.mode = InputMode::Normal;
                     self.screen = Screen::Home;
-                    self.quit_armed = false;
-                } else if self.quit_armed {
+                    self.confirm = ConfirmState::None;
+                } else if self.confirm == ConfirmState::Quit {
                     self.running = false;
                 } else {
-                    self.quit_armed = true;
+                    self.confirm = ConfirmState::Quit;
                     self.set_confirm("Press Esc again to quit".to_string());
                 }
             }
@@ -700,17 +718,15 @@ impl App {
     }
 
     pub(super) fn handle_filter_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Esc => self.mode = InputMode::Normal,
-            KeyCode::Enter => {
+        // Esc leaves the filter buffer intact (it is the persistent active
+        // filter, not a scratch buffer), unlike the other text prompts.
+        match handle_text_input(&mut self.filter, key) {
+            TextEdit::Editing => {}
+            TextEdit::Cancelled => self.mode = InputMode::Normal,
+            TextEdit::Submitted => {
                 self.apply_filter();
                 self.mode = InputMode::Normal;
             }
-            KeyCode::Char(c) => self.filter.push(c),
-            KeyCode::Backspace => {
-                self.filter.pop();
-            }
-            _ => {}
         }
     }
 
@@ -1005,7 +1021,7 @@ impl App {
     /// transient edit state.
     pub(super) fn enter_recordings_tab(&mut self) {
         self.mode = InputMode::Normal;
-        self.recordings_delete_armed = false;
+        self.confirm = ConfirmState::None;
         self.rename_buf.clear();
         // Always land on the list, so ↑/↓ move the selection on entry.
         self.recordings_focus = RecordingsFocus::List;
@@ -1017,7 +1033,7 @@ impl App {
     /// return focus to the list so re-entry starts there.
     fn leave_recordings_tab(&mut self) {
         self.mode = InputMode::Normal;
-        self.recordings_delete_armed = false;
+        self.confirm = ConfirmState::None;
         self.rename_buf.clear();
         self.recordings_focus = RecordingsFocus::List;
     }

@@ -17,10 +17,10 @@ mod recordings;
 mod settings;
 
 pub use state::{
-    ConnForm, ConnHealth, Connection, Console, ConsoleEntry, DestKind, Destination, InputMode,
-    PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile, RecordingsFocus,
-    ScanStep, Screen, SettingsRow, SettingsState, Status, StatusKind, SubState, Subscription,
-    ViewRow,
+    ConfirmState, ConnForm, ConnHealth, Connection, Console, ConsoleEntry, DestKind, Destination,
+    InputMode, PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile,
+    RecordingsFocus, ScanPhase, ScanStep, Screen, SettingsRow, SettingsState, Status, StatusKind,
+    SubState, Subscription, ViewRow,
 };
 
 use std::path::PathBuf;
@@ -149,13 +149,10 @@ pub struct App {
     /// The recording-name buffer being edited in [`InputMode::Rename`], primed
     /// with the current name when rename starts.
     pub(crate) rename_buf: String,
-    /// Set after a first `d` on the Recordings tab: a second consecutive `d`
-    /// deletes the selected recording; any other key disarms it.
-    pub(crate) recordings_delete_armed: bool,
+    /// The pending two-press confirmation chord, if any (quit on Home, delete on
+    /// Recordings). Armed by a first press; any non-repeat action disarms it.
+    pub(crate) confirm: ConfirmState,
     pub(crate) now: OffsetDateTime,
-    /// Set when a quit was requested from the home screen but not yet
-    /// confirmed: closing the app needs a second consecutive Esc.
-    quit_armed: bool,
     /// The connection whose key browser was viewed most recently. `b` jumps
     /// back to it (so with several brokers open it lands on the last one
     /// browsed), falling back to the active connection. Cleared when that
@@ -225,9 +222,8 @@ impl App {
             recording_view: None,
             recordings_scroll: 0,
             rename_buf: String::new(),
-            recordings_delete_armed: false,
+            confirm: ConfirmState::None,
             now: OffsetDateTime::now_utc(),
-            quit_armed: false,
             last_browser: None,
         }
     }
@@ -253,6 +249,17 @@ impl App {
             Some(i) => self.connections.get_mut(i),
             None => None,
         }
+    }
+
+    /// Run `f` against the active connection, if any, returning its result. A
+    /// thin wrapper over [`Self::active_conn_mut`] for the common "do one thing
+    /// to the active connection" handlers; the closure borrows only the
+    /// connection, so the caller can still touch the rest of `self` afterward.
+    pub(crate) fn with_active_conn<R>(
+        &mut self,
+        f: impl FnOnce(&mut Connection) -> R,
+    ) -> Option<R> {
+        self.active_conn_mut().map(f)
     }
 
     /// True if a profile of this name currently has an open connection.

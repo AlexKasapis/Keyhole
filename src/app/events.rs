@@ -120,7 +120,7 @@ impl App {
                 conn.browser.browse_ticks += 1;
                 if conn.browser.browse_ticks >= refresh_ticks {
                     conn.browser.browse_ticks = 0;
-                    if !conn.browser.scanning {
+                    if conn.browser.phase != ScanPhase::InProgress {
                         refresh_id = Some(conn.id);
                     }
                 }

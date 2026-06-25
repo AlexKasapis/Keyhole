@@ -33,6 +33,20 @@ pub enum Screen {
     Recordings,
 }
 
+/// A pending two-press confirmation chord. At most one is armed at a time —
+/// [`ConfirmState::Quit`] only on [`Screen::Home`], [`ConfirmState::DeleteRecording`]
+/// only on [`Screen::Recordings`] — and any action that isn't the chord's own
+/// repeat disarms it back to [`ConfirmState::None`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmState {
+    /// No chord pending.
+    None,
+    /// A quit was requested from Home; a second consecutive Esc closes the app.
+    Quit,
+    /// A first `d` on the Recordings tab; a second consecutive `d` deletes.
+    DeleteRecording,
+}
+
 /// A command in the command palette (opened with `:`). Selecting one runs it;
 /// the palette is the discoverable entry point for actions that don't warrant a
 /// dedicated key. Today it holds a single command.
@@ -669,6 +683,19 @@ pub enum ScanStep {
     Done,
 }
 
+/// Where a connection's keyspace scan stands. A background auto-refresh moves
+/// back to [`ScanPhase::InProgress`] while it runs, then to
+/// [`ScanPhase::Complete`] once its pages finish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPhase {
+    /// No scan has run yet (a freshly opened browser).
+    NotStarted,
+    /// A scan's pages are still arriving.
+    InProgress,
+    /// The most recent scan finished.
+    Complete,
+}
+
 /// The keyspace-browser state for one connection: the scanned keys, the derived
 /// grouped/sorted view and its selection, the scan-in-progress bookkeeping, the
 /// match pattern, and the auto-refresh timer. Owns the browse half of a
@@ -684,16 +711,13 @@ pub struct KeyBrowser {
     pub keys: Vec<EntryMeta>,
     /// SCAN cursor for the scan in progress (`0` once it finishes).
     pub next_cursor: u64,
-    /// Whether the most recent scan has finished (drives the "scanning…" hint).
-    /// A background refresh sets this `false` while it runs.
-    pub complete: bool,
+    /// How far the current/most-recent scan has progressed. Gates the background
+    /// auto-refresh (which must not stack on an in-progress scan).
+    pub phase: ScanPhase,
     /// Generation of the current/most-recently-started scan. Stamped onto every
     /// [`BrowseReq`] of that scan; pages whose epoch no longer matches are from
     /// a superseded scan (DB switch, new filter, fresh refresh) and discarded.
     pub scan_epoch: u64,
-    /// True while a scan's pages are still arriving (used to avoid launching an
-    /// overlapping background refresh).
-    pub scanning: bool,
     /// Pages of an in-flight *background* refresh accumulate here and replace
     /// [`Self::keys`] atomically when the scan completes. Unused for a live
     /// (foreground) scan, which writes straight to `keys` so the user sees keys
@@ -737,9 +761,8 @@ impl KeyBrowser {
             pattern: "*".to_string(),
             keys: Vec::new(),
             next_cursor: 0,
-            complete: false,
+            phase: ScanPhase::NotStarted,
             scan_epoch: 0,
-            scanning: false,
             scan_buf: Vec::new(),
             scan_live: false,
             sort: SortKey::Name,
@@ -1186,8 +1209,7 @@ impl Connection {
     /// previous scan are recognised as stale when they arrive.
     pub fn begin_scan(&mut self, live: bool, page_size: usize) -> BrowseReq {
         self.browser.scan_epoch = self.browser.scan_epoch.wrapping_add(1);
-        self.browser.scanning = true;
-        self.browser.complete = false;
+        self.browser.phase = ScanPhase::InProgress;
         self.browser.next_cursor = 0;
         self.browser.scan_buf.clear();
         self.browser.scan_live = live;
@@ -1246,8 +1268,7 @@ impl Connection {
                 epoch: self.browser.scan_epoch,
             });
         }
-        self.browser.scanning = false;
-        self.browser.complete = true;
+        self.browser.phase = ScanPhase::Complete;
         if !self.browser.scan_live {
             // Atomically swap in the freshly scanned set; the caller's
             // completion rebuild then reflects it, keeping the highlight on the
@@ -2228,7 +2249,7 @@ mod tests {
         assert!(!b.sort_desc);
         assert_eq!(b.table.selected(), Some(0));
         assert!(b.keys.is_empty() && b.view.is_empty());
-        assert!(!b.complete && !b.scanning);
+        assert_eq!(b.phase, ScanPhase::NotStarted);
 
         let i = ValueInspector::default();
         assert!(i.value.is_none());

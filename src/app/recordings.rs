@@ -149,8 +149,8 @@ impl App {
         let Some(name) = self.selected_recording_name() else {
             return;
         };
-        if self.recordings_delete_armed {
-            self.recordings_delete_armed = false;
+        if self.confirm == ConfirmState::DeleteRecording {
+            self.confirm = ConfirmState::None;
             let path = self.recordings_dir.join(&name);
             match std::fs::remove_file(&path) {
                 Ok(()) => {
@@ -160,7 +160,7 @@ impl App {
                 Err(e) => self.set_status(format!("delete failed: {e}"), true),
             }
         } else {
-            self.recordings_delete_armed = true;
+            self.confirm = ConfirmState::DeleteRecording;
             self.set_confirm(format!("Press d again to delete {name}"));
         }
     }

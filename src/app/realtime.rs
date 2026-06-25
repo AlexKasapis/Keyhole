@@ -156,9 +156,7 @@ impl App {
         if self.screen != Screen::Browser {
             return;
         }
-        if let Some(conn) = self.active_conn_mut() {
-            conn.cycle_panel(delta);
-        }
+        self.with_active_conn(|conn| conn.cycle_panel(delta));
         // Moving focus gives the Pub/Sub and Tail anchors a fresh prompt.
         self.subscribe_buf.clear();
         self.sync_panel_focus();
