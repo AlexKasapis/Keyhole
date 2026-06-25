@@ -211,12 +211,34 @@ pub struct AmqpProfile {
     /// when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub destinations: Vec<String>,
+    /// Optional ActiveMQ management (Jolokia) base URL, e.g.
+    /// `http://127.0.0.1:8161`. When set, keyhole enriches the destination
+    /// browser by enumerating the broker's topics and queues over the Jolokia
+    /// REST API — a separate channel from the AMQP 1.0 wire, which cannot
+    /// enumerate destinations. Absent = discovery off (the list stays curated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_url: Option<String>,
+    /// Username for the management API (HTTP Basic; ActiveMQ's default is
+    /// `admin`). Distinct from the AMQP `username`, which is often anonymous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_username: Option<String>,
+    /// Secret spec for the management API password: `env:VAR`,
+    /// `keyring[:account]`, or omitted (same rules as `password`). A literal is
+    /// not supported, so `prompt` cannot be resolved in the background discovery
+    /// path — use `env:`/`keyring:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_password: Option<String>,
 }
 
 impl AmqpProfile {
     /// Parse the profile's password field into a [`SecretSpec`].
     pub fn password_spec(&self) -> SecretSpec {
         SecretSpec::parse(self.password.as_deref().unwrap_or(""))
+    }
+
+    /// Parse the management-API password field into a [`SecretSpec`].
+    pub fn management_password_spec(&self) -> SecretSpec {
+        SecretSpec::parse(self.management_password.as_deref().unwrap_or(""))
     }
 }
 
@@ -641,6 +663,9 @@ mod tests {
             password: None,
             tls: false,
             destinations: Vec::new(),
+            management_url: None,
+            management_username: None,
+            management_password: None,
         };
         let dumped = toml::to_string(&Config {
             connections: vec![ConnectionConfig::Amqp(empty)],

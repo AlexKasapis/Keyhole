@@ -22,6 +22,16 @@ port = 5674
 # ActiveMQ accepts SASL ANONYMOUS by default — no credentials needed.
 # These destinations must match what `keyhole dev publish` emits.
 destinations = ["topic:keyhole.demo.events", "queue:keyhole.demo.orders"]
+# Optional: enrich the curated list above by enumerating the broker's own
+# topics/queues over the ActiveMQ web console's Jolokia API (default :8161).
+# AMQP 1.0 can't enumerate destinations, so this is a separate HTTP channel.
+# The console requires HTTP Basic auth (default admin/admin); the password is a
+# secret spec (env:/keyring:, no literal), so export it first, e.g.
+#   set -x KEYHOLE_ACTIVEMQ_PW admin
+# Uncomment to enable auto-discovery on connect (and the 'r' key to refresh):
+# management_url = "http://127.0.0.1:8161"
+# management_username = "admin"
+# management_password = "env:KEYHOLE_ACTIVEMQ_PW"
 
 [[connection]]
 type = "rabbitmq"

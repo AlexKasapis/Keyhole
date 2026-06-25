@@ -420,7 +420,8 @@ fn amqp_destination_pane(
         let hint = Paragraph::new(vec![
             Line::from(""),
             Line::styled("  No destinations yet.", theme.dim),
-            Line::styled("  Press 'a' to add topic:name or queue:name.", theme.dim),
+            Line::styled("  Press 'a' to add topic:name or queue:name,", theme.dim),
+            Line::styled("  or 'r' to discover them from the broker.", theme.dim),
         ])
         .block(block);
         frame.render_widget(hint, area);
@@ -1908,7 +1909,9 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(""),
         Line::styled("AMQP browser", theme.heading),
         Line::from("  destinations are curated (AMQP 1.0 can't enumerate them)"),
-        Line::from("  a add · x/d remove · Enter open (queue → peek, topic → tail) · t tail"),
+        Line::from(
+            "  a add · r discover · x/d remove · Enter open (queue → peek, topic → tail) · t tail",
+        ),
         Line::from("  ↑↓ scroll an open message · Tail tab: type topic:/queue: then Enter"),
         Line::from("  peek mode (browse / skip / destructive) is set in : → Settings"),
         Line::from(""),

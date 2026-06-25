@@ -592,6 +592,9 @@ mod tests {
             password: None,
             tls,
             destinations: Vec::new(),
+            management_url: None,
+            management_username: None,
+            management_password: None,
         }
     }
 
@@ -891,6 +894,9 @@ mod integration_tests {
             password: None,
             tls: false,
             destinations: Vec::new(),
+            management_url: None,
+            management_username: None,
+            management_password: None,
         };
         let mut conn = AmqpConnection::new(profile, Some("admin".to_string()));
         let caps = conn.connect().await.expect("connect to test ActiveMQ");
@@ -913,6 +919,9 @@ mod integration_tests {
             password: None,
             tls: false,
             destinations: Vec::new(),
+            management_url: None,
+            management_username: None,
+            management_password: None,
         };
         let mut conn = AmqpConnection::new(profile, None);
         let caps = conn

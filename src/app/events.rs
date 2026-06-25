@@ -52,6 +52,9 @@ impl App {
             AppEvent::ValueLoaded { id, key, value } => self.on_value(id, key, value),
             AppEvent::Peeked { id, spec, events } => self.on_peeked(id, spec, events),
             AppEvent::Published { id, target, result } => self.on_published(id, target, result),
+            AppEvent::DestinationsDiscovered { id, result } => {
+                self.on_destinations_discovered(id, result)
+            }
             AppEvent::StatsUpdated { id, stats } => self.on_stats(id, stats),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
@@ -151,6 +154,10 @@ impl App {
             // profile, then peek whatever queue lands selected.
             self.seed_destinations(id);
             self.request_peek(id);
+            // Enrich the curated list with the broker's own topics/queues when
+            // the profile names a management URL. Silent: a no-op when discovery
+            // isn't configured, and failures stay off the footer on connect.
+            self.discover_destinations(id, false);
         }
         if caps.can_dashboard {
             self.request_stats(id);
@@ -254,6 +261,44 @@ impl App {
                 conn.peek.filter.clear();
             }
         }
+    }
+
+    /// AMQP destination discovery returned: merge the broker's topics/queues
+    /// into the curated browser (deduped against what's already there) and
+    /// persist, or report why discovery failed. The merge preserves the current
+    /// selection; when nothing was selected it lands on the first row and peeks
+    /// it so the pane isn't left blank.
+    pub(super) fn on_destinations_discovered(
+        &mut self,
+        id: ConnId,
+        result: Result<Vec<SubSpec>, String>,
+    ) {
+        let specs = match result {
+            Ok(specs) => specs,
+            Err(e) => return self.set_status(format!("Discovery failed: {e}"), true),
+        };
+        let total = specs.len();
+        let Some((added, newly_selected)) = self.conn_by_id_mut(id).map(|conn| {
+            let had_selection = conn.destinations.table.selected().is_some();
+            let dests: Vec<Destination> = specs.iter().filter_map(Destination::from_spec).collect();
+            let added = conn.merge_destinations(dests);
+            // `merge_destinations` selects the first row only when nothing was
+            // selected before, so this detects that it just did.
+            let newly_selected = !had_selection && conn.destinations.table.selected().is_some();
+            (added, newly_selected)
+        }) else {
+            return;
+        };
+        if added > 0 {
+            self.persist_destinations(id);
+        }
+        if newly_selected {
+            self.request_peek(id);
+        }
+        self.set_status(
+            format!("Discovered {total} destinations ({added} new)"),
+            false,
+        );
     }
 
     /// A publish completed: confirm or report it, and re-peek when the message

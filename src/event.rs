@@ -49,6 +49,14 @@ pub enum AppEvent {
         target: String,
         result: Result<(), String>,
     },
+    /// The result of an AMQP destination discovery (ActiveMQ Jolokia): the
+    /// broker's topics/queues to merge into the curated browser, or a reason it
+    /// failed. Triggered automatically on connect (when the profile names a
+    /// management URL) and by the destination pane's refresh key.
+    DestinationsDiscovered {
+        id: ConnId,
+        result: Result<Vec<SubSpec>, String>,
+    },
     /// Refreshed server statistics.
     StatsUpdated { id: ConnId, stats: ServerStats },
     /// A non-fatal error from a connection operation.

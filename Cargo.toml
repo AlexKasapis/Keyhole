@@ -160,6 +160,13 @@ fe2o3-amqp = { version = "0.15.1", features = ["rustls"] }
 # tokio runtime out of the box (`ConnectionProperties::default()`) and speaks
 # `amqps://` over rustls — no extra executor/reactor shims, no OpenSSL.
 lapin = "4"
+# ActiveMQ management (Jolokia) destination discovery. The AMQP 1.0 wire cannot
+# enumerate destinations, so when an `amqp` profile names its broker's web
+# console (default :8161) we enrich the browser over Jolokia's HTTP API — a
+# small, blocking, rustls-based client (no OpenSSL) driven off the async runtime
+# via `spawn_blocking`. Pinned to 2.x for a stable API; reusable for the planned
+# RabbitMQ HTTP management phase.
+ureq = "2"
 
 [dev-dependencies]
 # Snapshot testing of rendered TUI frames (see src/ui — snapshot module).

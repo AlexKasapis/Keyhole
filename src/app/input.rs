@@ -160,8 +160,9 @@ impl App {
 
     /// Keys while the AMQP destination list (left pane) is focused: navigate the
     /// list, Enter to open the selection (peek a queue / tail a topic), `a` to add
-    /// a destination, `x`/`d` to remove one, `t` to tail it, `P` to publish.
-    /// `l`/`→` steps into the message pane.
+    /// a destination, `x`/`d` to remove one, `r` to (re)discover destinations from
+    /// the broker, `t` to tail it, `P` to publish. `l`/`→` steps into the message
+    /// pane.
     ///
     /// When the message pane holds the keyboard the keys drive that pane instead
     /// (see [`Self::handle_message_key`]).
@@ -178,6 +179,7 @@ impl App {
             (false, KeyCode::Enter) => self.open_selected_destination(),
             (false, KeyCode::Char('l') | KeyCode::Right) => self.focus_messages(),
             (false, KeyCode::Char('a')) => self.begin_add_destination(),
+            (false, KeyCode::Char('r')) => self.refresh_destinations(),
             (false, KeyCode::Char('x') | KeyCode::Char('d')) => self.delete_selected_destination(),
             (false, KeyCode::Char('t')) => self.tail_selected_destination(),
             (false, KeyCode::Char('P')) => self.begin_publish(),
@@ -313,6 +315,15 @@ impl App {
         }
         self.publish_buf.clear();
         self.mode = InputMode::Publish;
+    }
+
+    /// Re-discover destinations from the broker's management API for the active
+    /// AMQP connection (the `r` key). Announces progress / "not configured",
+    /// unlike the silent auto-discovery on connect.
+    fn refresh_destinations(&mut self) {
+        if let Some(id) = self.active_id() {
+            self.discover_destinations(id, true);
+        }
     }
 
     /// Enter the destination-add prompt (AMQP): capture a `topic:name` /

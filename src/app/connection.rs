@@ -157,17 +157,37 @@ impl App {
                     tls,
                 })
             }
-            BrokerType::Amqp => ConnectionConfig::Amqp(AmqpProfile {
-                name,
-                host,
-                port,
-                username,
-                password: saved_spec,
-                tls,
-                // A new connection starts with no curated destinations; the user
-                // adds them from the browser.
-                destinations: Vec::new(),
-            }),
+            BrokerType::Amqp => {
+                // The form doesn't edit the curated destinations or the
+                // management-API fields, so carry them over from the existing
+                // profile on edit — otherwise saving an edit would wipe them. A
+                // brand-new connection starts with none.
+                let (destinations, management_url, management_username, management_password) =
+                    editing
+                        .and_then(|idx| self.profiles.get(idx))
+                        .and_then(|p| match p {
+                            ConnectionConfig::Amqp(a) => Some((
+                                a.destinations.clone(),
+                                a.management_url.clone(),
+                                a.management_username.clone(),
+                                a.management_password.clone(),
+                            )),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                ConnectionConfig::Amqp(AmqpProfile {
+                    name,
+                    host,
+                    port,
+                    username,
+                    password: saved_spec,
+                    tls,
+                    destinations,
+                    management_url,
+                    management_username,
+                    management_password,
+                })
+            }
             BrokerType::Rabbitmq => {
                 // The DB slot is relabelled "Vhost" for RabbitMQ; empty → default "/".
                 let vhost = {
@@ -557,7 +577,7 @@ impl App {
     /// Write the connection's current destination list back into its saved AMQP
     /// profile (config + in-memory list) and persist. Best-effort: a write
     /// failure surfaces as a footer status but the in-memory list still changes.
-    fn persist_destinations(&mut self, id: ConnId) {
+    pub(super) fn persist_destinations(&mut self, id: ConnId) {
         let Some((name, specs)) = self.conn_by_id(id).map(|c| {
             let specs: Vec<String> = c.destinations.items.iter().map(|d| d.canonical()).collect();
             (c.name.clone(), specs)
@@ -585,6 +605,80 @@ impl App {
                 self.set_status(format!("could not save destinations: {e}"), true);
             }
         }
+    }
+
+    /// Discover the broker's topics/queues over the ActiveMQ management API and
+    /// merge them into the connection's destination browser (see
+    /// [`crate::broker::jolokia`]). A no-op unless the connection is AMQP *and*
+    /// its profile names a `management_url`. `announce` controls user feedback:
+    /// the manual refresh key sets it (so "discovering…"/"not configured" shows),
+    /// while the auto-trigger on connect runs silently. The actual discovery runs
+    /// off the render thread and reports back via
+    /// [`AppEvent::DestinationsDiscovered`].
+    pub(super) fn discover_destinations(&mut self, id: ConnId, announce: bool) {
+        let Some(name) = self.conn_by_id(id).map(|c| c.name.clone()) else {
+            return;
+        };
+        let profile = self.profiles.iter().find_map(|p| match p {
+            ConnectionConfig::Amqp(a) if a.name == name => Some(a.clone()),
+            _ => None,
+        });
+        let Some(profile) = profile else {
+            if announce {
+                self.set_status(
+                    "destination discovery is only available for AMQP connections".to_string(),
+                    true,
+                );
+            }
+            return;
+        };
+        let Some(base_url) = profile.management_url.clone() else {
+            if announce {
+                self.set_status(
+                    "set management_url on this connection to discover destinations".to_string(),
+                    true,
+                );
+            }
+            return;
+        };
+        let username = profile.management_username.clone();
+        let spec = profile.management_password_spec();
+        // Keyring lookups key off an account; fall back to the connection name
+        // when no management username is set.
+        let account = username.clone().unwrap_or_else(|| name.clone());
+        let events = self.events.clone();
+        if announce {
+            self.set_status(format!("Discovering destinations on {base_url}…"), false);
+        }
+        tokio::spawn(async move {
+            // Resolve the management secret off the render thread (keyring blocks).
+            let password = match config::resolve_secret_async(spec, account).await {
+                Ok(pw) => pw,
+                Err(e) => {
+                    let _ = events
+                        .send(AppEvent::DestinationsDiscovered {
+                            id,
+                            result: Err(format!("auth: {e}")),
+                        })
+                        .await;
+                    return;
+                }
+            };
+            // The Jolokia client is blocking, so run it off the async runtime.
+            let result = tokio::task::spawn_blocking(move || {
+                crate::broker::jolokia::discover(
+                    &base_url,
+                    username.as_deref(),
+                    password.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| format!("discovery task failed: {e}"))
+            .and_then(|r| r.map_err(|e| format!("{e:#}")));
+            let _ = events
+                .send(AppEvent::DestinationsDiscovered { id, result })
+                .await;
+        });
     }
 
     pub(super) fn apply_filter(&mut self) {

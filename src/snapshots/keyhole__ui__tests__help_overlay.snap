@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 2006
 expression: "render_lines(&mut app, 90, 40)"
 ---
 ┌ Connection┌ Help ──────────────────────────────────────────────────────────┐───────────┐
@@ -34,7 +35,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │                                                                │           │
 │           │AMQP browser                                                    │           │
 │           │  destinations are curated (AMQP 1.0 can't enumerate them)      │           │
-│           │  a add · x/d remove · Enter open (queue → peek, topic → tail) ·│           │
+│           │  a add · r discover · x/d remove · Enter open (queue → peek, to│           │
 │           │  ↑↓ scroll an open message · Tail tab: type topic:/queue: then │           │
 │           │  peek mode (browse / skip / destructive) is set in : → Settings│           │
 │           │                                                                │           │

@@ -2099,6 +2099,49 @@ async fn editing_an_offline_profile_replaces_and_persists_without_connecting() {
 }
 
 #[tokio::test]
+async fn editing_an_amqp_profile_keeps_destinations_and_management_fields() {
+    // The connection form doesn't surface the curated destinations or the
+    // management-API fields, so an edit must carry them over from the existing
+    // profile rather than reset them.
+    let path = unique_config_path();
+    let config = Config {
+        connections: vec![ConnectionConfig::Amqp(AmqpProfile {
+            name: "mq".into(),
+            host: "127.0.0.1".into(),
+            port: 5672,
+            username: None,
+            password: None,
+            tls: false,
+            destinations: vec!["topic:events".into(), "queue:orders".into()],
+            management_url: Some("http://127.0.0.1:8161".into()),
+            management_username: Some("admin".into()),
+            management_password: Some("env:MQ_PW".into()),
+        })],
+        ..Default::default()
+    };
+    let (mut app, _rx) = build_app(config, path.clone(), None);
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('e')); // open the edit form
+    app.form.as_mut().unwrap().fields[1] = "10.0.0.9".into(); // change the host
+    app.submit_form();
+
+    let ConnectionConfig::Amqp(p) = &app.profiles[0] else {
+        panic!("expected an amqp profile");
+    };
+    assert_eq!(p.host, "10.0.0.9", "the host edit is applied");
+    assert_eq!(
+        p.destinations,
+        vec!["topic:events", "queue:orders"],
+        "the curated destinations survive an edit"
+    );
+    assert_eq!(p.management_url.as_deref(), Some("http://127.0.0.1:8161"));
+    assert_eq!(p.management_username.as_deref(), Some("admin"));
+    assert_eq!(p.management_password.as_deref(), Some("env:MQ_PW"));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
 async fn editing_a_live_profile_reconnects_with_the_new_settings() {
     let path = unique_config_path();
     let (mut app, _rx) = build_app(config_with(&["prod"]), path.clone(), None);
@@ -3110,6 +3153,162 @@ async fn amqp_add_and_remove_destination_drives_the_browser() {
     assert_eq!(
         conn.selected_destination().map(|d| d.spec()),
         Some(SubSpec::Queue("orders".into()))
+    );
+}
+
+/// Build an app whose config holds a single AMQP profile (so destinations
+/// persist to a real temp file), with `management_url` optionally set. Returns
+/// the app, its config path, and the event receiver (kept alive by the caller).
+fn amqp_app_with_profile(
+    name: &str,
+    management_url: Option<&str>,
+) -> (App, PathBuf, Receiver<AppEvent>) {
+    let path = unique_config_path();
+    let config = Config {
+        connections: vec![ConnectionConfig::Amqp(AmqpProfile {
+            name: name.into(),
+            host: "127.0.0.1".into(),
+            port: 5672,
+            username: None,
+            password: None,
+            tls: false,
+            destinations: Vec::new(),
+            management_url: management_url.map(str::to_string),
+            management_username: None,
+            management_password: None,
+        })],
+        ..Default::default()
+    };
+    let (app, rx) = build_app(config, path.clone(), None);
+    (app, path, rx)
+}
+
+#[tokio::test]
+async fn amqp_discovery_merges_dedupes_and_preserves_selection() {
+    let (mut app, _path, _rx) = amqp_app_with_profile("mq", None);
+    connect_amqp(&mut app, 1, "mq").await;
+    // A manually-added queue, selected.
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+
+    // Discovery returns the existing queue plus two new destinations.
+    app.on_destinations_discovered(
+        ConnId(1),
+        Ok(vec![
+            SubSpec::Queue("orders".into()),
+            SubSpec::Topic("events".into()),
+            SubSpec::Queue("audit".into()),
+        ]),
+    );
+
+    let conn = app.active_conn().unwrap();
+    assert_eq!(
+        conn.destinations.items.len(),
+        3,
+        "the already-present queue is deduped; two new ones are appended"
+    );
+    assert_eq!(
+        conn.selected_destination().map(|d| d.spec()),
+        Some(SubSpec::Queue("orders".into())),
+        "discovery preserves the existing selection"
+    );
+    let status = app.status.as_ref().expect("status set");
+    assert!(!status.is_error);
+    assert!(
+        status.message.contains("3 destinations") && status.message.contains("2 new"),
+        "status summarizes the merge: {}",
+        status.message
+    );
+}
+
+#[tokio::test]
+async fn amqp_discovery_into_empty_list_selects_and_peeks_first() {
+    let (mut app, _path, _rx) = amqp_app_with_profile("mq", None);
+    connect_amqp(&mut app, 1, "mq").await;
+    assert!(app.active_conn().unwrap().selected_destination().is_none());
+
+    app.on_destinations_discovered(
+        ConnId(1),
+        Ok(vec![
+            SubSpec::Queue("orders".into()),
+            SubSpec::Topic("events".into()),
+        ]),
+    );
+
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.destinations.items.len(), 2);
+    assert_eq!(
+        conn.selected_destination().map(|d| d.spec()),
+        Some(SubSpec::Queue("orders".into())),
+        "an empty list lands on the first discovered destination"
+    );
+    // The freshly-selected queue is peeked (browse mode is the default).
+    assert_eq!(conn.peek.peeked, Some(SubSpec::Queue("orders".into())));
+    assert!(conn.peek.pending, "selecting a queue kicks off a peek");
+}
+
+#[tokio::test]
+async fn amqp_discovery_persists_new_destinations_to_config() {
+    let (mut app, path, _rx) = amqp_app_with_profile("mq", None);
+    connect_amqp(&mut app, 1, "mq").await;
+
+    app.on_destinations_discovered(
+        ConnId(1),
+        Ok(vec![
+            SubSpec::Topic("events".into()),
+            SubSpec::Queue("orders".into()),
+        ]),
+    );
+
+    // The discovered destinations are written back to the on-disk profile.
+    let reloaded = crate::config::load(&path).expect("config reloads");
+    let ConnectionConfig::Amqp(profile) = &reloaded.connections[0] else {
+        panic!("expected the amqp profile");
+    };
+    assert_eq!(
+        profile.destinations,
+        vec!["topic:events", "queue:orders"],
+        "discovery persists the merged list"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn amqp_discovery_failure_reports_an_error() {
+    let (mut app, _path, _rx) = amqp_app_with_profile("mq", None);
+    connect_amqp(&mut app, 1, "mq").await;
+
+    app.on_destinations_discovered(
+        ConnId(1),
+        Err("the management API returned HTTP 401".into()),
+    );
+
+    let status = app.status.as_ref().expect("status set");
+    assert!(status.is_error, "a discovery failure is an error status");
+    assert!(
+        status.message.contains("Discovery failed") && status.message.contains("401"),
+        "the failure reason is surfaced: {}",
+        status.message
+    );
+    assert!(
+        app.active_conn().unwrap().destinations.items.is_empty(),
+        "a failed discovery adds nothing"
+    );
+}
+
+#[tokio::test]
+async fn amqp_discovery_without_management_url_explains_how_to_enable() {
+    // The manual refresh path announces when discovery isn't configured.
+    let (mut app, _path, _rx) = amqp_app_with_profile("mq", None);
+    connect_amqp(&mut app, 1, "mq").await;
+
+    app.discover_destinations(ConnId(1), true);
+
+    let status = app.status.as_ref().expect("status set");
+    assert!(status.is_error);
+    assert!(
+        status.message.contains("management_url"),
+        "it points the user at the missing setting: {}",
+        status.message
     );
 }
 

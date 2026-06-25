@@ -86,6 +86,9 @@ mod integration_tests {
             password: None,
             tls: false,
             destinations: fixtures::amqp_destination_specs().to_vec(),
+            management_url: None,
+            management_username: None,
+            management_password: None,
         })
     }
 

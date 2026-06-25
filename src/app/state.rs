@@ -1083,6 +1083,26 @@ impl Connection {
         true
     }
 
+    /// Merge `dests` into the curated list, appending any not already present
+    /// (deduped on identity), and return how many were newly added. Unlike
+    /// [`Self::add_destination`] this preserves the current selection — it is the
+    /// bulk path for broker discovery, which must not yank the cursor around —
+    /// except that an empty/unselected list lands on the first row so the pane
+    /// isn't left blank. Append-only, so existing selection indices stay valid.
+    pub fn merge_destinations(&mut self, dests: Vec<Destination>) -> usize {
+        let mut added = 0;
+        for dest in dests {
+            if !self.destinations.items.contains(&dest) {
+                self.destinations.items.push(dest);
+                added += 1;
+            }
+        }
+        if self.destinations.table.selected().is_none() && !self.destinations.items.is_empty() {
+            self.destinations.table.select(Some(0));
+        }
+        added
+    }
+
     /// Remove the highlighted destination, reselecting a neighbour. Returns the
     /// removed entry, or `None` when nothing was selected.
     pub fn remove_selected_destination(&mut self) -> Option<Destination> {
