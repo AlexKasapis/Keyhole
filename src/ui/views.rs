@@ -189,6 +189,14 @@ fn visible_offset(prev: usize, selected: Option<usize>, viewport: usize, total: 
     off.min(max_offset)
 }
 
+/// The maximum vertical scroll offset for a pane: the rows that don't fit in
+/// `viewport`, saturating to zero when everything fits. Pairs with a `.min(..)`
+/// (or [`crate::app::Connection`]'s value-pane `clamp_scroll`) to keep a scroll
+/// offset in range as the rendered height changes from frame to frame.
+fn max_scroll(total: usize, viewport: usize) -> u16 {
+    total.saturating_sub(viewport) as u16
+}
+
 /// Browser screen: key table + value pane for the active connection.
 pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // The panel's input tabs show a typing cursor and echo the typed text;
@@ -268,24 +276,33 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         return;
     }
 
-    // The key list is a pure viewport: only the rows that fall inside the
-    // visible window are turned into `Row`s each frame. With a large expanded
-    // keyspace (tens of thousands of keys) building the entire list — and a
-    // `format!`ed cell per column — on every frame is what makes the browser
-    // crawl, even though ratatui only ever paints the handful of visible rows.
-    // We therefore compute the scroll window ourselves and hand the widget just
-    // that slice. The viewport excludes the two border rows and the one header
-    // row.
+    key_table_pane(frame, conn, focus, theme, table_area);
+
+    value_pane(frame, conn, theme, value_area);
+
+    if let Some(panel_area) = panel_area {
+        panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
+    }
+}
+
+/// The Redis key table (left body pane): a self-windowed viewport over the
+/// sorted/grouped view. Only the rows inside the visible window are turned into
+/// `Row`s each frame — building the whole list on a large keyspace (a `format!`ed
+/// cell per column) is what makes the browser crawl, even though the widget only
+/// ever paints the visible rows — so the scroll window is computed here and the
+/// widget handed just that slice. The followed scroll offset is written back onto
+/// `conn.browser.table` (one of the render path's height-dependent writes).
+fn key_table_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    focus: PaneFocus,
+    theme: &Theme,
+    table_area: Rect,
+) {
+    // The viewport excludes the two border rows and the one header row.
     let total = conn.browser.view.len();
     let viewport = table_area.height.saturating_sub(3) as usize;
     let selected = conn.browser.table.selected();
-    // Track the scroll offset on `conn.browser.table` so it persists across frames
-    // (the window only shifts when the selection would leave it, matching
-    // ratatui's own follow behaviour) and so a shrunken view can't strand rows.
-    // This is one of the few height-dependent scroll writes the render path makes
-    // (see also the value-pane, peek, and recording-viewer clamps): each derives
-    // from the rendered area's height, which the update phase (which has no layout)
-    // cannot compute. Everything else render touches is read-only.
     let offset = visible_offset(conn.browser.table.offset(), selected, viewport, total);
     *conn.browser.table.offset_mut() = offset;
     let end = offset.saturating_add(viewport).min(total);
@@ -337,10 +354,10 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         })
         .collect();
     let widths = [
-        Constraint::Min(10),
-        Constraint::Length(6),
-        Constraint::Length(8),
-        Constraint::Length(7),
+        Constraint::Min(10),   // key (absorbs the slack)
+        Constraint::Length(6), // type
+        Constraint::Length(8), // TTL
+        Constraint::Length(7), // size
     ];
     let table = Table::new(rows, widths)
         .header(Row::new(["Key", "Type", "TTL", "Size"]).style(theme.header))
@@ -355,14 +372,19 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .highlight_symbol("▶ ");
     // The rows are already sliced to the window, so the widget gets a
     // viewport-local state: the selection rebased onto the slice and a zero
-    // offset. (The canonical selection/offset stay on `conn.browser.table` above.)
+    // offset. (The canonical selection/offset stay on `conn.browser.table`.)
     let mut win = TableState::default();
     win.select(selected.map(|s| s.saturating_sub(offset)));
     frame.render_stateful_widget(table, table_area, &mut win);
+}
 
-    // The value pane mirrors the *current* selection. When the cursor sits on a
-    // group header (not a key), show a neutral prompt rather than "loading…" or
-    // the last-inspected key's stale value.
+/// The value inspector (right body pane): renders the selected key's value, or a
+/// neutral prompt when the cursor sits on a group header rather than a key.
+/// Clamps the scroll offset to the rendered height — another height-dependent
+/// render write (see [`max_scroll`]).
+fn value_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, value_area: Rect) {
+    // When the cursor sits on a group header (not a key), show a neutral prompt
+    // rather than "loading…" or the last-inspected key's stale value.
     let on_key = conn.selected().is_some();
     let title = match (on_key, &conn.inspector.value_key) {
         (true, Some(k)) => format!(" {k} "),
@@ -376,13 +398,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             theme.dim,
         )]
     };
-    // Clamp the scroll offset so paging can't run off the end of the value (the
-    // second of the two deliberate viewport-derived render writes noted above).
     // The bound uses logical line count (wrapping may split lines further, as the
     // console's scroll does too); inner height excludes the two border rows.
     let inner_h = value_area.height.saturating_sub(2) as usize;
-    let max_scroll = value_lines.len().saturating_sub(inner_h) as u16;
-    conn.inspector.clamp_scroll(max_scroll);
+    conn.inspector
+        .clamp_scroll(max_scroll(value_lines.len(), inner_h));
     let value = Paragraph::new(value_lines)
         .block(
             Block::bordered()
@@ -393,10 +413,6 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         .wrap(Wrap { trim: false })
         .scroll((conn.inspector.value_scroll, 0));
     frame.render_widget(value, value_area);
-
-    if let Some(panel_area) = panel_area {
-        panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
-    }
 }
 
 /// The AMQP browser's left pane: the curated destination list (the analog of the
@@ -438,6 +454,7 @@ fn amqp_destination_pane(
             ])
         })
         .collect();
+    // Destination absorbs the slack; Kind is a short fixed tag (topic/queue).
     let widths = [Constraint::Min(10), Constraint::Length(8)];
     let table = Table::new(rows, widths)
         .header(Row::new(["Destination", "Kind"]).style(theme.header))
@@ -537,8 +554,7 @@ fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area:
             conn.peek.scroll = (selected + 1 - inner_h) as u16;
         }
     }
-    let max_scroll = lines.len().saturating_sub(inner_h) as u16;
-    conn.peek.scroll = conn.peek.scroll.min(max_scroll);
+    conn.peek.scroll = conn.peek.scroll.min(max_scroll(lines.len(), inner_h));
 
     let border = if focused { theme.accent } else { theme.border };
     let para = Paragraph::new(lines)
@@ -640,8 +656,7 @@ fn amqp_detail_pane(
     }
 
     let inner_h = area.height.saturating_sub(2) as usize;
-    let max_scroll = lines.len().saturating_sub(inner_h) as u16;
-    conn.peek.scroll = conn.peek.scroll.min(max_scroll);
+    conn.peek.scroll = conn.peek.scroll.min(max_scroll(lines.len(), inner_h));
     let title = format!(" {queue_name} · message {position}/{count} ");
     let para = Paragraph::new(lines)
         .block(
@@ -1191,8 +1206,7 @@ fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
     // render write, mirroring the Browser value pane); inner height is the
     // full pane since the divider is a side border, not a top/bottom one.
     let inner_h = inner.height as usize;
-    let max_scroll = lines.len().saturating_sub(inner_h) as u16;
-    app.recordings_scroll = app.recordings_scroll.min(max_scroll);
+    app.recordings_scroll = app.recordings_scroll.min(max_scroll(lines.len(), inner_h));
     frame.render_widget(
         Paragraph::new(lines).scroll((app.recordings_scroll, 0)),
         inner,

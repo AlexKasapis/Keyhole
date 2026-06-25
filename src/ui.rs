@@ -68,6 +68,10 @@ pub(crate) fn health_indicator(
     }
 }
 
+/// Width (columns) of the right-aligned status-message column in the footer; the
+/// keybind hints take the rest of the row.
+const STATUS_WIDTH: u16 = 44;
+
 fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     match app.mode {
         InputMode::Filter => {
@@ -151,7 +155,8 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             // A status message shares the row: hints left, status right.
             Some(status) => {
                 let [hints_area, status_area] =
-                    Layout::horizontal([Constraint::Min(0), Constraint::Length(44)]).areas(area);
+                    Layout::horizontal([Constraint::Min(0), Constraint::Length(STATUS_WIDTH)])
+                        .areas(area);
                 frame.render_widget(
                     Paragraph::new(hint_line(app, theme)).style(theme.status_bar),
                     hints_area,
