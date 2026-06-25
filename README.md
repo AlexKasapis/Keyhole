@@ -14,6 +14,8 @@ Redis · AMQP 1.0 · RabbitMQ — one self-contained binary.
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](rust-toolchain.toml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
+[**Website**](https://keyholetui.com) · [**Documentation**](https://docs.keyholetui.com)
+
 </div>
 
 Keyhole connects to **Redis**, **AMQP 1.0** (ActiveMQ / Amazon MQ / RabbitMQ 4.x),
@@ -27,6 +29,14 @@ Just run the following in your terminal:
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh | sh
+```
+
+The shorter form below is a convenience alias — it redirects to the exact
+release installer above, so what runs (and its checksum/signature verification)
+is identical:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://keyholetui.com/install.sh | sh
 ```
 
 Or build it yourself with Cargo:
