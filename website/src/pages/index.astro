@@ -1,32 +1,26 @@
 ---
+import KeyholeTui from '../components/KeyholeTui.astro';
+import { INSTALL_DISPLAY, INSTALL_COPY, INSTALL_GITHUB } from '../lib/install';
+import { CAPABILITIES, cell } from '../lib/capabilities';
+
 const repo = 'https://github.com/AlexKasapis/Keyhole';
 const docs = 'https://docs.keyholetui.com';
-const releases = `${repo}/releases`;
+const install = 'https://keyholetui.com';
+const changelog = `${repo}/blob/main/CHANGELOG.md`;
+const security = `${repo}/security/policy`;
 
-// Convenience install via the vanity domain: a 302 in public/_redirects sends
-// /install.sh to the latest GitHub release installer, over HTTPS end to end.
-// Integrity does not depend on the fetch path — the installer verifies the
-// SHA-256 checksum (and cosign signature) of the downloaded binary, identically
-// whether you use this alias or the GitHub URL below.
-const installVanity =
-  "curl --proto '=https' --tlsv1.2 -LsSf https://keyholetui.com/install.sh | sh";
-// The verifiable path: pin the GitHub release URL and check the cosign
-// signature / SLSA provenance documented in the README.
-const installGitHub =
-  "curl --proto '=https' --tlsv1.2 -LsSf \\\n  https://github.com/AlexKasapis/Keyhole/releases/latest/download/keyhole-installer.sh | sh";
-
-const brokers = [
-  { cap: 'Keyspace browser + value inspector', redis: '✅', amqp: '—', rabbit: '—' },
-  { cap: 'Read-only command console', redis: '✅', amqp: '—', rabbit: '—' },
-  { cap: 'Realtime tails', redis: '✅', amqp: '✅', rabbit: '✅' },
-  { cap: 'Record live tail → JSONL', redis: '✅', amqp: '✅', rabbit: '✅' },
+// Supported-broker tiles (abstract colored marks, not brand logos).
+const brokerTiles = [
+  { name: 'Redis', dot: '#fb4934', ring: 'rgba(251,73,52,.15)' },
+  { name: 'AMQP 1.0', dot: '#83a598', ring: 'rgba(131,165,152,.15)' },
+  { name: 'RabbitMQ', dot: '#fe8019', ring: 'rgba(254,128,25,.15)' },
 ];
 
-const features = [
-  { title: 'Connections', body: 'Saved connection profiles in TOML. Passwords resolve at connect time from an env var, the OS keyring, or a prompt — never written to disk in plaintext.' },
-  { title: 'Browser', body: 'Navigate the Redis keyspace and inspect values, with a live server-statistics band and a pinned, read-only command console.' },
-  { title: 'Realtime', body: 'Live tails of pub/sub, streams, keyspace events and MONITOR (Redis); topic/queue tails (AMQP 1.0); and exchange taps (RabbitMQ).' },
-  { title: 'Recording', body: 'Record any live tail to a lossless JSONL file, browsable in the in-app recordings viewer.' },
+// Matrix column headers, in the same order as each capability's support tuple.
+const matrixBrokers = [
+  { name: 'Redis', color: '#fb4934' },
+  { name: 'AMQP 1.0', color: '#83a598' },
+  { name: 'RabbitMQ', color: '#fe8019' },
 ];
 
 const title = 'Keyhole — a terminal UI for message & data brokers';
@@ -47,200 +41,790 @@ const description =
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://keyholetui.com" />
     <meta name="twitter:card" content="summary" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Mono:wght@400;700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
   </head>
 
   <body>
-    <main>
+    <div class="card">
+      <!-- nav -->
+      <nav class="nav">
+        <a class="brand" href={install} aria-label="Keyhole home">
+          <svg width="24" height="24" viewBox="0 0 32 32" aria-hidden="true"
+            ><path
+              d="M16 6a6 6 0 0 0-3.2 11.07L10.5 26h11l-2.3-8.93A6 6 0 0 0 16 6Z"
+              fill="none"
+              stroke="#fabd2f"
+              stroke-width="2.2"
+              stroke-linejoin="round"></path><circle cx="16" cy="12" r="2.4" fill="#fabd2f"
+            ></circle></svg
+          >
+          <span class="wordmark">Keyhole</span>
+        </a>
+        <div class="nav-right">
+          <a class="nav-link" href={docs} target="_blank" rel="noopener">Docs</a>
+          <a class="btn-install" href="#install">Install</a>
+        </div>
+      </nav>
+
+      <!-- hero -->
       <header class="hero">
-        <div class="logo" aria-hidden="true">🔑</div>
-        <h1>Keyhole</h1>
-        <p class="tagline">
-          A terminal UI for message &amp; data brokers — browse, watch live, and
-          record streams to disk.
-        </p>
-        <p class="brokers-line">
-          Redis · AMQP 1.0 · RabbitMQ — one self-contained binary.
-        </p>
+        <div class="badges">
+          <span class="badge"><span class="dot dot-green"></span>tail in realtime</span>
+          <span class="badge"><span class="dot dot-blue"></span>inspect any value</span>
+          <span class="badge"><span class="dot dot-red"></span>record taps → JSONL</span>
+        </div>
 
-        <section class="install" aria-label="Install">
-          <div class="code-row">
-            <pre><code id="install-cmd">{installVanity}</code></pre>
-            <button class="copy" data-copy="install-cmd" type="button">Copy</button>
+        <h1 class="h1">keyhole<span class="cursor" aria-hidden="true"></span></h1>
+
+        <p class="subhead">Watch your message brokers in realtime.</p>
+
+        <div class="install-box" id="install">
+          <span class="prompt">$</span>
+          <span class="cmd">{INSTALL_DISPLAY}</span>
+          <button class="copy" type="button" data-copy-cmd={INSTALL_COPY} aria-label="Copy install command"
+            >copy</button
+          >
+        </div>
+
+        <div class="actions">
+          <a class="gh-btn" href={repo} target="_blank" rel="noopener">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"
+              ><path
+                d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+              ></path></svg
+            >
+            Star on GitHub
+          </a>
+          <span class="actions-note"
+            >or <span class="actions-note-em">cargo install keyhole</span> · Nix · .deb / .rpm</span
+          >
+        </div>
+
+        <div class="preview">
+          <div class="preview-glow" aria-hidden="true"></div>
+          <div class="preview-panel">
+            <div class="preview-frame">
+              <KeyholeTui />
+            </div>
           </div>
-          <p class="install-note">
-            Prefer the fully verifiable path?
-            <a href={`${repo}#verifying-a-download`}>Install straight from GitHub</a>
-            and check the cosign signature + SLSA provenance.
-          </p>
-        </section>
-
-        <nav class="cta">
-          <a class="btn primary" href={repo}>GitHub</a>
-          <a class="btn" href={docs}>Docs</a>
-          <a class="btn" href={releases}>Releases</a>
-        </nav>
+        </div>
       </header>
 
-      <section class="panel" aria-labelledby="brokers-h">
-        <h2 id="brokers-h">Supported brokers</h2>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr><th>Capability</th><th>Redis</th><th>AMQP 1.0</th><th>RabbitMQ</th></tr>
-            </thead>
-            <tbody>
-              {brokers.map((r) => (
-                <tr>
-                  <td>{r.cap}</td>
-                  <td class="c">{r.redis}</td>
-                  <td class="c">{r.amqp}</td>
-                  <td class="c">{r.rabbit}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-        <p class="muted">All three brokers are always built into the binary.</p>
-      </section>
-
-      <section class="panel" aria-labelledby="features-h">
-        <h2 id="features-h">Features</h2>
-        <div class="grid">
-          {features.map((f) => (
-            <article class="card">
-              <h3>{f.title}</h3>
-              <p>{f.body}</p>
-            </article>
-          ))}
+      <!-- supported brokers -->
+      <section class="brokers" aria-labelledby="brokers-eyebrow">
+        <div class="eyebrow" id="brokers-eyebrow">SUPPORTED BROKERS</div>
+        <div class="broker-row">
+          {
+            brokerTiles.map((b) => (
+              <div class="broker">
+                <div class="broker-tile">
+                  <span class="broker-dot" style={`background:${b.dot};box-shadow:0 0 0 6px ${b.ring}`} />
+                </div>
+                <span class="broker-name">{b.name}</span>
+              </div>
+            ))
+          }
         </div>
       </section>
 
-      <section class="panel verify" aria-labelledby="verify-h">
-        <h2 id="verify-h">Trustworthy by default</h2>
-        <p>
-          Keyhole is observe-first: browsing, inspecting, tailing and recording
-          are all read-only. Every release artifact is checksummed, signed
-          (sigstore/cosign keyless) and carries SLSA build-provenance
-          attestations, alongside a CycloneDX SBOM. The canonical, verifiable
-          install command points straight at GitHub:
-        </p>
-        <pre class="block"><code>{installGitHub}</code></pre>
+      <!-- capabilities matrix -->
+      <section class="caps" aria-labelledby="caps-h">
+        <div class="caps-head">
+          <div class="eyebrow">CAPABILITIES</div>
+          <h2 class="h2" id="caps-h">What you get, per broker</h2>
+          <p class="caps-sub">Hover any row for the detail.</p>
+        </div>
+
+        <div class="matrix-scroll">
+          <div class="matrix">
+            <div class="matrix-head">
+              <div class="mh-cap">capability</div>
+              {matrixBrokers.map((b) => <div class="mh-broker" style={`color:${b.color}`}>{b.name}</div>)}
+            </div>
+
+            {
+              CAPABILITIES.map((c) => {
+                const cells = c.support.map(cell);
+                return (
+                  <div class="cap-row" tabindex="0">
+                    <div class="cap-cells">
+                      <div class="cap-name">{c.name}</div>
+                      {cells.map((cl) => (
+                        <div class="cap-cell" style={`color:${cl.color}`}>
+                          {cl.mark}
+                        </div>
+                      ))}
+                    </div>
+                    <div class="cap-detail">
+                      <p>{c.detail}</p>
+                    </div>
+                  </div>
+                );
+              })
+            }
+          </div>
+        </div>
       </section>
 
-      <footer>
-        <p>
-          Licensed under <a href={`${repo}/blob/main/LICENSE-MIT`}>MIT</a> or
-          <a href={`${repo}/blob/main/LICENSE-APACHE`}>Apache-2.0</a>.
-        </p>
-        <p class="muted">
-          <a href={repo}>Source</a> · <a href={docs}>Docs</a> ·
-          <a href={releases}>Releases</a> ·
-          <a href={`${repo}/security/policy`}>Security</a>
-        </p>
+      <!-- trustworthy by default -->
+      <section class="verify" aria-labelledby="verify-h">
+        <div class="caps-head">
+          <div class="eyebrow">TRUSTWORTHY BY DEFAULT</div>
+          <h2 class="h2" id="verify-h">Verifiable, observe-first</h2>
+          <p class="caps-sub">Read-only by design — and every release is signed.</p>
+        </div>
+
+        <div class="verify-body">
+          <p class="verify-copy">
+            Browsing, inspecting, tailing and recording are all read-only. Every release artifact is
+            checksummed, signed (sigstore/cosign keyless) and carries SLSA build-provenance
+            attestations, alongside a CycloneDX SBOM. The canonical, verifiable install command
+            points straight at GitHub:
+          </p>
+          <div class="verify-box">
+            <pre class="verify-cmd"><span class="prompt">$ </span>{INSTALL_GITHUB}</pre>
+            <button
+              class="copy"
+              type="button"
+              data-copy-cmd={INSTALL_GITHUB}
+              aria-label="Copy verifiable install command">copy</button
+            >
+          </div>
+        </div>
+      </section>
+
+      <!-- footer -->
+      <footer class="footer">
+        <svg width="22" height="22" viewBox="0 0 32 32" aria-hidden="true"
+          ><path
+            d="M16 6a6 6 0 0 0-3.2 11.07L10.5 26h11l-2.3-8.93A6 6 0 0 0 16 6Z"
+            fill="none"
+            stroke="#fabd2f"
+            stroke-width="2.2"
+            stroke-linejoin="round"></path><circle cx="16" cy="12" r="2.4" fill="#fabd2f"
+          ></circle></svg
+        >
+        <span class="foot-mark">Keyhole</span>
+        <span class="foot-meta">© 2026 · MIT · Apache-2.0</span>
+        <div class="foot-links">
+          <a href={repo} target="_blank" rel="noopener">GitHub</a>
+          <a href={docs} target="_blank" rel="noopener">Docs</a>
+          <a href={install} target="_blank" rel="noopener">Install</a>
+          <a href={changelog} target="_blank" rel="noopener">Changelog</a>
+          <a href={security} target="_blank" rel="noopener">Security</a>
+        </div>
       </footer>
-    </main>
+    </div>
 
     <script>
-      document.querySelectorAll('button.copy').forEach((btn) => {
+      const timers = new WeakMap<HTMLElement, number>();
+      for (const btn of document.querySelectorAll<HTMLButtonElement>('button.copy')) {
         btn.addEventListener('click', async () => {
-          const id = btn.getAttribute('data-copy');
-          const el = id ? document.getElementById(id) : null;
-          if (!el || !el.textContent) return;
+          const cmd = btn.dataset.copyCmd;
+          if (!cmd) return;
           try {
-            await navigator.clipboard.writeText(el.textContent);
-            const prev = btn.textContent;
-            btn.textContent = 'Copied';
-            setTimeout(() => (btn.textContent = prev), 1500);
+            await navigator.clipboard?.writeText(cmd);
           } catch {
-            /* clipboard unavailable; ignore */
+            /* clipboard unavailable; still give feedback */
           }
+          btn.textContent = 'copied ✓';
+          window.clearTimeout(timers.get(btn));
+          timers.set(
+            btn,
+            window.setTimeout(() => {
+              btn.textContent = 'copy';
+            }, 1600),
+          );
         });
-      });
+      }
     </script>
 
-    <style>
+    <style is:global>
       :root {
-        --bg: #0d1117;
-        --panel: #161b22;
-        --border: #30363d;
-        --fg: #e6edf3;
-        --muted: #9198a1;
-        --accent: #f2cc60;
-        --accent-2: #58a6ff;
-        --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+        --bg: #1d2021;
+        --card: #282828;
+        --raised: #32302f;
+        --sel: #504945;
+        --border: #3c3836;
+        --border-strong: #504945;
+        --fg: #ebdbb2;
+        --bright: #fbf1c7;
+        --sec: #bdae93;
+        --sec2: #d5c4a1;
+        --sec3: #a89984;
+        --muted: #928374;
+        --yellow: #fabd2f;
+        --green: #8ec07c;
+        --lime: #b8bb26;
+        --blue: #83a598;
+        --red: #fb4934;
+        --orange: #fe8019;
+        --mono: 'JetBrains Mono', ui-monospace, monospace;
+        --display: 'Space Mono', ui-monospace, monospace;
+        --sans: 'Hanken Grotesk', system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
       }
-      * { box-sizing: border-box; }
-      html { color-scheme: dark; }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        color-scheme: dark;
+      }
       body {
         margin: 0;
-        background: radial-gradient(1200px 600px at 50% -10%, #1b2330 0%, var(--bg) 60%);
+        min-height: 100vh;
+        background: var(--bg);
         color: var(--fg);
-        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-        line-height: 1.6;
+        font-family: var(--sans);
+        display: flex;
+        justify-content: center;
+        padding: 48px 24px;
         -webkit-font-smoothing: antialiased;
       }
-      main { max-width: 880px; margin: 0 auto; padding: 0 1.25rem 4rem; }
-      a { color: var(--accent-2); }
+    </style>
 
-      .hero { text-align: center; padding: 4.5rem 0 2.5rem; }
-      .logo { font-size: 4rem; line-height: 1; }
-      h1 { font-size: 3rem; margin: 0.4rem 0 0; letter-spacing: -0.02em; }
-      .tagline { font-size: 1.25rem; max-width: 38ch; margin: 1rem auto 0.4rem; }
-      .brokers-line { color: var(--muted); margin: 0 0 1.75rem; }
-
-      .install { max-width: 640px; margin: 0 auto; }
-      .code-row { display: flex; align-items: stretch; gap: 0.5rem; }
-      .code-row pre {
-        flex: 1; margin: 0; text-align: left; overflow-x: auto;
-        background: var(--panel); border: 1px solid var(--border);
-        border-radius: 10px; padding: 0.85rem 1rem;
+    <style>
+      @keyframes kh-glow {
+        0%,
+        100% {
+          opacity: 0.55;
+        }
+        50% {
+          opacity: 0.9;
+        }
       }
-      code { font-family: var(--mono); font-size: 0.92rem; }
+      @keyframes kh-blink {
+        0%,
+        38% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.15;
+        }
+        62%,
+        100% {
+          opacity: 1;
+        }
+      }
+      @keyframes kh-rise {
+        from {
+          opacity: 0;
+          transform: translateY(16px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes kh-fade {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+
+      .card {
+        width: 1280px;
+        max-width: 100%;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        overflow: hidden;
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.4),
+          0 30px 70px rgba(0, 0, 0, 0.22);
+      }
+
+      /* nav */
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 22px 64px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        text-decoration: none;
+      }
+      .wordmark {
+        font-weight: 800;
+        color: var(--fg);
+        font-size: 18px;
+        letter-spacing: -0.01em;
+      }
+      .nav-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 30px;
+        font-size: 14.5px;
+        font-weight: 500;
+      }
+      .nav-link {
+        color: var(--sec);
+        text-decoration: none;
+      }
+      .nav-link:hover {
+        color: var(--fg);
+      }
+      .btn-install {
+        color: var(--card);
+        text-decoration: none;
+        background: var(--yellow);
+        border-radius: 8px;
+        padding: 9px 16px;
+        font-weight: 700;
+      }
+
+      /* hero */
+      .hero {
+        padding: 80px 64px 8px;
+        text-align: center;
+      }
+      .badges {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin: 0 auto 34px;
+        max-width: 680px;
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        color: var(--sec2);
+        border: 1px solid var(--border);
+        background: var(--raised);
+        border-radius: 999px;
+        padding: 6px 14px;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot-green {
+        background: var(--lime);
+        animation: kh-glow 1.8s ease-in-out infinite;
+      }
+      .dot-blue {
+        background: var(--blue);
+      }
+      .dot-red {
+        background: var(--red);
+      }
+
+      .h1 {
+        font-family: var(--display);
+        font-weight: 700;
+        font-size: clamp(2.75rem, 11vw, 96px);
+        line-height: 1;
+        letter-spacing: -0.04em;
+        color: var(--bright);
+        margin: 0 0 20px;
+        animation: kh-rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+      }
+      .cursor {
+        display: inline-block;
+        width: 0.16em;
+        height: 0.74em;
+        background: var(--yellow);
+        border-radius: 1px;
+        margin-left: 0.1em;
+        vertical-align: -0.02em;
+        animation: kh-blink 1.4s ease-in-out infinite;
+      }
+      .subhead {
+        font-size: 24px;
+        line-height: 1.45;
+        color: var(--sec);
+        max-width: 600px;
+        margin: 0 auto 22px;
+        animation: kh-fade 0.8s ease 0.25s both;
+      }
+
+      .install-box {
+        max-width: 620px;
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background: var(--bg);
+        border: 1px solid var(--border-strong);
+        border-radius: 11px;
+        padding: 16px 18px;
+        font-family: var(--mono);
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+        scroll-margin-top: 24px;
+      }
+      .prompt {
+        color: var(--lime);
+        flex: none;
+      }
+      .cmd {
+        color: var(--fg);
+        font-size: 13.5px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 1;
+        text-align: left;
+      }
       .copy {
-        flex: 0 0 auto; cursor: pointer; color: var(--fg);
-        background: var(--panel); border: 1px solid var(--border);
-        border-radius: 10px; padding: 0 1rem; font-size: 0.9rem;
+        flex: none;
+        cursor: pointer;
+        border: 1px solid var(--border-strong);
+        background: var(--raised);
+        color: var(--fg);
+        font-family: var(--mono);
+        font-weight: 600;
+        font-size: 12px;
+        border-radius: 7px;
+        padding: 7px 13px;
       }
-      .copy:hover { border-color: var(--accent); }
-      .install-note { font-size: 0.9rem; color: var(--muted); margin: 0.6rem 0 0; }
-
-      .cta { display: flex; gap: 0.75rem; justify-content: center; margin-top: 1.75rem; flex-wrap: wrap; }
-      .btn {
-        display: inline-block; text-decoration: none; color: var(--fg);
-        border: 1px solid var(--border); border-radius: 8px;
-        padding: 0.55rem 1.25rem; font-weight: 600;
-      }
-      .btn:hover { border-color: var(--accent); }
-      .btn.primary { background: var(--accent); color: #1a1300; border-color: var(--accent); }
-
-      .panel { margin-top: 2.5rem; }
-      .panel h2 { font-size: 1.5rem; margin: 0 0 1rem; }
-
-      .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
-      table { width: 100%; border-collapse: collapse; min-width: 520px; }
-      th, td { padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--border); text-align: left; }
-      thead th { background: var(--panel); font-size: 0.9rem; color: var(--muted); }
-      tbody tr:last-child td { border-bottom: 0; }
-      td.c, th:not(:first-child) { text-align: center; }
-
-      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
-      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 1.1rem 1.2rem; }
-      .card h3 { margin: 0 0 0.4rem; color: var(--accent); font-size: 1.05rem; }
-      .card p { margin: 0; color: var(--fg); font-size: 0.95rem; }
-
-      .verify p { color: var(--muted); }
-      pre.block {
-        background: var(--panel); border: 1px solid var(--border);
-        border-radius: 10px; padding: 1rem; overflow-x: auto; margin: 1rem 0 0;
+      .copy:hover {
+        border-color: var(--yellow);
       }
 
-      footer { margin-top: 3.5rem; padding-top: 1.5rem; border-top: 1px solid var(--border); text-align: center; }
-      footer p { margin: 0.25rem 0; }
-      .muted { color: var(--muted); }
+      .actions {
+        margin-top: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        flex-wrap: wrap;
+      }
+      .gh-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13.5px;
+        font-weight: 600;
+        color: var(--fg);
+        text-decoration: none;
+        border: 1px solid var(--border-strong);
+        background: var(--raised);
+        border-radius: 8px;
+        padding: 8px 15px;
+      }
+      .gh-btn:hover {
+        border-color: var(--yellow);
+      }
+      .actions-note {
+        font-family: var(--mono);
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .actions-note-em {
+        color: var(--sec);
+      }
 
-      @media (max-width: 480px) {
-        h1 { font-size: 2.25rem; }
-        .tagline { font-size: 1.1rem; }
+      .preview {
+        position: relative;
+        max-width: 900px;
+        margin: 52px auto 0;
+      }
+      .preview-glow {
+        position: absolute;
+        inset: -30px 0 -10px;
+        background: radial-gradient(58% 62% at 50% 38%, rgba(142, 192, 124, 0.16), transparent 72%);
+        filter: blur(22px);
+        animation: kh-glow 4.5s ease-in-out infinite;
+        pointer-events: none;
+      }
+      .preview-panel {
+        position: relative;
+        border-radius: 12px;
+        box-shadow: 0 40px 90px rgba(0, 0, 0, 0.55);
+      }
+      .preview-frame {
+        display: block;
+        width: 100%;
+        height: 560px;
+      }
+
+      /* eyebrow + section headers */
+      .eyebrow {
+        text-align: center;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        color: var(--yellow);
+        letter-spacing: 0.07em;
+      }
+      .h2 {
+        font-weight: 800;
+        font-size: 34px;
+        letter-spacing: -0.02em;
+        color: var(--bright);
+        margin: 0 0 10px;
+      }
+
+      /* supported brokers */
+      .brokers {
+        padding: 72px 64px 8px;
+      }
+      .brokers .eyebrow {
+        margin-bottom: 38px;
+      }
+      .broker-row {
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        gap: 72px;
+        flex-wrap: wrap;
+      }
+      .broker {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 16px;
+      }
+      .broker-tile {
+        width: 78px;
+        height: 78px;
+        border-radius: 18px;
+        background: var(--raised);
+        border: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .broker-dot {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+      }
+      .broker-name {
+        font-family: var(--mono);
+        font-weight: 700;
+        font-size: 15px;
+        color: var(--fg);
+      }
+
+      /* capabilities matrix */
+      .caps {
+        padding: 72px 64px 8px;
+      }
+      .caps-head {
+        text-align: center;
+        margin-bottom: 36px;
+      }
+      .caps-head .eyebrow {
+        letter-spacing: 0.06em;
+        margin-bottom: 12px;
+      }
+      .caps-sub {
+        font-size: 15px;
+        color: var(--muted);
+        margin: 0;
+      }
+      .matrix-scroll {
+        max-width: 940px;
+        margin: 0 auto;
+        overflow-x: auto;
+      }
+      .matrix {
+        min-width: 560px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        overflow: hidden;
+      }
+      .matrix-head {
+        display: grid;
+        grid-template-columns: 1fr 130px 130px 130px;
+        background: var(--raised);
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--sec);
+        font-family: var(--mono);
+      }
+      .mh-cap {
+        padding: 16px 22px;
+      }
+      .mh-broker {
+        padding: 16px 0;
+        text-align: center;
+      }
+      .cap-row {
+        border-bottom: 1px solid var(--raised);
+        background: var(--card);
+        transition: background 0.15s ease;
+        cursor: default;
+        outline: none;
+      }
+      .cap-row:last-child {
+        border-bottom: 0;
+      }
+      .cap-row:hover,
+      .cap-row:focus-visible {
+        background: var(--raised);
+      }
+      .cap-cells {
+        display: grid;
+        grid-template-columns: 1fr 130px 130px 130px;
+        align-items: center;
+        font-size: 14.5px;
+      }
+      .cap-name {
+        padding: 16px 22px;
+        color: var(--sec2);
+      }
+      .cap-cell {
+        padding: 16px 0;
+        text-align: center;
+        font-weight: 700;
+      }
+      .cap-detail {
+        max-height: 0;
+        overflow: hidden;
+        opacity: 0;
+        padding: 0 22px;
+        transition:
+          max-height 0.2s ease,
+          opacity 0.2s ease,
+          padding 0.2s ease;
+      }
+      .cap-row:hover .cap-detail,
+      .cap-row:focus-visible .cap-detail {
+        max-height: 8rem;
+        opacity: 1;
+        padding: 0 22px 18px;
+      }
+      .cap-detail p {
+        margin: 0;
+        font-size: 14px;
+        line-height: 1.6;
+        color: var(--sec3);
+        max-width: 760px;
+      }
+
+      /* trustworthy by default */
+      .verify {
+        padding: 72px 64px 8px;
+      }
+      .verify-body {
+        max-width: 760px;
+        margin: 0 auto;
+      }
+      .verify-copy {
+        font-size: 15px;
+        line-height: 1.7;
+        color: var(--sec);
+        margin: 0 0 20px;
+        text-align: center;
+      }
+      .verify-box {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        background: var(--bg);
+        border: 1px solid var(--border-strong);
+        border-radius: 11px;
+        padding: 16px 18px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+      }
+      .verify-cmd {
+        margin: 0;
+        flex: 1;
+        min-width: 0;
+        overflow-x: auto;
+        font-family: var(--mono);
+        font-size: 13px;
+        line-height: 1.6;
+        color: var(--fg);
+        white-space: pre;
+      }
+      .verify-box .prompt {
+        color: var(--lime);
+      }
+
+      /* footer */
+      .footer {
+        margin-top: 72px;
+        border-top: 1px solid var(--border);
+        padding: 40px 64px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+      .foot-mark {
+        font-weight: 700;
+        font-size: 16px;
+        color: var(--fg);
+      }
+      .foot-meta {
+        font-size: 14px;
+        color: var(--muted);
+      }
+      .foot-links {
+        margin-left: auto;
+        display: flex;
+        gap: 26px;
+        flex-wrap: wrap;
+        font-size: 14.5px;
+        font-weight: 500;
+      }
+      .foot-links a {
+        color: var(--sec);
+        text-decoration: none;
+      }
+      .foot-links a:hover {
+        color: var(--fg);
+      }
+
+      /* responsive: keep the desktop look, degrade gracefully on narrow screens */
+      @media (max-width: 720px) {
+        body {
+          padding: 16px;
+        }
+        .nav {
+          padding: 18px 24px;
+        }
+        .hero {
+          padding: 56px 24px 8px;
+        }
+        .brokers,
+        .caps,
+        .verify {
+          padding: 56px 24px 8px;
+        }
+        .footer {
+          padding: 32px 24px;
+        }
+        .broker-row {
+          gap: 40px;
+        }
+        .subhead {
+          font-size: 20px;
+        }
+        .h2 {
+          font-size: 28px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .h1,
+        .subhead,
+        .cursor,
+        .dot-green,
+        .preview-glow {
+          animation: none;
+        }
       }
     </style>
   </body>

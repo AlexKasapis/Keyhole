@@ -1,0 +1,485 @@
+---
+// Embedded, animated mock of the Keyhole terminal app. Fills its container
+// (100% w/h). The markup below is a deterministic server-rendered first paint
+// (seeded rng + fixed clock, so the build is reproducible and the panel is never
+// empty without JS); the client script in <script> re-seeds with real
+// randomness/time on load and drives the live loop. Pure logic lives in
+// ../lib/tui-demo and is unit-tested.
+import {
+  INITIAL_STATE,
+  seedEvents,
+  makeSeededRng,
+  formatReceived,
+  recLabel,
+  renderHints,
+} from '../lib/tui-demo';
+
+// --- Static, presentational layout data (the fake keyspace + value pane) ------
+type KeyRow =
+  | { kind: 'group'; label: string }
+  | { kind: 'key'; label: string; type: string; ttl: string; size: string; selected?: boolean };
+
+const keyRows: KeyRow[] = [
+  { kind: 'group', label: '  ▾ orders (128)' },
+  { kind: 'key', label: '    48213', type: 'string', ttl: '2m', size: '64 B' },
+  { kind: 'key', label: '    48214', type: 'string', ttl: '2m', size: '61 B' },
+  { kind: 'group', label: '  ▾ session (2.1k)' },
+  { kind: 'key', label: '▶   9f2ac1', type: 'hash', ttl: '14m', size: '232 B', selected: true },
+  { kind: 'key', label: '    7c10de', type: 'hash', ttl: '9m', size: '198 B' },
+  { kind: 'group', label: '  ▸ cart (88)' },
+  { kind: 'group', label: '  ▾ stream (4)' },
+  { kind: 'key', label: '    telemetry', type: 'stream', ttl: '—', size: '1.2 MB' },
+];
+
+const valueFields = [
+  { k: 'user', v: 'u_10042' },
+  { k: 'ip', v: '10.2.7.118' },
+  { k: 'cart', v: '8841' },
+  { k: 'seen', v: '2026-06-26T14:02:09Z' },
+];
+
+const tabs = ['Details', 'Console', 'Monitor', 'Keyspace', 'Pub/Sub'];
+
+// --- Deterministic first paint -----------------------------------------------
+const seedRng = makeSeededRng(0x0a11ce);
+let tick = 0;
+const seedClock = () => new Date(2026, 5, 26, 14, 2, 9, (tick++ * 137) % 1000);
+const events = seedEvents(seedRng, seedClock);
+const received = formatReceived(INITIAL_STATE.received);
+const rec = recLabel(INITIAL_STATE.recRecords, INITIAL_STATE.recBytes);
+const hints = renderHints();
+---
+
+<div class="kh-tui" data-tui aria-hidden="true">
+  <!-- terminal emulator chrome (the terminal, not the app) -->
+  <div class="chrome">
+    <span class="cdot"></span><span class="cdot"></span><span class="cdot"></span>
+    <span class="ctitle">keyhole — prod-cache</span>
+  </div>
+
+  <!-- app body -->
+  <div class="body">
+    <!-- Server band -->
+    <div class="box server">
+      <div class="box-label">
+        <span class="hl">Server</span><span class="live-dot">●</span><span class="muted">connected</span>
+      </div>
+      <div class="nowrap">
+        <span class="hl">prod-cache</span><span class="muted"> · </span><span>127.0.0.1:6379</span
+        ><span class="muted"> · db</span><span>0</span>
+      </div>
+    </div>
+
+    <!-- keys table + value pane -->
+    <div class="mid">
+      <!-- Keys pane (focused → green border) -->
+      <div class="box box--focus keys">
+        <div class="box-label hl">Keys</div>
+        <div class="kgrid khead">
+          <div class="kh">Key</div>
+          <div class="kh">Type</div>
+          <div class="kh">TTL</div>
+          <div class="kh">Size</div>
+        </div>
+        <div class="krows">
+          {
+            keyRows.map((r) =>
+              r.kind === 'group' ? (
+                <div class="kgrid krow">
+                  <span class="pre kgroup">{r.label}</span><span /><span /><span />
+                </div>
+              ) : (
+                <div class:list={['kgrid', 'krow', { 'krow--sel': r.selected }]}>
+                  <span class="pre">{r.label}</span>
+                  <span>{r.type}</span>
+                  <span>{r.ttl}</span>
+                  <span>{r.size}</span>
+                </div>
+              ),
+            )
+          }
+        </div>
+      </div>
+
+      <!-- Value pane (unfocused) -->
+      <div class="box value">
+        <div class="box-label hl pre">session:9f2ac1</div>
+        <div class="pre"><span class="muted">hash · 4 fields</span></div>
+        <div>&nbsp;</div>
+        {
+          valueFields.map((f) => (
+            <div class="pre">
+              <span class="muted">{f.k.padEnd(7)}</span>
+              <span>{f.v}</span>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+
+    <!-- bottom panel: tab strip is the title -->
+    <div class="box bottom">
+      <div class="box-label tabs">
+        {
+          tabs.map((t) => (
+            <>
+              <span class="tab">{t}</span>
+              <span class="tsep"> │ </span>
+            </>
+          ))
+        }
+        <span class="tab tab--active">orders.*</span><span class="rec-dot"> ●</span>
+      </div>
+
+      <!-- tail status row -->
+      <div class="status">
+        <span class="pre"
+          ><span class="lime">live</span><span class="muted"> · </span><span class="sec" data-tui-received
+            >{received}</span
+          ><span class="muted"> events</span></span
+        >
+        <span class="pre rec" data-tui-reclabel>{rec}</span>
+      </div>
+
+      <!-- event scrollback (newest at bottom) -->
+      <div class="scroll" data-tui-events>
+        {
+          events.map((ev) => (
+            <div class="evt">
+              <span class="muted">{ev.ts}</span>
+              <span>{'  '}</span>
+              <span class="green">{ev.source}</span>
+              <span>{' '}</span>
+              <span>{ev.payload}</span>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+
+  <!-- footer hint line (full width, status-bar background) -->
+  <div class="hints">
+    {
+      hints.map((h) => (
+        <>
+          <span class="muted">{h.sep}</span>
+          <span class="green b">{h.key}</span>
+          <span>&nbsp;</span>
+          <span class="muted">{h.act}</span>
+        </>
+      ))
+    }
+  </div>
+</div>
+
+<style>
+  .kh-tui {
+    /* Self-contained Gruvbox tokens so the component stands alone. */
+    --bg: #282828;
+    --chrome: #1d2021;
+    --raised: #32302f;
+    --sel: #504945;
+    --tab: #665c54;
+    --border: #3c3836;
+    --border-strong: #504945;
+    --fg: #ebdbb2;
+    --bright: #fbf1c7;
+    --sec: #d5c4a1;
+    --muted: #928374;
+    --green: #8ec07c;
+    --lime: #b8bb26;
+    --red: #fb4934;
+
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    overflow: hidden;
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--fg);
+    text-align: left;
+  }
+
+  .pre {
+    white-space: pre;
+  }
+  .nowrap {
+    white-space: nowrap;
+  }
+  .muted {
+    color: var(--muted);
+  }
+  .sec {
+    color: var(--sec);
+  }
+  .hl {
+    color: var(--green);
+    font-weight: 700;
+  }
+  .green {
+    color: var(--green);
+  }
+  .lime {
+    color: var(--lime);
+  }
+  .b {
+    font-weight: 700;
+  }
+
+  /* terminal chrome */
+  .chrome {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 13px;
+    background: var(--chrome);
+    border-bottom: 1px solid var(--border);
+    flex: none;
+  }
+  .cdot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--sel);
+  }
+  .ctitle {
+    margin-left: 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+    flex: none;
+  }
+
+  /* app body */
+  .body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 11px 11px 9px;
+    min-height: 0;
+  }
+
+  /* labeled-box motif */
+  .box {
+    position: relative;
+    border: 1px solid var(--border-strong);
+    border-radius: 1px;
+  }
+  .box--focus {
+    border-color: var(--green);
+  }
+  .box-label {
+    position: absolute;
+    top: -9px;
+    left: 11px;
+    background: var(--bg);
+    padding: 0 4px;
+    white-space: nowrap;
+  }
+
+  .server {
+    padding: 5px 13px;
+    flex: none;
+  }
+  .live-dot {
+    color: var(--lime);
+    margin: 0 7px;
+    animation: kh-breathe 2s ease-in-out infinite;
+  }
+
+  .mid {
+    flex: 1;
+    display: flex;
+    gap: 9px;
+    min-height: 0;
+  }
+
+  .keys {
+    flex: 1;
+    padding: 6px 0 4px;
+    min-width: 0;
+  }
+  .kgrid {
+    display: grid;
+    grid-template-columns: 1fr 52px 62px 56px;
+    column-gap: 8px;
+    padding: 0 11px;
+  }
+  .khead .kh {
+    color: var(--green);
+    font-weight: 700;
+    text-decoration: underline;
+  }
+  .krows {
+    margin-top: 2px;
+  }
+  .kgroup {
+    color: var(--green);
+    font-weight: 700;
+  }
+  .krow--sel {
+    background: var(--sel);
+    font-weight: 700;
+  }
+
+  .value {
+    flex: 1;
+    padding: 6px 13px 4px;
+    min-width: 0;
+  }
+
+  .bottom {
+    flex: none;
+    height: 178px;
+    display: flex;
+    flex-direction: column;
+  }
+  .tabs {
+    display: flex;
+    align-items: center;
+  }
+  .tab {
+    color: var(--sec);
+  }
+  .tsep {
+    color: var(--muted);
+  }
+  .tab--active {
+    background: var(--tab);
+    color: var(--bright);
+    font-weight: 700;
+    padding: 0 4px;
+  }
+  .rec-dot {
+    color: var(--red);
+  }
+
+  .status {
+    display: flex;
+    align-items: center;
+    background: var(--raised);
+    padding: 2px 11px;
+    flex: none;
+    margin-top: 6px;
+  }
+  .rec {
+    margin-left: auto;
+    color: var(--red);
+  }
+
+  .scroll {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 3px 11px 5px;
+    overflow: hidden;
+    min-height: 0;
+  }
+  .evt {
+    white-space: pre;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .hints {
+    background: var(--raised);
+    padding: 3px 9px;
+    flex: none;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  @keyframes kh-breathe {
+    0%,
+    100% {
+      opacity: 0.5;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .live-dot {
+      animation: none;
+    }
+  }
+</style>
+
+<script>
+  import {
+    INITIAL_STATE,
+    seedEvents,
+    step,
+    nextDelay,
+    formatReceived,
+    recLabel,
+    type TuiState,
+  } from '../lib/tui-demo';
+
+  function buildEventLine(ev: { ts: string; source: string; payload: string }): HTMLDivElement {
+    const div = document.createElement('div');
+    div.className = 'evt';
+    const ts = document.createElement('span');
+    ts.className = 'muted';
+    ts.textContent = ev.ts;
+    const gap2 = document.createElement('span');
+    gap2.textContent = '  ';
+    const src = document.createElement('span');
+    src.className = 'green';
+    src.textContent = ev.source;
+    const gap1 = document.createElement('span');
+    gap1.textContent = ' ';
+    const pay = document.createElement('span');
+    pay.textContent = ev.payload;
+    div.append(ts, gap2, src, gap1, pay);
+    return div;
+  }
+
+  function initTui(root: Element): void {
+    const eventsEl = root.querySelector<HTMLElement>('[data-tui-events]');
+    const receivedEl = root.querySelector<HTMLElement>('[data-tui-received]');
+    const recEl = root.querySelector<HTMLElement>('[data-tui-reclabel]');
+    if (!eventsEl || !receivedEl || !recEl) return;
+
+    const render = (state: TuiState): void => {
+      receivedEl.textContent = formatReceived(state.received);
+      recEl.textContent = recLabel(state.recRecords, state.recBytes);
+      eventsEl.replaceChildren(...state.events.map(buildEventLine));
+    };
+
+    // Re-seed with real randomness + wall-clock, replacing the static first paint.
+    let state: TuiState = {
+      ...INITIAL_STATE,
+      events: seedEvents(Math.random, () => new Date()),
+    };
+    render(state);
+
+    let timer: number;
+    const loop = (): void => {
+      timer = window.setTimeout(() => {
+        state = step(state, Math.random, new Date());
+        render(state);
+        loop();
+      }, nextDelay(Math.random));
+    };
+    loop();
+
+    // Clean up if the node is removed (e.g. Astro View Transitions swap the page).
+    document.addEventListener(
+      'astro:before-swap',
+      () => window.clearTimeout(timer),
+      { once: true },
+    );
+  }
+
+  document.querySelectorAll('[data-tui]').forEach(initTui);
+</script>
