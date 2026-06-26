@@ -12,7 +12,7 @@
 class Keyhole < Formula
   desc "Terminal UI to connect to brokers (Redis, AMQP), browse data, and record streams"
   homepage "https://github.com/AlexKasapis/Keyhole"
-  version "0.1.1"
+  version "0.1.2"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
