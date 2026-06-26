@@ -1,4 +1,6 @@
 /target
+# Per-session git worktrees (see CLAUDE.md workflow).
+/.wt
 *.rs.bk
 # Generated packaging assets (man page + shell completions from `keyhole gen`),
 # produced by `just package` and the release/CI workflows.

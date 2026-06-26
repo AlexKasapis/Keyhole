@@ -865,13 +865,13 @@ pub struct DestinationBrowser {
 
 /// The right-pane peek inspector for an AMQP connection: the messages from the
 /// last queue peek, which destination they belong to (a staleness guard, like
-/// [`ValueInspector::value_key`]), the scroll offset, and whether a peek is in
-/// flight.
+/// [`ValueInspector::value_key`]), the list scroll offset, and whether a peek is
+/// in flight.
 ///
-/// The pane has two states — a navigable *message list* and, for the selected
-/// message, an expanded *detail* view (full body + all metadata) — plus an
-/// optional substring `filter` over the list. Keyboard focus moves into the
-/// pane (`focused`) so `j`/`k` drive the message cursor rather than the
+/// The pane is a navigable *message list* over a *body preview* of the selected
+/// message (the analog of the Redis key list over its value pane), plus an
+/// optional substring `filter` over the list. Keyboard focus moves into the pane
+/// (`focused`, via Ctrl-→) so ↑/↓ drive the message cursor rather than the
 /// destination list.
 #[derive(Default)]
 pub struct PeekInspector {
@@ -881,14 +881,12 @@ pub struct PeekInspector {
     pub peeked: Option<SubSpec>,
     pub scroll: u16,
     pub pending: bool,
-    /// Whether the message pane (right) holds the keyboard. When false the
+    /// Whether the message list (right) holds the keyboard. When false the
     /// destination list (left) does. Reset to false whenever the selection or
     /// destination changes.
     pub focused: bool,
     /// Index of the highlighted message within the *filtered* list.
     pub selected: usize,
-    /// Whether the expanded single-message detail view is open.
-    pub detail: bool,
     /// Case-insensitive substring filter over message bodies and metadata; empty
     /// means show everything.
     pub filter: String,

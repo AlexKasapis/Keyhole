@@ -300,5 +300,4 @@ async fn amqp_with_messages(app: &mut App, bodies: &[&str]) {
     conn.peek.peeked = Some(SubSpec::Queue("orders".into()));
     conn.peek.selected = 0;
     conn.peek.focused = false;
-    conn.peek.detail = false;
 }

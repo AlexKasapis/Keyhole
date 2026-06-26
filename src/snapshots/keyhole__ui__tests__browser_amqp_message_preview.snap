@@ -1,21 +1,21 @@
 ---
 source: src/ui.rs
-assertion_line: 2022
+assertion_line: 2082
 expression: "render_lines(&mut app, 90, 24)"
 ---
-┌ Destinations ─────────────────────────────┐┌ queue:orders · message 2/2 ───────────────┐
-│  Destination                      Kind    ││received: 00:00:00.000                     │
-│▶ orders                           [queue] ││id: m-42                                   │
-│  alerts                           [topic] ││content-type: application/json             │
-│                                           ││app.region: eu                             │
+┌ Destinations ─────────────────────────────┐┌ queue:orders · 2 msgs ────────────────────┐
+│  Destination                      Kind    ││  00:00:00.000  orders             order #1│
+│▶ orders                           [queue] ││▶ 00:00:00.000  orders             m-42 {"i│
+│  alerts                           [topic] ││                                           │
 │                                           ││                                           │
-│                                           ││── body ──                                 │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           │└───────────────────────────────────────────┘
+│                                           │┌ message 2/2 ──────────────────────────────┐
 │                                           ││{                                          │
 │                                           ││  "id": 2                                  │
 │                                           ││}                                          │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
 │                                           ││                                           │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
@@ -26,4 +26,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter tails it · topic = live multicast · queue = non-destructive browse                │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ scroll · Esc/← list · : palette · ? help
+ ↑↓ messages · / filter · P publish · Ctrl-← destinations · ? help

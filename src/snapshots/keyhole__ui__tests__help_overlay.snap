@@ -1,45 +1,45 @@
 ---
 source: src/ui.rs
-assertion_line: 2006
+assertion_line: 1993
 expression: "render_lines(&mut app, 90, 40)"
 ---
-┌ Connection┌ Help ──────────────────────────────────────────────────────────┐───────────┐
-│           │Navigation                                                      │           │
-│           │  ↑ ↓ move   Home/End top/bottom   mouse wheel moves            │           │
-│           │  Enter connect (Connections)   Esc step back / quit            │           │
+┌ Connections │ Recordings ──────────────────────────────────────────────────────────────┐
+│                                                                                        │
+│                                  No saved connections.                                 │
+│                                                                                        │
+│                                  Press 'a' to add one.                                 │
+│           ┌ Help ──────────────────────────────────────────────────────────┐           │
+│           │Moving around — one model everywhere                            │           │
+│           │  ↑↓ move / scroll · Home/End ends · mouse wheel moves          │           │
+│           │  Ctrl-arrows move focus toward the neighbouring pane           │           │
+│           │  Tab cycles the tab strip in view · Esc leaves the screen      │           │
 │           │                                                                │           │
-│           │Home (Connections / Recordings tabs)                            │           │
-│           │  Tab / Shift-Tab switch tabs   b jump to last-viewed browser   │           │
-│           │  Connections: Enter connect · a add · e edit/delete · x disconn│           │
-│           │  Recordings: ↑↓ select · r rename · dd delete                  │           │
-│           │    Ctrl-←/→ focus list / viewer · viewer: ↑↓ scroll            │           │
+│           │Home (Connections / Recordings)                                 │           │
+│           │  Tab switch tabs · Enter opens a connection's browser          │           │
+│           │  Connections: a add · e edit/delete · x disconnect             │           │
+│           │  Recordings: r rename · dd delete · Ctrl-←/→ list / viewer     │           │
 │           │                                                                │           │
 │           │Browser — focus follows the pane                                │           │
-│           │  the focused pane has a highlighted border; the footer lists it│           │
-│           │  Tab / Shift-Tab focus & cycle the bottom subpanels            │           │
-│           │  Ctrl-↑ focus keys · Ctrl-↓ focus bottom                       │           │
-│           │                                                                │           │
-│           │Keys pane                                                       │           │
-│           │  / filter   o sort column   O direction                        │           │
-│           │  keys nest into collapsible groups by each ':' (start folded)  │           │
-│           │  →/l collapse/expand group   z fold/unfold all                 │           │
-│           │  keys auto-refresh                                             │           │
+│           │  Ctrl-↑ keys · Ctrl-↓ bottom (lands on Console)                │           │
+│           │  Tab cycles the bottom tabs · focused pane is highlighted      │           │
+│           │  keys: / filter · o/O sort · z fold all · →/l fold group       │           │
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
-│           │  tabs: Details (graphs+clients) · Console · Monitor · Keyspace │           │
-│           │  feed tab: follows live · p play/pause · r rec · x close (tails│           │
+│           │  Details · Console · Monitor · Keyspace · Pub/Sub · Tail       │           │
+│           │  feed: p play/pause · r rec · x close (tails)                  │           │
+│           │  Console: Enter runs · ↑↓ / Ctrl-P/N history · Ctrl-L clear    │           │
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
-│           │  (empty Tail = selected key · a glob makes a pattern)          │           │
-│           │  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history  │           │
-│           │  Ctrl-L clear · writes/admin refused                           │           │
 │           │                                                                │           │
 │           │AMQP browser                                                    │           │
-│           │  destinations are curated (AMQP 1.0 can't enumerate them)      │           │
-│           │  a add · r discover · x/d remove · Enter open (queue → peek, to│           │
-│           │  ↑↓ scroll an open message · Tail tab: type topic:/queue: then │           │
-│           │  peek mode (browse / skip / destructive) is set in : → Settings│           │
+│           │  Ctrl-→ messages · Ctrl-← destinations · ↑↓ pick message       │           │
+│           │  a add · r discover · x/d remove · Enter open · t tail         │           │
+│           │  P publish · / filter · the selected body previews below       │           │
 │           │                                                                │           │
-│           │General                                                         │           │
-│           │  : command palette   a add connection   ? toggle help          │           │
-└───────────│  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)   │───────────┘
- ↑↓ move · E└────────────────────────────────────────────────────────────────┘sc quit
+│           │Global keys (any pane)                                          │           │
+│           │  : palette · ? help · m mouse · Esc back · Ctrl-C quit         │           │
+│           └────────────────────────────────────────────────────────────────┘           │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ ↑↓ move · Enter connect · a add · Tab recordings · : palette · ? help · Esc Esc quit

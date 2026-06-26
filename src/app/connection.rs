@@ -20,7 +20,7 @@ impl App {
         {
             self.active = Some(idx);
             self.screen = initial_screen(&self.connections[idx].caps);
-            self.note_browser_view();
+            self.enter_browser();
             return;
         }
         self.start_connect(profile, None);
@@ -346,13 +346,8 @@ impl App {
         let Some(idx) = self.connections.iter().position(|c| c.name == name) else {
             return false;
         };
-        let id = self.connections[idx].id;
         self.connections[idx].handle.shutdown();
         self.connections.remove(idx);
-        // Forget a closed connection as the `b` target.
-        if self.last_browser == Some(id) {
-            self.last_browser = None;
-        }
         self.active = if self.connections.is_empty() {
             None
         } else {
@@ -434,9 +429,8 @@ impl App {
         let mode = self.peek_mode();
         if let Some(conn) = self.conn_by_id_mut(id) {
             // Selecting a destination always returns focus to the list and drops
-            // any open detail view / search filter from the previous selection.
+            // the search filter from the previous selection.
             conn.peek.focused = false;
-            conn.peek.detail = false;
             conn.peek.selected = 0;
             conn.peek.filter.clear();
             conn.peek.limit_hit = false;

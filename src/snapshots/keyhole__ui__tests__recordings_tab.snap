@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 1921
 expression: "render_lines(&mut app, 100, 14)"
 ---
 ┌ Connections │ Recordings ────────────────────────────────────────────────────────────────────────┐
@@ -15,4 +16,4 @@ expression: "render_lines(&mut app, 100, 14)"
 │                                            │                                                     │
 │                                            │                                                     │
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ move · r rename · dd delete · Ctrl-→ viewer · Tab connections · b browser · : palette · ? help ·
+ ↑↓ move · r rename · dd delete · Ctrl-→ viewer · Tab connections · : palette · ? help · Esc back

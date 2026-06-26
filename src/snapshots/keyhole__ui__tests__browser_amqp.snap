@@ -1,5 +1,6 @@
 ---
 source: src/ui.rs
+assertion_line: 2059
 expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Destinations ─────────────────────────────┐┌ queue:orders · 2 msgs ────────────────────┐
@@ -10,12 +11,12 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
+│                                           │└───────────────────────────────────────────┘
+│                                           │┌ message 1/2 ──────────────────────────────┐
+│                                           ││order #1                                   │
 │                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
+│                                           ││── metadata ──                             │
+│                                           ││received: 00:00:00.000                     │
 └───────────────────────────────────────────┘└───────────────────────────────────────────┘
 ┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
 │topic:name or queue:name:                                                               │
@@ -25,4 +26,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter tails it · topic = live multicast · queue = non-destructive browse                │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ destinations · ⏎/→ messages · a add · x remove · t tail · P publish · Tab/Ctrl-↓ tails
+ ↑↓ destinations · Ctrl-→ messages · a add · x remove · t tail · P publish · Tab/Ctrl-↓ ta

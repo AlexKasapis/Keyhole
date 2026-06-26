@@ -467,9 +467,9 @@ fn amqp_destination_pane(
 
 /// The AMQP browser's right pane: the messages from the last queue peek (the
 /// analog of the Redis value pane). A topic shows a tail hint (topics don't
-/// retain); a queue shows its peeked messages as a navigable, filterable list
-/// with a count/limit title, an empty / pending state, or — when a message is
-/// opened — the full single-message detail view (see [`amqp_detail_pane`]).
+/// retain); a queue with messages shows a navigable, filterable message list
+/// (upper) over a body preview of the selected message (lower) — the analog of
+/// the Redis key list + value pane. An empty / pending queue shows a hint.
 fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area: Rect) {
     let sel = conn.selected_destination().map(|d| (d.canonical(), d.kind));
     let queue_name = match sel.as_ref().map(|(name, kind)| (name.clone(), *kind)) {
@@ -501,17 +501,29 @@ fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area:
         );
     }
 
-    // A message is opened: show its full body + metadata instead of the list.
-    if conn.peek.detail {
-        return amqp_detail_pane(frame, conn, theme, area, &queue_name);
-    }
+    // The message list sits over a body preview of the selected message, the
+    // analog of the Redis key list + value pane.
+    let [list_area, preview_area] =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    amqp_message_list(frame, conn, theme, list_area, &queue_name);
+    amqp_body_preview(frame, conn, theme, preview_area);
+}
 
-    // Otherwise the navigable message list, with a count/limit/filter title and a
-    // selection highlight shown only while the pane holds the keyboard.
+/// The AMQP message list (upper-right pane): the peeked messages as a navigable,
+/// filterable list with a count/limit/filter title and a selection highlight
+/// shown only while the list holds the keyboard. Auto-follows the cursor when
+/// focused; otherwise the manual scroll is clamped against the content height.
+fn amqp_message_list(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    theme: &Theme,
+    area: Rect,
+    queue_name: &str,
+) {
     let total = conn.peek.events.len();
     let shown = conn.peek.filtered_len();
     let title = peek_list_title(
-        &queue_name,
+        queue_name,
         total,
         shown,
         &conn.peek.filter,
@@ -543,8 +555,6 @@ fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area:
             .collect()
     };
 
-    // Auto-follow the cursor when focused so the selection stays on screen;
-    // otherwise clamp the manual scroll against the content height.
     let inner_h = area.height.saturating_sub(2) as usize;
     if focused && inner_h > 0 && !indices.is_empty() {
         let scroll = conn.peek.scroll as usize;
@@ -604,21 +614,32 @@ fn peek_list_title(
     }
 }
 
-/// The AMQP browser's single-message detail view: the selected message's
-/// metadata (timestamp + every property/header/application property) followed by
-/// its full body, pretty-printed when it is JSON. Scrollable, since a body can be
-/// large.
-fn amqp_detail_pane(
-    frame: &mut Frame,
-    conn: &mut Connection,
-    theme: &Theme,
-    area: Rect,
-    queue_name: &str,
-) {
+/// The AMQP body preview (lower-right pane): the selected message's full body
+/// (pretty-printed when it is JSON) followed by its metadata. The analog of the
+/// Redis value pane — read-only and, like it, not keyboard-scrollable. The body
+/// leads so it stays anchored at the top of the pane; it is the metadata that
+/// clips when the pane is short. Selecting another message swaps the preview.
+fn amqp_body_preview(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
     let position = conn.peek.selected + 1;
     let count = conn.peek.filtered_len();
     let mut lines: Vec<Line> = Vec::new();
     if let Some(ev) = conn.peek.selected_event() {
+        // Body first (the message's "value", like the Redis value pane), so a long
+        // header set can never push it off-screen.
+        let body = match &ev.payload {
+            Payload::Json(s) => pretty_json(s),
+            other => other.as_text(),
+        };
+        if body.is_empty() {
+            lines.push(Line::styled("(empty body)", theme.dim));
+        } else {
+            for l in body.lines() {
+                lines.push(Line::raw(l.to_owned()));
+            }
+        }
+        // Metadata after the body, behind a separator; it clips first when short.
+        lines.push(Line::raw(""));
+        lines.push(Line::styled("── metadata ──", theme.dim));
         let ts = format!(
             "{:02}:{:02}:{:02}.{:03}",
             ev.ts.hour(),
@@ -636,37 +657,19 @@ fn amqp_detail_pane(
                 Span::raw(v.clone()),
             ]));
         }
-        lines.push(Line::raw(""));
-        lines.push(Line::styled("── body ──", theme.dim));
-        let body = match &ev.payload {
-            Payload::Json(s) => pretty_json(s),
-            other => other.as_text(),
-        };
-        // `str::lines` drops a trailing newline and never yields for an empty
-        // body, so an empty payload renders as a single blank line.
-        if body.is_empty() {
-            lines.push(Line::raw(""));
-        } else {
-            for l in body.lines() {
-                lines.push(Line::raw(l.to_owned()));
-            }
-        }
     } else {
         lines.push(Line::styled("No message selected.", theme.dim));
     }
 
-    let inner_h = area.height.saturating_sub(2) as usize;
-    conn.peek.scroll = conn.peek.scroll.min(max_scroll(lines.len(), inner_h));
-    let title = format!(" {queue_name} · message {position}/{count} ");
+    let title = format!(" message {position}/{count} ");
     let para = Paragraph::new(lines)
         .block(
             Block::bordered()
                 .title(title)
                 .title_style(theme.heading)
-                .border_style(theme.accent),
+                .border_style(theme.border),
         )
-        .wrap(Wrap { trim: false })
-        .scroll((conn.peek.scroll, 0));
+        .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
 }
 
@@ -1890,48 +1893,34 @@ pub fn conn_form(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 /// The help overlay.
 pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
     let lines = vec![
-        Line::styled("Navigation", theme.heading),
-        Line::from("  ↑ ↓ move   Home/End top/bottom   mouse wheel moves"),
-        Line::from("  Enter connect (Connections)   Esc step back / quit"),
+        Line::styled("Moving around — one model everywhere", theme.heading),
+        Line::from("  ↑↓ move / scroll · Home/End ends · mouse wheel moves"),
+        Line::from("  Ctrl-arrows move focus toward the neighbouring pane"),
+        Line::from("  Tab cycles the tab strip in view · Esc leaves the screen"),
         Line::from(""),
-        Line::styled("Home (Connections / Recordings tabs)", theme.heading),
-        Line::from("  Tab / Shift-Tab switch tabs   b jump to last-viewed browser"),
-        Line::from("  Connections: Enter connect · a add · e edit/delete · x disconnect"),
-        Line::from("  Recordings: ↑↓ select · r rename · dd delete"),
-        Line::from("    Ctrl-←/→ focus list / viewer · viewer: ↑↓ scroll"),
+        Line::styled("Home (Connections / Recordings)", theme.heading),
+        Line::from("  Tab switch tabs · Enter opens a connection's browser"),
+        Line::from("  Connections: a add · e edit/delete · x disconnect"),
+        Line::from("  Recordings: r rename · dd delete · Ctrl-←/→ list / viewer"),
         Line::from(""),
         Line::styled("Browser — focus follows the pane", theme.heading),
-        Line::from("  the focused pane has a highlighted border; the footer lists its keys"),
-        Line::from("  Tab / Shift-Tab focus & cycle the bottom subpanels"),
-        Line::from("  Ctrl-↑ focus keys · Ctrl-↓ focus bottom"),
-        Line::from(""),
-        Line::styled("Keys pane", theme.heading),
-        Line::from("  / filter   o sort column   O direction"),
-        Line::from("  keys nest into collapsible groups by each ':' (start folded)"),
-        Line::from("  →/l collapse/expand group   z fold/unfold all"),
-        Line::from("  keys auto-refresh"),
+        Line::from("  Ctrl-↑ keys · Ctrl-↓ bottom (lands on Console)"),
+        Line::from("  Tab cycles the bottom tabs · focused pane is highlighted"),
+        Line::from("  keys: / filter · o/O sort · z fold all · →/l fold group"),
         Line::from(""),
         Line::styled("Bottom subpanel (Redis)", theme.heading),
-        Line::from(
-            "  tabs: Details (graphs+clients) · Console · Monitor · Keyspace · Pub/Sub · Tail",
-        ),
-        Line::from("  feed tab: follows live · p play/pause · r rec · x close (tails)"),
+        Line::from("  Details · Console · Monitor · Keyspace · Pub/Sub · Tail"),
+        Line::from("  feed: p play/pause · r rec · x close (tails)"),
+        Line::from("  Console: Enter runs · ↑↓ / Ctrl-P/N history · Ctrl-L clear"),
         Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
-        Line::from("  (empty Tail = selected key · a glob makes a pattern)"),
-        Line::from("  Console: type a command, Enter runs · ↑↓ or Ctrl-P/N history"),
-        Line::from("  Ctrl-L clear · writes/admin refused"),
         Line::from(""),
         Line::styled("AMQP browser", theme.heading),
-        Line::from("  destinations are curated (AMQP 1.0 can't enumerate them)"),
-        Line::from(
-            "  a add · r discover · x/d remove · Enter open (queue → peek, topic → tail) · t tail",
-        ),
-        Line::from("  ↑↓ scroll an open message · Tail tab: type topic:/queue: then Enter"),
-        Line::from("  peek mode (browse / skip / destructive) is set in : → Settings"),
+        Line::from("  Ctrl-→ messages · Ctrl-← destinations · ↑↓ pick message"),
+        Line::from("  a add · r discover · x/d remove · Enter open · t tail"),
+        Line::from("  P publish · / filter · the selected body previews below"),
         Line::from(""),
-        Line::styled("General", theme.heading),
-        Line::from("  : command palette   a add connection   ? toggle help"),
-        Line::from("  Esc back   Ctrl-c quit   m toggle mouse (off = select/copy)"),
+        Line::styled("Global keys (any pane)", theme.heading),
+        Line::from("  : palette · ? help · m mouse · Esc back · Ctrl-C quit"),
     ];
     // Grow the overlay with its content (lines + 2 borders) so no row is
     // clipped, capped to the available height.

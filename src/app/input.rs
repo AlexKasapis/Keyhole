@@ -67,6 +67,12 @@ impl App {
             // Normal / Command / Subscribe are reconciled from the focused pane.
             InputMode::Normal | InputMode::Command | InputMode::Subscribe => {}
         }
+        // The global keys (quit / back / palette / help / mouse) are handled once
+        // here, ahead of every screen's dispatch, so they reach any non-text pane
+        // without each handler re-implementing them.
+        if self.try_global_key(key) {
+            return;
+        }
         match self.screen {
             Screen::Browser => self.handle_browser_key(key),
             // The Recordings tab is a two-pane browser (list + viewer) with its
@@ -82,21 +88,46 @@ impl App {
         }
     }
 
+    /// Keys handled globally, ahead of every screen's own dispatch — the only
+    /// place these five live, so they can never drift between panes. Returns
+    /// whether the key was consumed.
+    ///
+    /// Ctrl-C (quit) and Esc (back / leave the screen) fire in any non-modal
+    /// mode, including the focused Console and subscribe anchors, so typing can
+    /// never trap you. The palette (`:`), help (`?`) and mouse (`m`) toggles fire
+    /// only in [`InputMode::Normal`]; while a text subpanel holds the keyboard
+    /// they fall through to it as literal input. The full-screen text modals
+    /// (filter / form / rename / …) are dispatched before this runs, so their
+    /// Esc cancels the modal rather than leaving the screen.
+    fn try_global_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        match (ctrl, key.code) {
+            (true, KeyCode::Char('c')) => self.apply(Action::Quit),
+            (_, KeyCode::Esc) => self.apply(Action::Back),
+            (false, KeyCode::Char(':')) if self.mode == InputMode::Normal => {
+                self.apply(Action::OpenPalette)
+            }
+            (false, KeyCode::Char('?')) if self.mode == InputMode::Normal => {
+                self.apply(Action::ToggleHelp)
+            }
+            (false, KeyCode::Char('m')) if self.mode == InputMode::Normal => {
+                self.apply(Action::ToggleMouse)
+            }
+            _ => return false,
+        }
+        true
+    }
+
     /// Dispatch a Recordings-tab key by the focused pane. Ctrl-←/→ move the
     /// keyboard between the recordings list (left) and the viewer (right). With
     /// the viewer focused, ↑/↓ and Home/End scroll the loaded recording rather
     /// than moving the list selection; every other key (and all keys while the
     /// list is focused) falls through to the shared home-screen keymap, so Tab,
-    /// `b`, `r`, `d`, `:`, `?`, and Esc work regardless of focus.
+    /// `r` and `d` work regardless of focus. The global keys (Esc, `:`, `?`, `m`,
+    /// Ctrl-C) are handled upstream in [`Self::try_global_key`].
     fn handle_recordings_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
-            // Ctrl-C always quits (even while a text modal would otherwise hold
-            // the keyboard — though none does on this tab).
-            (true, KeyCode::Char('c')) => {
-                self.running = false;
-                return;
-            }
             // Ctrl-←/→ move focus between the list and the viewer.
             (true, KeyCode::Left) => return self.set_recordings_focus(RecordingsFocus::List),
             (true, KeyCode::Right) => return self.set_recordings_focus(RecordingsFocus::Viewer),
@@ -126,18 +157,26 @@ impl App {
     fn handle_browser_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match (ctrl, key.code) {
-            // Ctrl-C always quits (even mid-typing); Ctrl-↑/↓ move the keyboard
-            // between the keys pane and the bottom subpanel.
-            (true, KeyCode::Char('c')) => {
-                self.running = false;
-                return;
-            }
+            // Ctrl-↑/↓ move the keyboard between the keys pane (or AMQP body) and
+            // the bottom subpanel — non-printable, so they work even while a text
+            // subpanel is capturing input. (Ctrl-C / Esc are handled globally in
+            // `try_global_key` before this runs.)
             (true, KeyCode::Up) => {
                 self.set_pane_focus(PaneFocus::Keys);
                 return;
             }
             (true, KeyCode::Down) => {
                 self.set_pane_focus(PaneFocus::Bottom);
+                return;
+            }
+            // Ctrl-←/→ walk the AMQP master-detail focus (destinations ⇄ message
+            // list). Redis has no horizontal pane focus, so it ignores them.
+            (true, KeyCode::Right) if self.active_is_amqp() => {
+                self.focus_messages();
+                return;
+            }
+            (true, KeyCode::Left) if self.active_is_amqp() => {
+                self.unfocus_messages();
                 return;
             }
             // Tab / Shift-Tab move into and cycle the bottom subpanels.
@@ -147,20 +186,6 @@ impl App {
             }
             (false, KeyCode::BackTab) => {
                 self.focus_or_cycle_panel(-1);
-                return;
-            }
-            // Esc is the global "back": from any Browser focus it steps out
-            // toward Connections. The keys pane, the AMQP destination list, and
-            // a focused bottom subpanel (Console / Pub-Sub / Tail / feed) all
-            // leave the Browser here — focus moves are Ctrl-↑↓ / Tab. Only the
-            // AMQP message pane handles Esc itself, walking back through its
-            // detail view and message list before it too leaves.
-            (false, KeyCode::Esc) => {
-                if self.peek_focused() {
-                    self.handle_message_key(key);
-                } else {
-                    self.apply(Action::Back);
-                }
                 return;
             }
             _ => {}
@@ -196,11 +221,12 @@ impl App {
     /// Keys while the AMQP destination list (left pane) is focused: navigate the
     /// list, Enter to open the selection (peek a queue / tail a topic), `a` to add
     /// a destination, `x`/`d` to remove one, `r` to (re)discover destinations from
-    /// the broker, `t` to tail it, `P` to publish. `l`/`→` steps into the message
-    /// pane.
+    /// the broker, `t` to tail it, `P` to publish. `Ctrl-→` steps focus into the
+    /// message list (handled in [`Self::handle_browser_key`]).
     ///
     /// When the message pane holds the keyboard the keys drive that pane instead
-    /// (see [`Self::handle_message_key`]).
+    /// (see [`Self::handle_message_key`]). The global keys (`:`/`?`/`m`/…) are
+    /// handled upstream in [`Self::try_global_key`].
     fn handle_destination_key(&mut self, key: KeyEvent) {
         if self.peek_focused() {
             return self.handle_message_key(key);
@@ -212,53 +238,29 @@ impl App {
             (false, KeyCode::Home) => self.nav_edge(true),
             (false, KeyCode::End) => self.nav_edge(false),
             (false, KeyCode::Enter) => self.open_selected_destination(),
-            (false, KeyCode::Char('l') | KeyCode::Right) => self.focus_messages(),
             (false, KeyCode::Char('a')) => self.begin_add_destination(),
             (false, KeyCode::Char('r')) => self.refresh_destinations(),
             (false, KeyCode::Char('x') | KeyCode::Char('d')) => self.delete_selected_destination(),
             (false, KeyCode::Char('t')) => self.tail_selected_destination(),
             (false, KeyCode::Char('P')) => self.begin_publish(),
-            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
-            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
-            (false, KeyCode::Char(':')) => self.apply(Action::OpenPalette),
             _ => {}
         }
     }
 
-    /// Keys while the AMQP message pane (right) holds the keyboard. The list view
-    /// navigates peeked messages (↑/↓, Home/End), filters them (`/`), opens the
-    /// full-message detail view (Enter / `l` / `→`), publishes (`P`), and steps
-    /// back to the destination list (Esc / `h` / `←`). The detail view is a
-    /// scrollable read-only pane that the same back-keys close.
+    /// Keys while the AMQP message list (right pane) holds the keyboard. ↑/↓ and
+    /// Home/End move the message cursor — the selected message's body shows in the
+    /// preview below (the analog of the Redis value pane) — `/` filters the list
+    /// and `P` publishes. Focus moves (Ctrl-←/→ between destinations and messages)
+    /// and the global keys (Esc / `:` / `?` / `m`) are handled upstream.
     fn handle_message_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if self.peek_detail_open() {
-            match (ctrl, key.code) {
-                (_, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q'))
-                | (false, KeyCode::Char('h'))
-                | (_, KeyCode::Left) => self.close_detail(),
-                (false, KeyCode::Down) => self.scroll_peek(1),
-                (false, KeyCode::Up) => self.scroll_peek(-1),
-                (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
-                (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
-                _ => {}
-            }
-            return;
-        }
         match (ctrl, key.code) {
             (false, KeyCode::Down) => self.move_message(1),
             (false, KeyCode::Up) => self.move_message(-1),
             (false, KeyCode::Home) => self.message_to_edge(true),
             (false, KeyCode::End) => self.message_to_edge(false),
-            (false, KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right) => self.open_detail(),
-            (_, KeyCode::Esc) | (false, KeyCode::Char('h')) | (_, KeyCode::Left) => {
-                self.unfocus_messages()
-            }
             (false, KeyCode::Char('/')) => self.begin_peek_filter(),
             (false, KeyCode::Char('P')) => self.begin_publish(),
-            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
-            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
-            (false, KeyCode::Char(':')) => self.apply(Action::OpenPalette),
             _ => {}
         }
     }
@@ -268,12 +270,7 @@ impl App {
         self.active_conn().is_some_and(|c| c.peek.focused)
     }
 
-    /// Whether the AMQP single-message detail view is open.
-    fn peek_detail_open(&self) -> bool {
-        self.active_conn().is_some_and(|c| c.peek.detail)
-    }
-
-    /// Move the keyboard into the message pane, when the selected destination is
+    /// Move the keyboard into the message list, when the selected destination is
     /// a queue with peeked messages to browse. A no-op otherwise (so the key is
     /// harmless on a topic or an empty/unpeeked queue).
     fn focus_messages(&mut self) {
@@ -286,11 +283,10 @@ impl App {
         });
     }
 
-    /// Return the keyboard to the destination list, closing any detail view.
+    /// Return the keyboard to the destination list.
     fn unfocus_messages(&mut self) {
         self.with_active_conn(|conn| {
             conn.peek.focused = false;
-            conn.peek.detail = false;
             conn.peek.scroll = 0;
         });
     }
@@ -306,25 +302,6 @@ impl App {
         self.with_active_conn(|conn| {
             let len = conn.peek.filtered_len();
             conn.peek.selected = if top || len == 0 { 0 } else { len - 1 };
-        });
-    }
-
-    /// Open the full-message detail view for the selected message (a no-op when
-    /// the filtered list is empty).
-    fn open_detail(&mut self) {
-        self.with_active_conn(|conn| {
-            if conn.peek.selected_event().is_some() {
-                conn.peek.detail = true;
-                conn.peek.scroll = 0;
-            }
-        });
-    }
-
-    /// Close the detail view, returning to the message list.
-    fn close_detail(&mut self) {
-        self.with_active_conn(|conn| {
-            conn.peek.detail = false;
-            conn.peek.scroll = 0;
         });
     }
 
@@ -474,16 +451,6 @@ impl App {
         }
     }
 
-    /// Scroll the AMQP peek pane by `delta` logical lines (negative = up). The
-    /// offset is clamped against the rendered height, so an over-scroll rests at
-    /// the bottom.
-    pub(super) fn scroll_peek(&mut self, delta: i32) {
-        if let Some(conn) = self.active_conn_mut() {
-            let next = conn.peek.scroll as i32 + delta;
-            conn.peek.scroll = next.clamp(0, u16::MAX as i32) as u16;
-        }
-    }
-
     /// Whether the active connection's bottom subpanel currently has the keyboard.
     pub(super) fn bottom_focused(&self) -> bool {
         self.active_conn()
@@ -494,12 +461,27 @@ impl App {
     /// Move the keyboard between the keys pane and the bottom subpanel. Focusing
     /// the bottom is a no-op when the broker has no panel (non-Redis). Reconciles
     /// the panel mode + focus-scoped feeds and freshens the anchor prompt.
+    ///
+    /// Landing on the bottom skips the passive Server Details tab: the first focus
+    /// jumps to the interactive Console, so Ctrl-↓ / Tab puts you somewhere you can
+    /// act. Any other remembered tab (`panel_tab` persists across focus changes —
+    /// e.g. a tail you were just on) is kept, so this only fires from the default
+    /// Server Details landing.
     pub(super) fn set_pane_focus(&mut self, focus: PaneFocus) {
         if focus == PaneFocus::Bottom && !self.active_can_tail() {
             return;
         }
         if let Some(conn) = self.active_conn_mut() {
             conn.focus = focus;
+            if focus == PaneFocus::Bottom && conn.active_panel() == PanelTab::ServerDetails {
+                if let Some(i) = conn
+                    .panel_slots()
+                    .iter()
+                    .position(|t| *t == PanelTab::Console)
+                {
+                    conn.panel_tab = i;
+                }
+            }
         }
         if focus == PaneFocus::Bottom {
             // A fresh prompt on the Pub/Sub and Tail anchors when entering them.
@@ -509,7 +491,8 @@ impl App {
     }
 
     /// Tab / Shift-Tab: the first press from the keys pane drops the keyboard onto
-    /// the currently shown subpanel; further presses cycle through the subpanels.
+    /// the bottom subpanel (landing on Console, not the passive Server Details —
+    /// see [`Self::set_pane_focus`]); further presses cycle through the subpanels.
     pub(super) fn focus_or_cycle_panel(&mut self, delta: i32) {
         if !self.active_can_tail() {
             return;
@@ -531,8 +514,6 @@ impl App {
             (false, KeyCode::Char('p')) => self.toggle_play_pause(),
             (false, KeyCode::Char('x')) => self.close_active_tab(),
             (false, KeyCode::Char('r')) => self.toggle_recording(),
-            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
-            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
             _ => {}
         }
     }
@@ -548,8 +529,6 @@ impl App {
             (false, KeyCode::Up) => self.scroll_details(-1),
             (false, KeyCode::Home) => self.scroll_details(i32::MIN),
             (false, KeyCode::End) => self.scroll_details(i32::MAX),
-            (false, KeyCode::Char('m')) => self.apply(Action::ToggleMouse),
-            (false, KeyCode::Char('?')) => self.apply(Action::ToggleHelp),
             _ => {}
         }
     }
@@ -593,8 +572,14 @@ impl App {
                     self.confirm = ConfirmState::None;
                 } else if self.screen != Screen::Home {
                     // Leaving the Browser unfocuses the panel: stop the
-                    // focus-scoped feeds and drop back to normal navigation.
+                    // focus-scoped feeds and drop back to normal navigation. The
+                    // AMQP body focus returns to the destination list too, so a
+                    // single Esc leaves from any drill level and re-entry starts
+                    // on the destinations.
                     self.stop_focus_feeds();
+                    if let Some(conn) = self.active_conn_mut() {
+                        conn.peek.focused = false;
+                    }
                     self.mode = InputMode::Normal;
                     self.screen = Screen::Home;
                     self.confirm = ConfirmState::None;
@@ -631,9 +616,6 @@ impl App {
                     self.edit_selected_profile();
                 }
             }
-            // `b` jumps to the most recently viewed browser (falling back to the
-            // active connection); reachable from either home-area tab.
-            Action::GotoBrowser => self.goto_browser(),
             // `d` deletes the selected recording on the Recordings tab, after a
             // confirming second press; a no-op elsewhere.
             Action::DeleteRecording => {
@@ -966,41 +948,6 @@ impl App {
         }
         if let Some(conn) = self.active_conn_mut() {
             conn.toggle_selected_group();
-        }
-    }
-
-    /// Jump to a connection's key browser. Prefers the most recently viewed
-    /// browser ([`Self::last_browser`]) so that with several brokers open `b`
-    /// lands on the last one browsed; falls back to the active connection. A
-    /// no-op (with an explanatory status when a connection exists but can't
-    /// browse) otherwise.
-    pub(super) fn goto_browser(&mut self) {
-        let target = self
-            .last_browser
-            .filter(|id| self.conn_by_id(*id).is_some_and(|c| c.caps.can_browse))
-            .or_else(|| {
-                self.active_conn()
-                    .filter(|c| c.caps.can_browse)
-                    .map(|c| c.id)
-            });
-        match target {
-            Some(id) => {
-                self.active = self.connections.iter().position(|c| c.id == id);
-                self.last_browser = Some(id);
-                self.screen = Screen::Browser;
-                // Enter with the keys pane focused; reconcile the panel
-                // (mode + focused feed) on entry.
-                if let Some(conn) = self.active_conn_mut() {
-                    conn.focus = PaneFocus::Keys;
-                }
-                self.sync_panel_focus();
-            }
-            // A live but non-browsable broker (e.g. AMQP) earns a hint; with no
-            // connection at all there is simply nothing to do.
-            None if self.active_conn().is_some() => {
-                self.set_status("this broker has no key browser".to_string(), true);
-            }
-            None => {}
         }
     }
 

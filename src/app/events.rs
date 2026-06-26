@@ -140,8 +140,7 @@ impl App {
         self.connections.push(conn);
         self.active = Some(self.connections.len() - 1);
         self.screen = initial_screen(&caps);
-        // A freshly-focused browser becomes the `b` target.
-        self.note_browser_view();
+        self.enter_browser();
         // The Browser's Server band shows the green "connected" dot, so no
         // transient footer message is needed for the success case (errors still
         // surface there).
@@ -169,10 +168,6 @@ impl App {
             let name = self.connections[idx].name.clone();
             self.connections[idx].handle.shutdown();
             self.connections.remove(idx);
-            // Forget a dropped connection as the `b` target.
-            if self.last_browser == Some(id) {
-                self.last_browser = None;
-            }
             self.active = if self.connections.is_empty() {
                 None
             } else {
@@ -254,10 +249,9 @@ impl App {
                 conn.peek.events = events;
                 conn.peek.pending = false;
                 conn.peek.scroll = 0;
-                // A fresh batch resets the message-list cursor, any open detail
-                // view, and the search filter.
+                // A fresh batch resets the message-list cursor and the search
+                // filter.
                 conn.peek.selected = 0;
-                conn.peek.detail = false;
                 conn.peek.filter.clear();
             }
         }

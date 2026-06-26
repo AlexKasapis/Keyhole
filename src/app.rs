@@ -153,11 +153,6 @@ pub struct App {
     /// Recordings). Armed by a first press; any non-repeat action disarms it.
     pub(crate) confirm: ConfirmState,
     pub(crate) now: OffsetDateTime,
-    /// The connection whose key browser was viewed most recently. `b` jumps
-    /// back to it (so with several brokers open it lands on the last one
-    /// browsed), falling back to the active connection. Cleared when that
-    /// connection drops. See [`Self::goto_browser`].
-    last_browser: Option<ConnId>,
 }
 
 impl App {
@@ -223,7 +218,6 @@ impl App {
             rename_buf: String::new(),
             confirm: ConfirmState::None,
             now: OffsetDateTime::now_utc(),
-            last_browser: None,
         }
     }
 
@@ -317,14 +311,12 @@ impl App {
         self.connections.iter_mut().find(|c| c.id == id)
     }
 
-    /// Remember the active connection as the most recently viewed browser when
-    /// the Browser screen is showing, so `b` can return to it later (see
-    /// [`Self::goto_browser`]). A no-op off the Browser.
-    fn note_browser_view(&mut self) {
+    /// Reconcile a freshly-entered Browser: start with the keys pane (AMQP body)
+    /// focused and reconcile the panel mode + focus-scoped feeds. A no-op off the
+    /// Browser. Called when connecting, or when Enter re-opens an already-live
+    /// connection's browser.
+    fn enter_browser(&mut self) {
         if self.screen == Screen::Browser {
-            self.last_browser = self.active_id();
-            // Each entry starts with the keys pane focused; reconcile the panel
-            // mode + focus-scoped feeds for the freshly-entered browser.
             if let Some(conn) = self.active_conn_mut() {
                 conn.focus = PaneFocus::Keys;
             }

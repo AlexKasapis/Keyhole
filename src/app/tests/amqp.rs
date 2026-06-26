@@ -28,10 +28,6 @@ async fn amqp_capabilities_browse_and_tail_but_no_dashboard_or_console() {
         // The browse list is curated, not a Redis SCAN, so the scan cadence is off.
         assert!(!caps.uses_key_scan());
     }
-    // GotoBrowser now succeeds for AMQP.
-    app.screen = Screen::Home;
-    app.apply(Action::GotoBrowser);
-    assert_eq!(app.screen, Screen::Browser);
     // AMQP isn't database-scoped: it stays on db 0.
     assert_eq!(app.active_conn().unwrap().db, 0);
 }
@@ -228,39 +224,50 @@ async fn amqp_tick_skips_stats_refresh() {
 }
 
 #[tokio::test]
-async fn amqp_message_pane_navigation_and_detail() {
+async fn amqp_message_pane_navigation_and_preview() {
     let (mut app, _rx) = test_app();
     amqp_with_messages(&mut app, &["one", "two", "three"]).await;
-    // → steps the keyboard into the message pane.
-    app.handle_key(key(KeyCode::Right));
+    // Ctrl-→ steps the keyboard into the message list.
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
     assert!(app.active_conn().unwrap().peek.focused);
-    // ↑/↓ navigate messages and clamp at the ends.
+    // ↑/↓ navigate messages and clamp at the ends; the selection drives the body
+    // preview shown below the list.
     app.handle_key(key(KeyCode::Down));
     app.handle_key(key(KeyCode::Down));
     app.handle_key(key(KeyCode::Down));
-    assert_eq!(app.active_conn().unwrap().peek.selected, 2);
-    // Enter opens the detail view for the selected message.
-    app.handle_key(key(KeyCode::Enter));
     let conn = app.active_conn().unwrap();
-    assert!(conn.peek.detail);
+    assert_eq!(conn.peek.selected, 2, "clamped at the last message");
     assert_eq!(
         conn.peek.selected_event().map(|e| e.payload.as_text()),
-        Some("three".into())
+        Some("three".into()),
+        "the previewed message follows the selection"
     );
-    // Esc closes the detail view but stays in the message pane…
-    app.handle_key(key(KeyCode::Esc));
-    assert!(!app.active_conn().unwrap().peek.detail);
-    assert!(app.active_conn().unwrap().peek.focused);
-    // …and a second Esc returns to the destination list.
-    app.handle_key(key(KeyCode::Esc));
+    // Ctrl-← returns the keyboard to the destination list.
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
     assert!(!app.active_conn().unwrap().peek.focused);
+}
+
+#[tokio::test]
+async fn esc_leaves_the_browser_from_the_amqp_message_pane() {
+    let (mut app, _rx) = test_app();
+    amqp_with_messages(&mut app, &["one", "two"]).await;
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL));
+    assert!(app.active_conn().unwrap().peek.focused);
+    // Esc leaves the whole browser in one press (no back-stack); message focus is
+    // reset so re-entry starts on the destination list.
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.screen, Screen::Home);
+    assert!(
+        !app.active_conn().unwrap().peek.focused,
+        "message focus is reset on leaving"
+    );
 }
 
 #[tokio::test]
 async fn amqp_message_filter_narrows_and_clears() {
     let (mut app, _rx) = test_app();
     amqp_with_messages(&mut app, &["alpha", "beta", "gamma"]).await;
-    app.handle_key(key(KeyCode::Right)); // focus the message pane
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)); // focus the message list
     app.handle_key(key(KeyCode::Down)); // selected = 1
     app.handle_key(ch('/'));
     assert_eq!(app.mode, InputMode::PeekFilter);

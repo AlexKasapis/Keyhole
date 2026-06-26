@@ -5,8 +5,13 @@
 //! Recordings). On the Browser, keybinds follow the focused pane: the key list
 //! uses [`map_keys_focus`] (the base map minus the feed-only controls), while a
 //! focused live-feed tab is driven directly (see `App::handle_feed_key`). The
-//! pane-focus and tab-cycling keys (Tab / Shift-Tab / Ctrl-↑ / Ctrl-↓ / Esc) are
+//! pane-focus and tab-cycling keys (Tab / Shift-Tab / Ctrl-↑↓ / Ctrl-←→) are
 //! intercepted in `App::handle_browser_key` before either map is consulted.
+//!
+//! The *global* keys — Ctrl-C (quit), Esc (back / leave screen), `:` (palette),
+//! `?` (help) and `m` (mouse) — are handled once in `App::try_global_key`,
+//! ahead of every screen's dispatch, so they reach any non-text-entry pane.
+//! They are therefore deliberately absent from this map.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -30,9 +35,6 @@ pub enum Action {
     /// pre-filled from its profile; the form can also delete it. A no-op
     /// elsewhere.
     EditConnection,
-    /// Jump to the key browser of the most recently viewed connection (falling
-    /// back to the active one). Reachable from the home area's tabs.
-    GotoBrowser,
     /// Delete the selected recording (Recordings tab). Needs a second
     /// consecutive press to confirm (`dd`); any other key disarms it.
     DeleteRecording,
@@ -70,12 +72,12 @@ pub enum Action {
     OpenPalette,
 }
 
-/// Translate a key event into an [`Action`], if bound.
+/// Translate a key event into an [`Action`], if bound. The global keys (Ctrl-C,
+/// Esc, `:`, `?`, `m`) are handled upstream in `App::try_global_key`, not here.
 pub fn map_key(key: &KeyEvent) -> Option<Action> {
     use KeyCode::*;
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match (ctrl, key.code) {
-        (true, Char('c')) => Some(Action::Quit),
         (false, Down) => Some(Action::Down),
         (false, Up) => Some(Action::Up),
         (false, Home) => Some(Action::Top),
@@ -84,7 +86,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Right | Char('l')) => Some(Action::ToggleGroup),
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('e')) => Some(Action::EditConnection),
-        (false, Char('b')) => Some(Action::GotoBrowser),
         (false, Char('d')) => Some(Action::DeleteRecording),
         (false, Char('p')) => Some(Action::PlayPause),
         (false, Char('x')) => Some(Action::CloseTab),
@@ -95,10 +96,6 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Char('O')) => Some(Action::ToggleSortDir),
         (false, Char('z')) => Some(Action::ToggleAllGroups),
         (false, Char('r')) => Some(Action::Refresh),
-        (false, Char('m')) => Some(Action::ToggleMouse),
-        (false, Char('?')) => Some(Action::ToggleHelp),
-        (false, Char(':')) => Some(Action::OpenPalette),
-        (false, Esc) => Some(Action::Back),
         _ => None,
     }
 }
@@ -151,8 +148,8 @@ mod tests {
 
     #[test]
     fn every_normal_binding_maps() {
-        assert_eq!(plain(Esc), Some(Action::Back));
-        assert_eq!(ctrl(Char('c')), Some(Action::Quit));
+        // The global keys (Esc, Ctrl-C, `:`, `?`, `m`) are handled in
+        // `App::try_global_key`, not here — see `global_keys_are_not_in_the_map`.
         assert_eq!(plain(Down), Some(Action::Down));
         assert_eq!(plain(Up), Some(Action::Up));
         assert_eq!(plain(Home), Some(Action::Top));
@@ -162,7 +159,6 @@ mod tests {
         assert_eq!(plain(Char('l')), Some(Action::ToggleGroup));
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('e')), Some(Action::EditConnection));
-        assert_eq!(plain(Char('b')), Some(Action::GotoBrowser));
         assert_eq!(plain(Char('d')), Some(Action::DeleteRecording));
         assert_eq!(plain(Char('p')), Some(Action::PlayPause));
         assert_eq!(plain(Char('x')), Some(Action::CloseTab));
@@ -173,17 +169,24 @@ mod tests {
         assert_eq!(plain(Char('O')), Some(Action::ToggleSortDir));
         assert_eq!(plain(Char('z')), Some(Action::ToggleAllGroups));
         assert_eq!(plain(Char('r')), Some(Action::Refresh));
-        assert_eq!(plain(Char('m')), Some(Action::ToggleMouse));
-        assert_eq!(plain(Char('?')), Some(Action::ToggleHelp));
-        assert_eq!(plain(Char(':')), Some(Action::OpenPalette));
     }
 
     #[test]
-    fn colon_opens_palette_from_home_and_the_keys_pane() {
-        // `:` is the command-palette key on the home screens and, via the
-        // filtered keys-pane map, in the Browser's key list too.
-        assert_eq!(plain(Char(':')), Some(Action::OpenPalette));
-        assert_eq!(keys_focus(Char(':')), Some(Action::OpenPalette));
+    fn global_keys_are_not_in_the_map() {
+        // The global keys live in `App::try_global_key` (reachable from every
+        // non-text pane), so the data map must not also bind them — otherwise
+        // they would drift. `b` (jump-to-browser) was removed outright.
+        assert_eq!(plain(Esc), None, "Esc is global (back / leave screen)");
+        assert_eq!(ctrl(Char('c')), None, "Ctrl-C is global (quit)");
+        assert_eq!(plain(Char(':')), None, "':' is global (palette)");
+        assert_eq!(plain(Char('?')), None, "'?' is global (help)");
+        assert_eq!(plain(Char('m')), None, "'m' is global (mouse)");
+        assert_eq!(
+            keys_focus(Char(':')),
+            None,
+            "':' is not a keys-pane binding"
+        );
+        assert_eq!(plain(Char('b')), None, "'b' jump-to-browser was removed");
     }
 
     #[test]
@@ -219,16 +222,15 @@ mod tests {
         for c in ['j', 'k', 'g', 'G'] {
             assert_eq!(plain(Char(c)), None, "'{c}' is unbound: no vim movement");
         }
-        // `:` opens the command palette (see `colon_opens_palette_*`), so it is
-        // deliberately *not* unbound here.
+        // `:` / `?` / `m` are global keys (see `global_keys_are_not_in_the_map`),
+        // so they are absent from this data map rather than mapped here.
         // `w` opened the standalone Realtime screen, which is gone: tails now
         // live in the Browser's bottom panel, cycled with Tab / Shift-Tab.
         assert_eq!(plain(Char('w')), None, "'w' is unbound: no Realtime screen");
         // The former tail-management keys are gone: the panel's tabs are a fixed
         // set, each driven from within its own subpanel and reached only by
         // Tab / Shift-Tab. `s`/`K` started tails, `i` entered the console, and
-        // `t` tailed the selected key — all now unbound. (`m`, once a tail key,
-        // is now the mouse-capture toggle — see `every_normal_binding_maps`.)
+        // `t` tailed the selected key — all now unbound.
         for c in ['s', 'K', 'i', 't'] {
             assert_eq!(
                 plain(Char(c)),

@@ -89,10 +89,16 @@ fn help_toggles_and_dismisses() {
 }
 
 #[test]
-fn goto_browser_requires_active_connection() {
+fn enter_without_a_connection_is_a_noop_and_tab_reaches_recordings() {
     let (mut app, _rx) = test_app();
-    app.apply(Action::GotoBrowser);
-    assert_eq!(app.screen, Screen::Home, "GotoBrowser needs a connection");
+    // The browser is reached only by Enter on a connection (the `b` jump key was
+    // removed); with no connection, Enter does nothing.
+    app.apply(Action::Enter);
+    assert_eq!(
+        app.screen,
+        Screen::Home,
+        "Enter needs a connection to open a browser"
+    );
     // Tab still switches to the Recordings tab even with no connection.
     app.apply(Action::NextTab);
     assert_eq!(
@@ -103,7 +109,7 @@ fn goto_browser_requires_active_connection() {
 }
 
 #[tokio::test]
-async fn goto_screens_switch_with_active_connection() {
+async fn tab_cycles_the_home_tabs() {
     let (mut app, _rx) = test_app();
     connect(&mut app, 1, "prod").await;
     // Connecting Redis lands on the Browser; Esc steps back to the home area.
@@ -114,9 +120,32 @@ async fn goto_screens_switch_with_active_connection() {
     assert_eq!(app.screen, Screen::Recordings);
     app.apply(Action::NextTab);
     assert_eq!(app.screen, Screen::Home);
-    // `b` jumps back into the browser of the last-viewed connection.
-    app.apply(Action::GotoBrowser);
-    assert_eq!(app.screen, Screen::Browser);
+}
+
+#[tokio::test]
+async fn enter_reopens_an_already_live_connection_browser() {
+    // With the `b` jump key removed, Enter on a connection is the sole way (back)
+    // into its browser — including when the connection is already live, where it
+    // jumps straight in (no reconnect) with the keys pane focused.
+    let (mut app, _rx) = build_app(config_with(&["prod"]), unique_config_path(), None);
+    connect(&mut app, 1, "prod").await;
+    app.apply(Action::Back); // Browser -> Connections
+    assert_eq!(app.screen, Screen::Home);
+    assert_eq!(
+        app.profile_state.selected(),
+        Some(0),
+        "the live profile is selected"
+    );
+    app.apply(Action::Enter);
+    assert_eq!(
+        app.screen,
+        Screen::Browser,
+        "Enter re-opens the live browser"
+    );
+    assert!(
+        !app.bottom_focused(),
+        "re-enters with the keys pane focused"
+    );
 }
 
 #[test]
@@ -146,41 +175,6 @@ fn key_release_events_are_ignored() {
     };
     app.handle_key(release);
     assert!(app.running, "key releases must not trigger actions");
-}
-
-#[tokio::test]
-async fn b_jumps_to_the_last_viewed_browser() {
-    let (mut app, _rx) = test_app();
-    // Two live Redis connections; the most recently focused is "two".
-    connect(&mut app, 1, "one").await;
-    connect(&mut app, 2, "two").await;
-    let two = app.active_conn().unwrap().id;
-    // Step back to the home area, then `b` returns to the last-viewed browser.
-    app.apply(Action::Back);
-    assert_eq!(app.screen, Screen::Home);
-    app.apply(Action::GotoBrowser);
-    assert_eq!(app.screen, Screen::Browser);
-    assert_eq!(
-        app.active_conn().unwrap().id,
-        two,
-        "`b` lands on the last-viewed browser"
-    );
-}
-
-#[tokio::test]
-async fn b_works_from_the_recordings_tab() {
-    let (mut app, _rx) = test_app();
-    connect(&mut app, 1, "prod").await;
-    app.apply(Action::Back); // Browser -> Connections
-    app.apply(Action::NextTab); // -> Recordings tab
-    assert_eq!(app.screen, Screen::Recordings);
-    // `b` now jumps to the browser from the Recordings tab too.
-    app.apply(Action::GotoBrowser);
-    assert_eq!(
-        app.screen,
-        Screen::Browser,
-        "`b` reaches the browser from the Recordings tab"
-    );
 }
 
 #[tokio::test]
@@ -225,25 +219,16 @@ async fn tab_focuses_bottom_then_cycles_subpanels() {
     app.screen = Screen::Browser;
     assert!(!app.bottom_focused());
 
-    // The first Tab drops the keyboard onto the currently shown subpanel
-    // (Server Details, the leftmost tab) without advancing.
+    // The first Tab drops the keyboard onto the bottom, landing on the Console
+    // (the interactive tab) rather than the passive Server Details — so it opens
+    // somewhere you can act, in command mode.
     app.handle_key(key(KeyCode::Tab));
     assert!(app.bottom_focused());
-    assert_eq!(
-        app.active_conn().unwrap().active_panel(),
-        PanelTab::ServerDetails
-    );
-    assert_eq!(
-        app.mode,
-        InputMode::Normal,
-        "the Server Details tab is not a text prompt"
-    );
-
-    // Further Tabs cycle the subpanels; the console enters command mode and a
-    // feed tab is normal; Shift-Tab steps back.
-    app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Console);
     assert_eq!(app.mode, InputMode::Command);
+
+    // Further Tabs cycle the subpanels; a feed tab is normal mode; Shift-Tab
+    // steps back to the Console.
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Monitor);
     assert_eq!(
@@ -251,8 +236,51 @@ async fn tab_focuses_bottom_then_cycles_subpanels() {
         InputMode::Normal,
         "a feed tab is not a text prompt"
     );
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::Keyspace
+    );
     app.handle_key(key(KeyCode::BackTab));
-    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Console);
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Monitor);
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::Console,
+        "Shift-Tab steps back to the Console"
+    );
+}
+
+#[tokio::test]
+async fn ctrl_down_lands_on_console_not_server_details() {
+    // Regression for the landing rule: focusing the bottom from the keys pane
+    // skips the passive Server Details and lands on the interactive Console.
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod").await;
+    app.screen = Screen::Browser;
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::ServerDetails,
+        "the bottom shows Server Details while the keys pane is focused"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert!(app.bottom_focused());
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::Console,
+        "Ctrl-↓ lands on the Console, not Server Details"
+    );
+    // The landing is remembered: cycle to Monitor, leave, and re-enter — it
+    // returns to Monitor rather than jumping back to the Console.
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Monitor);
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert_eq!(
+        app.active_conn().unwrap().active_panel(),
+        PanelTab::Monitor,
+        "the last-used bottom tab is remembered across focus changes"
+    );
 }
 
 #[tokio::test]
@@ -264,6 +292,65 @@ async fn ctrl_arrows_move_focus_between_panes() {
     assert!(app.bottom_focused(), "Ctrl-↓ focuses the bottom panel");
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
     assert!(!app.bottom_focused(), "Ctrl-↑ focuses the keys pane");
+}
+
+#[tokio::test]
+async fn global_keys_reach_every_non_text_browser_pane() {
+    // The point of the global layer: `:` / `?` / `m` work from every non-text
+    // pane, including the feed and Server Details tabs that used to lack `:`.
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod").await;
+    app.screen = Screen::Browser;
+
+    // Keys pane: `:` opens the palette; Esc closes it.
+    app.handle_key(ch(':'));
+    assert!(
+        app.palette.is_some(),
+        "`:` opens the palette from the keys pane"
+    );
+    app.handle_key(key(KeyCode::Esc));
+    assert!(app.palette.is_none());
+
+    // A focused live-feed tab (Monitor): `:` reaches it, and `m` toggles mouse.
+    focus_panel(&mut app, PanelTab::Monitor);
+    app.handle_key(ch(':'));
+    assert!(app.palette.is_some(), "`:` reaches a focused feed tab");
+    app.handle_key(key(KeyCode::Esc));
+    let mouse = app.mouse_capture();
+    app.handle_key(ch('m'));
+    assert_ne!(
+        app.mouse_capture(),
+        mouse,
+        "`m` toggles mouse from a feed tab"
+    );
+
+    // The passive Server Details tab: `?` toggles help.
+    focus_panel(&mut app, PanelTab::ServerDetails);
+    app.handle_key(ch('?'));
+    assert!(app.show_help, "`?` toggles help from Server Details");
+}
+
+#[tokio::test]
+async fn global_keys_are_literal_while_typing_in_the_console() {
+    // The mode gate: while the console holds the keyboard, `:` / `?` / `m` are
+    // literal text, not global commands.
+    let (mut app, _rx) = test_app();
+    connect(&mut app, 1, "prod").await;
+    app.screen = Screen::Browser;
+    focus_panel(&mut app, PanelTab::Console);
+    assert_eq!(app.mode, InputMode::Command);
+    for c in ":?m".chars() {
+        app.handle_key(ch(c));
+    }
+    assert!(
+        app.palette.is_none(),
+        "the palette did not open while typing"
+    );
+    assert!(!app.show_help, "help did not toggle while typing");
+    assert_eq!(
+        app.connections[0].console.input, ":?m",
+        "the keys were typed into the console literally"
+    );
 }
 
 #[tokio::test]

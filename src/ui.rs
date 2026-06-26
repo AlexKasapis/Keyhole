@@ -259,36 +259,30 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     }
                 }
             } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
-                // The AMQP keys pane is the curated destination list, not a key
-                // scan, so it has its own controls (no db / groups / sort). The
-                // hints follow whether the keyboard is on the destination list,
-                // the peeked-message list, or an open message detail view.
-                let peek = app.active_conn().map(|c| (c.peek.focused, c.peek.detail));
-                match peek {
-                    Some((true, true)) => owned(&[
-                        ("↑↓", "scroll"),
-                        ("Esc/←", "list"),
-                        (":", "palette"),
-                        ("?", "help"),
-                    ]),
-                    Some((true, false)) => owned(&[
+                // The AMQP body is the curated destination list (left) over a
+                // peeked message list + body preview (right). The hints follow
+                // whether the keyboard is on the destinations or the message list;
+                // Ctrl-→/← move between them (Ctrl-↑↓ reach the bottom tails).
+                let on_messages = app.active_conn().is_some_and(|c| c.peek.focused);
+                if on_messages {
+                    owned(&[
                         ("↑↓", "messages"),
-                        ("⏎/→", "detail"),
                         ("/", "filter"),
                         ("P", "publish"),
-                        ("Esc/←", "destinations"),
+                        ("Ctrl-←", "destinations"),
                         ("?", "help"),
-                    ]),
-                    _ => owned(&[
+                    ])
+                } else {
+                    owned(&[
                         ("↑↓", "destinations"),
-                        ("⏎/→", "messages"),
+                        ("Ctrl-→", "messages"),
                         ("a", "add"),
                         ("x", "remove"),
                         ("t", "tail"),
                         ("P", "publish"),
                         ("Tab/Ctrl-↓", "tails"),
                         ("?", "help"),
-                    ]),
+                    ])
                 }
             } else {
                 let pattern = app
@@ -321,7 +315,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 ("↑↓", "scroll"),
                 ("Ctrl-←", "list"),
                 ("Tab", "connections"),
-                ("b", "browser"),
                 (":", "palette"),
                 ("?", "help"),
                 ("Esc", "back"),
@@ -332,7 +325,6 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 ("dd", "delete"),
                 ("Ctrl-→", "viewer"),
                 ("Tab", "connections"),
-                ("b", "browser"),
                 (":", "palette"),
                 ("?", "help"),
                 ("Esc", "back"),
@@ -790,24 +782,15 @@ mod tests {
             );
         }
 
-        // The `b` jump to the browser lives only on the Recordings footer now; it
-        // was dropped from the Connections (Home) footer.
-        let (mut app, _rx) = test_app();
-        app.screen = Screen::Recordings;
-        let recordings = hint_sections(&app);
-        assert!(
-            recordings.iter().any(|(k, a)| *k == "b" && a == "browser"),
-            "Recordings footer should still offer `b browser`: {recordings:?}"
-        );
-
-        // Neither the Connections footer nor the Browser footer advertises the
-        // `b browser` jump.
-        for screen in [Screen::Home, Screen::Browser] {
+        // The `b` jump to the browser was removed: no footer advertises it.
+        for screen in [Screen::Home, Screen::Browser, Screen::Recordings] {
             let (mut app, _rx) = test_app();
             app.screen = screen;
             let pairs = hint_sections(&app);
             assert!(
-                !pairs.iter().any(|(_, action)| action == "browser"),
+                !pairs
+                    .iter()
+                    .any(|(k, action)| *k == "b" || action == "browser"),
                 "{screen:?} footer must not offer a `b browser` jump: {pairs:?}"
             );
         }
@@ -1015,7 +998,8 @@ mod tests {
         app.show_help = true;
         let text = screen_text(&mut app);
         assert!(text.contains("Help"));
-        assert!(text.contains("Navigation"));
+        assert!(text.contains("Moving around"));
+        assert!(text.contains("Global keys"));
     }
 
     #[test]
@@ -2076,14 +2060,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_browser_amqp_message_detail() {
-        // The AMQP message detail view: a queue message opened from the list, so
-        // the right pane shows its metadata (here a content-type + an application
-        // property) and its pretty-printed JSON body.
+    async fn snapshot_browser_amqp_message_preview() {
+        // The AMQP message list (upper-right) over the body preview (lower-right):
+        // selecting the second (JSON) message shows its metadata (here a
+        // content-type + an application property) and its pretty-printed JSON body
+        // in the preview — the analog of the Redis key list + value pane.
         let (mut app, _rx) = app_with_amqp_connection().await;
         pin_clock(&mut app);
         app.screen = Screen::Browser;
-        // Give the second (JSON) message some metadata and open it in detail.
+        // Give the second (JSON) message some metadata and select it.
         {
             let peek = &mut app.connections[0].peek;
             peek.events[1].meta = vec![
@@ -2093,10 +2078,9 @@ mod tests {
             ];
             peek.focused = true;
             peek.selected = 1;
-            peek.detail = true;
         }
         insta::assert_snapshot!(
-            "browser_amqp_message_detail",
+            "browser_amqp_message_preview",
             render_lines(&mut app, 90, 24)
         );
     }
