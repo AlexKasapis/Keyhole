@@ -1,5 +1,4 @@
 ---
-import KeyholeTui from '../components/KeyholeTui.astro';
 import { INSTALL_DISPLAY, INSTALL_COPY, INSTALL_GITHUB } from '../lib/install';
 import { CAPABILITIES, cell } from '../lib/capabilities';
 
@@ -109,7 +108,18 @@ const description =
           <div class="preview-glow" aria-hidden="true"></div>
           <div class="preview-panel">
             <div class="preview-frame">
-              <KeyholeTui />
+              <!-- Real recording of the TUI, rendered from scripts/demos/keyhole-demo.cast
+                   by `just record-demo`. Static poster shown under reduced motion. -->
+              <picture>
+                <source srcset="/keyhole-demo-poster.svg" media="(prefers-reduced-motion: reduce)" />
+                <img
+                  src="/keyhole-demo.svg"
+                  width="1040"
+                  height="755"
+                  decoding="async"
+                  alt="Keyhole browsing a Redis keyspace: a keys tree with types, TTLs and sizes, a value inspector, and a live keyspace event stream below."
+                />
+              </picture>
             </div>
           </div>
         </div>
@@ -548,12 +558,17 @@ const description =
       .preview-panel {
         position: relative;
         border-radius: 12px;
+        overflow: hidden;
         box-shadow: 0 40px 90px rgba(0, 0, 0, 0.55);
       }
       .preview-frame {
         display: block;
         width: 100%;
-        height: 560px;
+      }
+      .preview-frame img {
+        display: block;
+        width: 100%;
+        height: auto;
       }
 
       /* eyebrow + section headers */

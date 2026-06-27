@@ -9,3 +9,6 @@
 .env
 # Pending insta snapshots: transient review artifacts, never committed.
 *.snap.new
+# Python bytecode from the scripts/ tooling (tui_smoke.py, record_demo helpers).
+__pycache__/
+*.pyc

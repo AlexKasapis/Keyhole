@@ -57,6 +57,13 @@ dev:
     cargo run -- dev seed
     KEYHOLE_DEV_RABBITMQ_PASSWORD=keyhole cargo run -- dev publish --broker all
 
+# Record a real TUI session and render the marketing-site demo SVGs.
+# Seeds Redis, streams fake traffic, drives the binary through a PTY, and renders
+# scripts/demos/keyhole-demo.cast -> website/ + docs-site/ public SVGs. Re-run and
+# commit to refresh the demo as the UI changes. Needs docker, python3, npx.
+record-demo:
+    ./scripts/record_demo.sh
+
 # Optimized release build.
 build-release:
     cargo build --release
@@ -90,7 +97,7 @@ release *ARGS:
 release-lint:
     ./scripts/test_install.sh
     ./scripts/test_packaging.sh
-    shellcheck scripts/install.sh scripts/test_install.sh scripts/gen_packaging.sh scripts/test_packaging.sh scripts/lib/srcinfo.sh
+    shellcheck scripts/install.sh scripts/test_install.sh scripts/gen_packaging.sh scripts/test_packaging.sh scripts/lib/srcinfo.sh scripts/record_demo.sh
     command -v actionlint >/dev/null && actionlint || echo "actionlint not installed; skipping workflow lint"
 
 # Validate the Tier-2 community packaging artifacts (AUR / Homebrew / Nix):

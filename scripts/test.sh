@@ -24,6 +24,10 @@ case "${1:-}" in
         ;;
 esac
 
+# Demo-recording cast helpers (stdlib-only, no pytest) — see scripts/test_cast_tools.py.
+echo "==> python scripts/test_cast_tools.py"
+python3 scripts/test_cast_tools.py
+
 echo "==> cargo test $*"
 cargo test "$@"
 

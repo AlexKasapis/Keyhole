@@ -1,7 +1,6 @@
 ---
 import DocsLayout from '../components/DocsLayout.astro';
 import CodeBlock from '../components/CodeBlock.astro';
-import KeyholeTui from '../components/KeyholeTui.astro';
 
 const launch = `<span class="c-lime">$</span> keyhole`;
 const connect = `<span class="c-muted"># jump straight to a saved connection by name</span>
@@ -33,7 +32,18 @@ psub:orders.*`;
     and a live tail running below:
   </p>
   <div class="tui-embed">
-    <KeyholeTui />
+    <!-- Real recording of the TUI, rendered from scripts/demos/keyhole-demo.cast
+         by `just record-demo`. Static poster shown under reduced motion. -->
+    <picture>
+      <source srcset="/keyhole-demo-poster.svg" media="(prefers-reduced-motion: reduce)" />
+      <img
+        src="/keyhole-demo.svg"
+        width="1040"
+        height="755"
+        decoding="async"
+        alt="Keyhole browsing a Redis keyspace: a keys tree with types, TTLs and sizes, a value inspector, and a live keyspace event stream below."
+      />
+    </picture>
   </div>
 
   <h3 id="browse" data-toc="browse">Browse keys</h3>
@@ -67,11 +77,15 @@ psub:orders.*`;
 <style>
   .tui-embed {
     position: relative;
-    height: 430px;
     margin: 8px 0 6px;
     border-radius: 11px;
     overflow: hidden;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  }
+  .tui-embed img {
+    display: block;
+    width: 100%;
+    height: auto;
   }
 
   .next-cards {
