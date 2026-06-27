@@ -41,4 +41,4 @@ expression: "render_lines(&mut app, 90, 40)"
 │                                                                                        │
 │                                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ move · Enter connect · a add · Tab recordings · : palette · ? help · Esc Esc quit
+ Enter connect · a add · Tab recordings · : palette · ? help

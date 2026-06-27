@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter tails it · topic = live multicast · queue = non-destructive browse                │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ destinations · Ctrl-→ messages · a add · x remove · t tail · P publish · Tab/Ctrl-↓ ta
+ a add · x remove · t tail · P publish · Tab tails · : palette · ? help

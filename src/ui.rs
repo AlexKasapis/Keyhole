@@ -78,14 +78,14 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" filter ", theme.accent),
                 Span::raw(format!("{}▏", app.filter)),
-                Span::styled("   Enter apply · Esc cancel", theme.dim),
+                Span::styled("   Enter apply", theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
         InputMode::Form => {
             frame.render_widget(
                 Paragraph::new(Line::styled(
-                    " editing connection — ↑/↓ move · ←/→ toggle · Enter save · Esc cancel ",
+                    " editing connection — ←/→ toggle · Enter save ",
                     theme.dim,
                 ))
                 .style(theme.status_bar),
@@ -96,7 +96,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" rename ", theme.accent),
                 Span::raw(format!("{}▏", app.rename_buf)),
-                Span::styled("   Enter save · Esc cancel", theme.dim),
+                Span::styled("   Enter save", theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -111,10 +111,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" subscribe ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
-                Span::styled(
-                    format!("   {hint}   Enter start · Ctrl-↑↓ Tab nav · Esc back"),
-                    theme.dim,
-                ),
+                Span::styled(format!("   {hint}   Enter start · Tab nav"), theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -122,10 +119,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" add destination ", theme.accent),
                 Span::raw(format!("{}▏", app.subscribe_buf)),
-                Span::styled(
-                    "   topic:name · queue:name   Enter add · Esc cancel",
-                    theme.dim,
-                ),
+                Span::styled("   topic:name · queue:name   Enter add", theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -133,7 +127,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" publish ", theme.accent),
                 Span::raw(format!("{}▏", app.publish_buf)),
-                Span::styled("   Enter send · Esc cancel", theme.dim),
+                Span::styled("   Enter send", theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -145,7 +139,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             let line = Line::from(vec![
                 Span::styled(" filter messages ", theme.accent),
                 Span::raw(format!("{filter}▏")),
-                Span::styled("   Enter apply · Esc clear", theme.dim),
+                Span::styled("   Enter apply", theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -194,6 +188,13 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 /// packs tightly. The Browser's sort/filter pair carries the live sort column
 /// and any non-default match pattern; the former top info-bar indicators now
 /// live with their controls here.
+///
+/// Basic navigation — the ↑↓ arrows, the Ctrl-arrows (move focus between panes),
+/// and Esc (back / quit) — is deliberately *omitted*: it is the same on every
+/// screen and is documented once in the help overlay ("Moving around — one model
+/// everywhere"), so repeating it in each footer is just clutter. The footer
+/// therefore lists only the screen-specific action keys (Tab is kept — it is not
+/// basic navigation).
 fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
     let owned = |pairs: &[(&'static str, &str)]| {
         pairs
@@ -203,50 +204,44 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
     };
     match app.screen {
         Screen::Home => owned(&[
-            ("↑↓", "move"),
             ("Enter", "connect"),
             ("a", "add"),
             ("Tab", "recordings"),
             (":", "palette"),
             ("?", "help"),
-            ("Esc Esc", "quit"),
         ]),
         // The footer follows the focused pane: the key list keeps its grouping /
         // sort controls, while a focused bottom subpanel shows its own keys.
         // (Pub/Sub & Tail anchors render the Subscribe prompt instead — see
         // `render_footer` — so only Console and the feed tabs reach this arm.)
+        // Pane focus (Ctrl-↑↓) and Esc-back are basic navigation, so they are
+        // omitted here; Tab (cycle the bottom tabs) is kept.
         Screen::Browser => {
             let bottom = app
                 .active_conn()
                 .map(|c| c.focus == PaneFocus::Bottom)
                 .unwrap_or(false);
             if bottom {
-                // The footer follows the focused bottom tab. A shared focus-nav
-                // hint leads every tab (Ctrl-↑↓ moves between the keys pane and
-                // the bottom subpanel, Tab cycles the tabs); nothing pages, and
-                // Esc is the global back — it leaves the Browser from here too.
+                // The footer follows the focused bottom tab. Tab cycles the tabs;
+                // moving focus between the keys pane and the subpanel (Ctrl-↑↓)
+                // and Esc-back are basic navigation, so they stay out of here.
                 match app.active_conn().map(|c| c.active_panel()) {
                     Some(PanelTab::Console) => owned(&[
                         ("Enter", "run"),
-                        ("↑↓ / Ctrl-P/N", "history"),
+                        ("Ctrl-P/N", "history"),
                         ("Ctrl-L", "clear"),
-                        ("Ctrl-↑↓ Tab", "nav"),
-                        ("Esc", "back"),
+                        ("Tab", "nav"),
                     ]),
                     // The Server Details tab is a passive overview: ↑↓ scroll its
-                    // client list — there is no feed to play/pause, record, close.
-                    Some(PanelTab::ServerDetails) => owned(&[
-                        ("Ctrl-↑↓ Tab", "nav"),
-                        ("↑↓", "scroll"),
-                        ("?", "help"),
-                        ("Esc", "back"),
-                    ]),
+                    // client list (basic nav, not shown) — there is no feed to
+                    // play/pause, record or close.
+                    Some(PanelTab::ServerDetails) => owned(&[("Tab", "nav"), ("?", "help")]),
                     // A live-feed tab (Monitor / Keyspace / a pub-sub or stream
                     // tail): it follows newest (not scrollable). p/r play-pause /
                     // record it; only a runtime tail (`Sub`) can be closed with x.
                     panel => {
                         let mut pairs = vec![
-                            ("Ctrl-↑↓ Tab", "nav".to_string()),
+                            ("Tab", "nav".to_string()),
                             ("p", "play/pause".to_string()),
                             ("r", "rec".to_string()),
                         ];
@@ -254,42 +249,34 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                             pairs.push(("x", "close".to_string()));
                         }
                         pairs.push(("?", "help".to_string()));
-                        pairs.push(("Esc", "back".to_string()));
                         pairs
                     }
                 }
             } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
                 // The AMQP body is the curated destination list (left) over a
                 // peeked message list + body preview (right). The hints follow
-                // whether the keyboard is on the destinations or the message list;
-                // Ctrl-→/← move between them (Ctrl-↑↓ reach the bottom tails).
-                // Both states close with the shared cluster — tails route,
-                // `: palette`, `? help`, `Esc back` — so the AMQP body advertises
-                // the same globals as the Redis keys pane and the Recordings tab.
+                // whether the keyboard is on the destinations or the message list.
+                // Moving between them (Ctrl-←/→) and into the tails (Ctrl-↓), the
+                // ↑↓ list movement and Esc-back are all basic navigation, so only
+                // the screen-specific keys (plus Tab to the tails) appear here.
                 let on_messages = app.active_conn().is_some_and(|c| c.peek.focused);
                 if on_messages {
                     owned(&[
-                        ("↑↓", "messages"),
                         ("/", "filter"),
                         ("P", "publish"),
-                        ("Ctrl-←", "destinations"),
-                        ("Tab/Ctrl-↓", "tails"),
+                        ("Tab", "tails"),
                         (":", "palette"),
                         ("?", "help"),
-                        ("Esc", "back"),
                     ])
                 } else {
                     owned(&[
-                        ("↑↓", "destinations"),
-                        ("Ctrl-→", "messages"),
                         ("a", "add"),
                         ("x", "remove"),
                         ("t", "tail"),
                         ("P", "publish"),
-                        ("Tab/Ctrl-↓", "tails"),
+                        ("Tab", "tails"),
                         (":", "palette"),
                         ("?", "help"),
-                        ("Esc", "back"),
                     ])
                 }
             } else {
@@ -305,38 +292,29 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     format!("filter {pattern}")
                 };
                 vec![
-                    ("↑↓", "move".to_string()),
                     ("Enter", "fold".to_string()),
                     ("z", "all".to_string()),
                     ("/", filter),
                     ("oO", "sort".to_string()),
-                    ("Tab/Ctrl-↓", "panel".to_string()),
+                    ("Tab", "panel".to_string()),
                     (":", "palette".to_string()),
                     ("?", "help".to_string()),
-                    ("Esc", "back".to_string()),
                 ]
             }
         }
         // The footer follows the focused pane: the list moves/renames/deletes,
-        // while the viewer scrolls. Ctrl-←/→ swap focus between them.
+        // while the viewer scrolls. The ↑↓ movement, Ctrl-←/→ focus swap and
+        // Esc-back are basic navigation, so they are omitted.
         Screen::Recordings => match app.recordings_focus {
-            RecordingsFocus::Viewer => owned(&[
-                ("↑↓", "scroll"),
-                ("Ctrl-←", "list"),
-                ("Tab", "connections"),
-                (":", "palette"),
-                ("?", "help"),
-                ("Esc", "back"),
-            ]),
+            RecordingsFocus::Viewer => {
+                owned(&[("Tab", "connections"), (":", "palette"), ("?", "help")])
+            }
             RecordingsFocus::List => owned(&[
-                ("↑↓", "move"),
                 ("r", "rename"),
                 ("dd", "delete"),
-                ("Ctrl-→", "viewer"),
                 ("Tab", "connections"),
                 (":", "palette"),
                 ("?", "help"),
-                ("Esc", "back"),
             ]),
         },
     }
@@ -728,15 +706,13 @@ mod tests {
     fn footer_lists_flat_key_action_pairs() {
         // The hint row is a flat list of `key action` pairs — no group labels —
         // rendered wide so nothing clips. Each pair stays contiguous (`key action`)
-        // and the pairs are joined by ` · `, with a single leading space.
+        // and the pairs are joined by ` · `, with a single leading space. Basic
+        // navigation (↑↓, Ctrl-arrows, Esc) is omitted, so each row opens straight
+        // on its screen-specific action keys and ends on the shared `? help`.
         let cases = [
-            (
-                Screen::Home,
-                " ↑↓ move · Enter connect · a add",
-                "Esc Esc quit",
-            ),
-            (Screen::Browser, " ↑↓ move · Enter fold · z all", "Esc back"),
-            (Screen::Recordings, " ↑↓ move · r rename", "Esc back"),
+            (Screen::Home, " Enter connect · a add", "? help"),
+            (Screen::Browser, " Enter fold · z all", "? help"),
+            (Screen::Recordings, " r rename · dd delete", "? help"),
         ];
         for (screen, head, tail) in cases {
             let (mut app, _rx) = test_app();
@@ -752,12 +728,19 @@ mod tests {
                 "{screen:?} footer should still list {tail:?}: {footer:?}"
             );
             // The old grouping labels are gone (each is a word followed by a
-            // space). The Browser footer now pairs ↑↓ with "move" and Enter with
-            // "fold" — flat action words, not group headers.
+            // space): the footer is a flat list of action words now.
             for label in ["conn ", "view ", "groups ", "go ", "app "] {
                 assert!(
                     !footer.contains(label),
                     "{screen:?} footer must not show the {label:?} group label: {footer:?}"
+                );
+            }
+            // Basic navigation never appears in the footer — it is universal and
+            // documented in the help overlay instead.
+            for nav in ["↑↓", "Ctrl-↑", "Ctrl-↓", "Ctrl-←", "Ctrl-→", "Esc"] {
+                assert!(
+                    !footer.contains(nav),
+                    "{screen:?} footer must not advertise basic nav {nav:?}: {footer:?}"
                 );
             }
         }
@@ -815,33 +798,45 @@ mod tests {
 
     #[test]
     fn recordings_footer_follows_the_focused_pane() {
-        // List focused (the default): ↑↓ move the selection and Ctrl-→ steps into
-        // the viewer.
+        // List focused (the default): the list-only controls (rename / delete)
+        // appear. Movement (↑↓) and focus steps (Ctrl-←/→) are basic nav, so the
+        // footer never advertises them.
         let (mut app, _rx) = test_app();
         app.screen = Screen::Recordings;
         app.recordings_focus = RecordingsFocus::List;
         let pairs = hint_sections(&app);
-        let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
-        assert!(has("↑↓", "move"), "list footer moves with ↑↓: {pairs:?}");
+        let has = |pairs: &[(&'static str, String)], key: &str, action: &str| {
+            pairs.iter().any(|(k, a)| *k == key && a == action)
+        };
+        let no_nav = |pairs: &[(&'static str, String)]| {
+            !pairs
+                .iter()
+                .any(|(k, _)| k.contains('↑') || k.contains("Ctrl-") || *k == "Esc")
+        };
+        assert!(has(&pairs, "r", "rename"), "list footer renames: {pairs:?}");
         assert!(
-            has("Ctrl-→", "viewer"),
-            "list footer steps right: {pairs:?}"
+            has(&pairs, "dd", "delete"),
+            "list footer deletes: {pairs:?}"
         );
-        assert!(!has("↑↓", "scroll"), "the list does not scroll: {pairs:?}");
+        assert!(no_nav(&pairs), "list footer drops basic nav: {pairs:?}");
 
-        // Viewer focused: ↑↓ scroll and Ctrl-← steps back to the list. The
-        // list-only controls (rename / delete) drop off.
+        // Viewer focused: the list-only controls (rename / delete) drop off; only
+        // the shared keys remain. Scrolling (↑↓) and the focus step (Ctrl-←) are
+        // basic nav and stay out of the footer.
         app.recordings_focus = RecordingsFocus::Viewer;
         let pairs = hint_sections(&app);
-        let has = |key: &str, action: &str| pairs.iter().any(|(k, a)| *k == key && a == action);
         assert!(
-            has("↑↓", "scroll"),
-            "viewer footer scrolls with ↑↓: {pairs:?}"
+            !has(&pairs, "r", "rename"),
+            "viewer footer drops rename: {pairs:?}"
         );
-        assert!(has("Ctrl-←", "list"), "viewer footer steps back: {pairs:?}");
-        assert!(!has("r", "rename"), "viewer footer drops rename: {pairs:?}");
-        // Palette / help / back stay available regardless of focus.
-        assert!(has(":", "palette") && has("?", "help") && has("Esc", "back"));
+        assert!(no_nav(&pairs), "viewer footer drops basic nav: {pairs:?}");
+
+        // Palette / help / the tab switch stay available regardless of focus.
+        assert!(
+            has(&pairs, ":", "palette")
+                && has(&pairs, "?", "help")
+                && has(&pairs, "Tab", "connections")
+        );
     }
 
     #[test]
@@ -881,20 +876,22 @@ mod tests {
     async fn browser_footer_advertises_nav_and_has_no_grouping_toggle() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        // Keys are always grouped; the footer pairs ↑↓ with move and Enter with
-        // fold (Enter folds the cursor's group) and never a grouping toggle.
+        // Keys are always grouped; the footer advertises Enter to fold the
+        // cursor's group, and never a grouping toggle. Movement (↑↓) is basic
+        // nav and stays out of the footer.
         let text = render_lines(&mut app, 160, 8);
         assert!(
-            text.contains("↑↓ move") && text.contains("Enter fold"),
-            "browser footer advertises move + the Enter fold hint"
+            text.contains("Enter fold"),
+            "browser footer advertises the Enter fold hint"
         );
+        assert!(!text.contains("↑↓"), "movement is omitted (basic nav)");
         assert!(!text.contains("p group"), "no `p group` toggle");
         assert!(!text.contains("ungroup"), "no `p ungroup` toggle");
-        // With the keys pane focused, the footer advertises moving focus to the
-        // bottom panel (Tab / Ctrl-↓) rather than the feed/console controls.
+        // With the keys pane focused, the footer advertises Tab to focus the
+        // bottom panel (Ctrl-↓ also does, but it is basic nav, so only Tab shows).
         assert!(
-            text.contains("Tab/Ctrl-↓ panel"),
-            "browser footer advertises Tab/Ctrl-↓ to focus the panel"
+            text.contains("Tab panel"),
+            "browser footer advertises Tab to focus the panel"
         );
     }
 
@@ -913,19 +910,21 @@ mod tests {
             pairs.iter().any(|(k, a)| *k == key && a == action)
         };
 
-        // Every bottom tab leads with the combined focus-nav hint, advertises
-        // Esc as the global back, and none of them page or carry the old
-        // Esc-to-keys step (Esc leaves the Browser now, it doesn't move focus).
+        // Every bottom tab leads with the Tab nav hint and never advertises basic
+        // navigation (the Ctrl-↑↓ focus move, ↑↓ scroll, or Esc back), nor pages,
+        // nor carries the old Esc-to-keys step (Esc leaves the Browser now).
         for tab in [0usize, 1, 2, 5] {
             app.connections[0].panel_tab = tab;
             let pairs = hint_sections(&app);
             assert!(
-                has(&pairs, "Ctrl-↑↓ Tab", "nav"),
-                "tab {tab} footer carries the nav hint: {pairs:?}"
+                has(&pairs, "Tab", "nav"),
+                "tab {tab} footer carries the Tab nav hint: {pairs:?}"
             );
             assert!(
-                has(&pairs, "Esc", "back"),
-                "tab {tab} footer advertises Esc back: {pairs:?}"
+                !pairs
+                    .iter()
+                    .any(|(k, _)| k.contains('↑') || k.contains("Ctrl-↑") || *k == "Esc"),
+                "tab {tab} footer drops basic nav: {pairs:?}"
             );
             assert!(
                 !pairs.iter().any(|(k, _)| k.contains("PgUp")),
@@ -937,12 +936,18 @@ mod tests {
             );
         }
 
-        // Server Details (tab 0): scrolls its client list, no feed controls.
+        // Server Details (tab 0): a passive overview — only Tab nav + help (its
+        // ↑↓ client-list scroll is basic nav, so it is not advertised), and no
+        // feed controls.
         app.connections[0].panel_tab = 0;
         let details = hint_sections(&app);
         assert!(
-            has(&details, "↑↓", "scroll"),
-            "details scrolls: {details:?}"
+            has(&details, "?", "help"),
+            "details offers help: {details:?}"
+        );
+        assert!(
+            !has(&details, "↑↓", "scroll"),
+            "details does not advertise scrolling (basic nav): {details:?}"
         );
         for (k, a) in [("p", "play/pause"), ("r", "rec"), ("x", "close")] {
             assert!(!has(&details, k, a), "details hides `{k} {a}`: {details:?}");
@@ -2215,9 +2220,9 @@ mod tests {
     #[tokio::test]
     async fn amqp_body_footer_advertises_shared_globals() {
         // F3: the AMQP body (destinations ⇄ messages) advertises the same global
-        // cluster as the Redis keys pane and the Recordings tab — the tails
-        // route, `: palette`, `? help` and `Esc back` — on both panes. The body
-        // footer used to drop them, so the same class of pane felt different.
+        // cluster as the Redis keys pane and the Recordings tab — the tails route
+        // (Tab), `: palette` and `? help` — on both panes. Basic navigation (the
+        // Ctrl-↑↓ focus moves and Esc back) is omitted, as everywhere else.
         let (mut app, _rx) = app_with_amqp_connection().await;
         app.screen = Screen::Browser;
         for on_messages in [false, true] {
@@ -2238,12 +2243,14 @@ mod tests {
                 "AMQP {pane} footer offers help: {pairs:?}"
             );
             assert!(
-                has("Esc", "back"),
-                "AMQP {pane} footer offers back: {pairs:?}"
+                has("Tab", "tails"),
+                "AMQP {pane} footer routes to the tails with Tab: {pairs:?}"
             );
             assert!(
-                has("Tab/Ctrl-↓", "tails"),
-                "AMQP {pane} footer routes to the tails: {pairs:?}"
+                !pairs
+                    .iter()
+                    .any(|(k, _)| k.contains('↑') || k.contains("Ctrl-") || *k == "Esc"),
+                "AMQP {pane} footer drops basic nav: {pairs:?}"
             );
         }
     }

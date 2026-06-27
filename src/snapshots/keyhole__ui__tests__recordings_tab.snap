@@ -15,4 +15,4 @@ expression: "render_lines(&mut app, 100, 14)"
 ││                                          ││                                                    ││
 │└──────────────────────────────────────────┘└────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ move · r rename · dd delete · Ctrl-→ viewer · Tab connections · : palette · ? help · Esc back
+ r rename · dd delete · Tab connections · : palette · ? help
