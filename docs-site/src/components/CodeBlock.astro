@@ -1,0 +1,78 @@
+---
+// A documentation code block: a <pre> with a floating copy button.
+//
+// `code` is the (hand-highlighted) block body as an HTML string — wrap tokens in
+// the global `.c-*` colour classes defined in DocsLayout, and use real newlines.
+// It is rendered with set:html so whitespace and newlines survive exactly (Astro
+// collapses inter-element whitespace in slotted markup, which mangles multi-line
+// listings — a string sidesteps that). The content is author-controlled static
+// text, never user input.
+//
+// `cmd` is the exact text the copy button writes to the clipboard, which may
+// differ from the displayed text (e.g. the curl block shows the short form but
+// copies the hardened one). Copy behaviour is the shared delegated handler in
+// DocsLayout (keys off `data-copy-cmd`).
+interface Props {
+  /** Exact text copied to the clipboard. */
+  cmd: string;
+  /** Highlighted block body as an HTML string. */
+  code: string;
+  /** Slightly smaller type (12.5px) for dense data blocks (JSONL, jq, TOML). */
+  dense?: boolean;
+}
+const { cmd, code, dense = false } = Astro.props;
+---
+
+<div class="code">
+  <button class="copy" type="button" data-copy-cmd={cmd} aria-label="Copy to clipboard"
+    >copy</button
+  >
+  <pre class:list={[{ dense }]}><code set:html={code} /></pre>
+</div>
+
+<style>
+  .code {
+    position: relative;
+    margin: 14px 0;
+  }
+  .copy {
+    position: absolute;
+    top: 9px;
+    right: 9px;
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--raised);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 11px;
+    border-radius: 6px;
+    padding: 5px 9px;
+  }
+  .copy:hover {
+    border-color: var(--yellow);
+  }
+  pre {
+    margin: 0;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 15px 17px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.7;
+    color: var(--fg);
+  }
+  pre.dense {
+    font-size: 12.5px;
+  }
+  pre code {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+    white-space: pre;
+  }
+</style>

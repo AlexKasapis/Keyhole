@@ -1,0 +1,110 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import KeyholeTui from '../components/KeyholeTui.astro';
+
+const launch = `<span class="c-lime">$</span> keyhole`;
+const connect = `<span class="c-muted"># jump straight to a saved connection by name</span>
+<span class="c-lime">$</span> keyhole --connect prod-cache`;
+const tail = `<span class="c-muted"># at the Pub/Sub or Tail anchor, type a source spec, then Enter:</span>
+psub:orders.*`;
+---
+
+<DocsLayout pageId="quickstart">
+  <p>
+    From launch to a live tail in under a minute. This walkthrough uses Redis, but the same flow
+    applies to AMQP&nbsp;1.0 and RabbitMQ.
+  </p>
+
+  <h3 id="launch" data-toc="launch">Launch</h3>
+  <p>Run <code>keyhole</code> with no arguments to open your saved connections.</p>
+  <CodeBlock cmd="keyhole" code={launch} />
+
+  <h3 id="connect" data-toc="connect">Connect</h3>
+  <p>
+    On the connections list, press <kbd>a</kbd> to add one, then <kbd>Enter</kbd> to connect — or
+    jump straight to a saved profile by name. Connections live in your
+    <a href="/config">config file</a>.
+  </p>
+  <CodeBlock cmd="keyhole --connect prod-cache" code={connect} />
+
+  <p>
+    Here's what you'll land in — the keyspace browser on the left, a value inspector on the right,
+    and a live tail running below:
+  </p>
+  <div class="tui-embed">
+    <KeyholeTui />
+  </div>
+
+  <h3 id="browse" data-toc="browse">Browse keys</h3>
+  <p>
+    Move with <kbd>↑</kbd> <kbd>↓</kbd>, fold or unfold a group with <kbd>Enter</kbd> (or
+    <kbd>l</kbd>), and inspect the highlighted value on the right. Press <kbd>/</kbd> to filter the
+    keyspace by glob, and <kbd>o</kbd> / <kbd>O</kbd> to sort.
+  </p>
+
+  <h3 id="tail" data-toc="tail">Start a tail</h3>
+  <p>
+    Focus the bottom panel with <kbd>Ctrl</kbd>+<kbd>↓</kbd>, cycle to the <strong>Pub/Sub</strong>
+    or <strong>Tail</strong> anchor with <kbd>Tab</kbd>, type a source spec, and press
+    <kbd>Enter</kbd>. Events stream in newest-last; press <kbd>r</kbd> to record.
+  </p>
+  <CodeBlock cmd="psub:orders.*" code={tail} />
+
+  <h3 id="next" data-toc="next">Next steps</h3>
+  <div class="next-cards">
+    <a class="next-card" href="/connecting">
+      <div class="next-title">Connect a broker →</div>
+      <div class="next-sub">Redis, AMQP 1.0 &amp; RabbitMQ connections.</div>
+    </a>
+    <a class="next-card" href="/recording">
+      <div class="next-title">Record to JSONL →</div>
+      <div class="next-sub">Capture a tail for later analysis.</div>
+    </a>
+  </div>
+</DocsLayout>
+
+<style>
+  .tui-embed {
+    position: relative;
+    height: 430px;
+    margin: 8px 0 6px;
+    border-radius: 11px;
+    overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  }
+
+  .next-cards {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+  }
+  .next-card {
+    flex: 1;
+    min-width: 200px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: var(--card);
+    text-decoration: none;
+    transition:
+      border-color 0.12s,
+      background 0.12s;
+  }
+  .next-card:hover {
+    border-color: var(--yellow);
+    background: var(--raised);
+    text-decoration: none;
+  }
+  .next-title {
+    font-weight: 700;
+    color: var(--fg);
+    font-size: 14.5px;
+  }
+  .next-sub {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 3px;
+  }
+</style>

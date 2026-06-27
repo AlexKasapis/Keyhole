@@ -1,0 +1,922 @@
+---
+// The documentation shell: the centered Gruvbox card with a top nav bar and a
+// three-column body (sidebar · content · on-this-page TOC). Each route renders a
+// page through this layout, passing its `pageId`; the layout derives the sidebar
+// active state, the right-rail TOC, and the document title from ../lib/nav. The
+// page eyebrow (group name) and H1 (page label) are rendered here too, so each
+// page file supplies only its body (intro + H3 sections) via the default slot.
+//
+// All interactivity is progressive: copy buttons, live search, collapsible
+// sidebar groups, scroll-spy TOC, and the mobile sidebar drawer are wired in the
+// <script> below and degrade to plain content + real links without JS.
+import { NAV, getPage } from '../lib/nav';
+
+interface Props {
+  /** Active page id (see ../lib/nav PAGES). */
+  pageId: string;
+  /** Optional meta description; defaults to a generic per-page line. */
+  description?: string;
+}
+
+const { pageId, description } = Astro.props;
+const meta = getPage(pageId);
+const metaDescription =
+  description ?? `${meta.label} — documentation for Keyhole, a terminal UI for Redis, AMQP 1.0 and RabbitMQ.`;
+
+// Sidebar groups with per-item active state.
+const groups = NAV.map((g) => ({
+  title: g.title,
+  items: g.pageIds.map((id) => {
+    const p = getPage(id);
+    return { label: p.label, href: p.href, active: id === pageId };
+  }),
+}));
+
+const repo = 'https://github.com/AlexKasapis/Keyhole';
+const install = 'https://keyholetui.com';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{meta.title}</title>
+    <meta name="description" content={metaDescription} />
+    <meta property="og:title" content={meta.title} />
+    <meta property="og:description" content={metaDescription} />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Space+Mono:wght@400;700&family=Hanken+Grotesk:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+
+  <body>
+    <div class="shell">
+      <div class="card">
+        <!-- top nav -->
+        <nav class="topnav">
+          <button class="menu-btn" type="button" data-menu-toggle aria-label="Toggle navigation">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"
+              ><path d="M4 6h16M4 12h16M4 18h16" stroke-linecap="round"></path></svg
+            >
+          </button>
+
+          <a class="brand" href="/" aria-label="Keyhole docs home">
+            <svg width="23" height="23" viewBox="0 0 32 32" aria-hidden="true"
+              ><path
+                d="M16 6a6 6 0 0 0-3.2 11.07L10.5 26h11l-2.3-8.93A6 6 0 0 0 16 6Z"
+                fill="none"
+                stroke="#fabd2f"
+                stroke-width="2.2"
+                stroke-linejoin="round"></path><circle cx="16" cy="12" r="2.4" fill="#fabd2f"
+              ></circle></svg
+            >
+            <span class="wordmark">Keyhole</span>
+            <span class="docs-chip">docs</span>
+          </a>
+
+          <div class="nav-right">
+            <div class="search" data-search>
+              <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#928374" stroke-width="2.2" aria-hidden="true"
+                ><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg
+              >
+              <input
+                class="search-input"
+                type="text"
+                placeholder="Search docs…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Search docs"
+                data-search-input
+              />
+              <span class="search-kbd" aria-hidden="true">/</span>
+              <div class="search-results" data-search-results hidden></div>
+            </div>
+
+            <a class="gh-link" href={repo} target="_blank" rel="noopener" title="GitHub" aria-label="Keyhole on GitHub">
+              <svg width="19" height="19" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"
+                ><path
+                  d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38l-.01-1.49c-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48l-.01 2.2c0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"
+                ></path></svg
+              >
+            </a>
+
+            <a class="btn-install" href={install} target="_blank" rel="noopener">Install</a>
+          </div>
+        </nav>
+
+        <!-- body: sidebar | content | toc -->
+        <div class="body">
+          <div class="backdrop" data-backdrop aria-hidden="true"></div>
+
+          <!-- sidebar -->
+          <aside class="sidebar kh-sc" data-sidebar>
+            {
+              groups.map((g) => (
+                <div class="nav-group" data-group>
+                  <button class="nav-group-head" type="button" data-group-toggle aria-expanded="true">
+                    <span class="caret" aria-hidden="true">▾</span>
+                    {g.title}
+                  </button>
+                  <div class="nav-items" data-group-items>
+                    {g.items.map((it) => (
+                      <a
+                        class:list={['nav-item', { active: it.active }]}
+                        href={it.href}
+                        aria-current={it.active ? 'page' : undefined}
+                      >
+                        {it.label}
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              ))
+            }
+          </aside>
+
+          <!-- content scroller (drives scroll-spy) -->
+          <main class="content kh-sc" data-scroller>
+            <article class="doc">
+              <div class="eyebrow">{meta.group}</div>
+              <h1>{meta.label}</h1>
+              <slot />
+            </article>
+          </main>
+
+          <!-- right-rail TOC -->
+          <aside class="toc kh-sc">
+            <div class="toc-cap">On this page</div>
+            {
+              meta.toc.map(([slug, label]) => (
+                <a class="toc-item" href={`#${slug}`} data-toc-link={slug}>
+                  {label}
+                </a>
+              ))
+            }
+          </aside>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      import { searchPages } from '../lib/search';
+
+      // --- copy buttons (shared delegated handler) ----------------------------
+      const copyTimers = new WeakMap<HTMLElement, number>();
+      for (const btn of document.querySelectorAll<HTMLButtonElement>('button.copy')) {
+        btn.addEventListener('click', async () => {
+          const cmd = btn.dataset.copyCmd;
+          if (!cmd) return;
+          try {
+            await navigator.clipboard?.writeText(cmd);
+          } catch {
+            /* clipboard unavailable; still give feedback */
+          }
+          btn.textContent = 'copied ✓';
+          window.clearTimeout(copyTimers.get(btn));
+          copyTimers.set(
+            btn,
+            window.setTimeout(() => {
+              btn.textContent = 'copy';
+            }, 1600),
+          );
+        });
+      }
+
+      // --- collapsible sidebar groups -----------------------------------------
+      for (const toggle of document.querySelectorAll<HTMLButtonElement>('[data-group-toggle]')) {
+        toggle.addEventListener('click', () => {
+          const group = toggle.closest('[data-group]');
+          if (!group) return;
+          const collapsed = group.classList.toggle('collapsed');
+          toggle.setAttribute('aria-expanded', String(!collapsed));
+        });
+      }
+
+      // --- live search --------------------------------------------------------
+      const search = document.querySelector<HTMLElement>('[data-search]');
+      const searchInput = document.querySelector<HTMLInputElement>('[data-search-input]');
+      const searchResults = document.querySelector<HTMLElement>('[data-search-results]');
+
+      function renderSearch(): void {
+        if (!searchInput || !searchResults) return;
+        const q = searchInput.value;
+        if (!q.trim()) {
+          searchResults.hidden = true;
+          searchResults.replaceChildren();
+          return;
+        }
+        const results = searchPages(q);
+        searchResults.replaceChildren();
+        if (results.length === 0) {
+          const empty = document.createElement('div');
+          empty.className = 'search-empty';
+          empty.textContent = 'No matches.';
+          searchResults.append(empty);
+        } else {
+          for (const r of results) {
+            const a = document.createElement('a');
+            a.className = 'search-result';
+            a.href = r.href;
+            const label = document.createElement('div');
+            label.className = 'sr-label';
+            label.textContent = r.label;
+            const group = document.createElement('div');
+            group.className = 'sr-group';
+            group.textContent = r.group;
+            a.append(label, group);
+            // mousedown fires before the input's blur, so the navigation lands.
+            a.addEventListener('mousedown', (e) => {
+              e.preventDefault();
+              window.location.href = r.href;
+            });
+            searchResults.append(a);
+          }
+        }
+        searchResults.hidden = false;
+      }
+
+      if (searchInput && searchResults && search) {
+        searchInput.addEventListener('input', renderSearch);
+        searchInput.addEventListener('focus', renderSearch);
+        document.addEventListener('click', (e) => {
+          if (!search.contains(e.target as Node)) {
+            searchResults.hidden = true;
+          }
+        });
+        searchInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') {
+            searchInput.value = '';
+            searchResults.hidden = true;
+            searchInput.blur();
+          }
+        });
+        // `/` from anywhere focuses the search box (matches the keycap hint).
+        document.addEventListener('keydown', (e) => {
+          if (e.key !== '/') return;
+          const t = e.target as HTMLElement | null;
+          const tag = t?.tagName.toLowerCase();
+          if (tag === 'input' || tag === 'textarea' || t?.isContentEditable) return;
+          e.preventDefault();
+          searchInput.focus();
+        });
+      }
+
+      // --- scroll-spy TOC -----------------------------------------------------
+      const scroller = document.querySelector<HTMLElement>('[data-scroller]');
+      const tocLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>('[data-toc-link]'));
+      if (scroller && tocLinks.length) {
+        const headings = Array.from(scroller.querySelectorAll<HTMLElement>('[data-toc]'));
+
+        const spy = (): void => {
+          let current = headings.length ? headings[0].getAttribute('data-toc') : null;
+          for (const h of headings) {
+            if (h.offsetTop - scroller.scrollTop <= 96) current = h.getAttribute('data-toc');
+          }
+          for (const link of tocLinks) {
+            link.classList.toggle('active', link.getAttribute('data-toc-link') === current);
+          }
+        };
+
+        scroller.addEventListener('scroll', spy, { passive: true });
+        spy();
+
+        for (const link of tocLinks) {
+          link.addEventListener('click', (e) => {
+            e.preventDefault();
+            const slug = link.getAttribute('data-toc-link');
+            const el = slug ? scroller.querySelector<HTMLElement>(`[data-toc="${slug}"]`) : null;
+            if (el) scroller.scrollTo({ top: el.offsetTop - 14, behavior: 'smooth' });
+          });
+        }
+      }
+
+      // --- mobile sidebar drawer ----------------------------------------------
+      const menuBtn = document.querySelector<HTMLButtonElement>('[data-menu-toggle]');
+      const backdrop = document.querySelector<HTMLElement>('[data-backdrop]');
+      const setDrawer = (open: boolean): void => {
+        document.body.classList.toggle('drawer-open', open);
+      };
+      menuBtn?.addEventListener('click', () =>
+        setDrawer(!document.body.classList.contains('drawer-open')),
+      );
+      backdrop?.addEventListener('click', () => setDrawer(false));
+    </script>
+
+    <style is:global>
+      :root {
+        --bg: #1d2021;
+        --card: #282828;
+        --raised: #32302f;
+        --sel: #504945;
+        --tab: #665c54;
+        --border: #3c3836;
+        --border-strong: #504945;
+        --fg: #ebdbb2;
+        --bright: #fbf1c7;
+        --sec: #bdae93;
+        --sec2: #d5c4a1;
+        --sec3: #a89984;
+        --muted: #928374;
+        --yellow: #fabd2f;
+        --green: #8ec07c;
+        --lime: #b8bb26;
+        --blue: #83a598;
+        --red: #fb4934;
+        --orange: #fe8019;
+        --purple: #d3869b;
+        --mono: 'JetBrains Mono', ui-monospace, monospace;
+        --display: 'Space Mono', ui-monospace, monospace;
+        --sans: 'Hanken Grotesk', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: var(--sans);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      @keyframes kh-fade {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes kh-breathe {
+        0%,
+        100% {
+          opacity: 0.5;
+        }
+        50% {
+          opacity: 1;
+        }
+      }
+
+      /* custom scrollbars on the three scrolling columns */
+      .kh-sc {
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
+      }
+      .kh-sc::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      .kh-sc::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 6px;
+      }
+      .kh-sc::-webkit-scrollbar-thumb:hover {
+        background: var(--border-strong);
+      }
+      .kh-sc::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      /* ---- doc content typography (slotted page bodies) ---- */
+      .doc {
+        max-width: 720px;
+        animation: kh-fade 0.3s ease both;
+      }
+      .doc .eyebrow {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        letter-spacing: 0.08em;
+        color: var(--yellow);
+        text-transform: uppercase;
+      }
+      .doc h1 {
+        font-family: var(--sans);
+        font-weight: 800;
+        font-size: 32px;
+        color: var(--bright);
+        margin: 6px 0 16px;
+        letter-spacing: -0.02em;
+      }
+      .doc h3 {
+        font-family: var(--sans);
+        font-weight: 700;
+        font-size: 19px;
+        color: var(--bright);
+        margin: 30px 0 10px;
+        letter-spacing: -0.01em;
+        scroll-margin-top: 14px;
+      }
+      .doc p {
+        font-size: 15px;
+        line-height: 1.75;
+        color: var(--sec);
+        margin: 0 0 14px;
+      }
+      .doc strong {
+        color: var(--sec2);
+        font-weight: 700;
+      }
+      .doc em {
+        color: var(--sec2);
+        font-style: italic;
+      }
+      .doc a {
+        color: var(--yellow);
+        text-decoration: none;
+      }
+      .doc a:hover {
+        text-decoration: underline;
+      }
+      .doc code {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        background: var(--raised);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 1px 6px;
+        color: var(--sec2);
+      }
+      .doc kbd {
+        font-family: var(--mono);
+        font-size: 12px;
+        background: var(--bg);
+        border: 1px solid var(--border-strong);
+        border-bottom-width: 2px;
+        border-radius: 5px;
+        padding: 2px 7px;
+        color: var(--fg);
+        white-space: nowrap;
+      }
+      /* the broker dot prefix on the Connecting page H3s */
+      .doc .h3-dot {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        margin-right: 9px;
+        vertical-align: middle;
+      }
+
+      /* reference tables + single-column lists */
+      .doc table {
+        width: 100%;
+        border-collapse: separate;
+        border-spacing: 0;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        overflow: hidden;
+        margin: 14px 0;
+      }
+      .doc th,
+      .doc td {
+        text-align: left;
+        padding: 11px 16px;
+      }
+      .doc thead th {
+        background: var(--raised);
+        font-family: var(--mono);
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--sec);
+        border-bottom: 1px solid var(--border);
+      }
+      .doc tbody td {
+        font-size: 14px;
+        color: var(--sec2);
+        border-bottom: 1px solid var(--raised);
+      }
+      .doc tbody tr:last-child td {
+        border-bottom: 0;
+      }
+      .doc td.mono {
+        font-family: var(--mono);
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .doc .dlist {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        margin: 8px 0 4px;
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      .doc .dlist > div {
+        padding: 10px 16px;
+        border-bottom: 1px solid var(--raised);
+        color: var(--sec2);
+      }
+      .doc .dlist > div:last-child {
+        border-bottom: 0;
+      }
+
+      /* ---- syntax tokens used inside code blocks (slotted) ---- */
+      .c-lime {
+        color: var(--lime);
+      }
+      .c-green {
+        color: var(--green);
+      }
+      .c-muted {
+        color: var(--muted);
+      }
+      .c-sec {
+        color: var(--sec2);
+      }
+      .c-blue {
+        color: var(--blue);
+      }
+      .c-purple {
+        color: var(--purple);
+      }
+      .c-yellow {
+        color: var(--yellow);
+      }
+      .c-red {
+        color: var(--red);
+      }
+    </style>
+
+    <style>
+      .shell {
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: 1320px;
+        max-width: 100%;
+        height: calc(100vh - 48px);
+        min-height: 620px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        overflow: hidden;
+        box-shadow:
+          0 1px 2px rgba(0, 0, 0, 0.4),
+          0 30px 70px rgba(0, 0, 0, 0.22);
+        display: flex;
+        flex-direction: column;
+      }
+
+      /* top nav */
+      .topnav {
+        display: flex;
+        align-items: center;
+        gap: 18px;
+        padding: 15px 26px;
+        border-bottom: 1px solid var(--border);
+        flex: none;
+      }
+      .menu-btn {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: none;
+        border: 0;
+        color: var(--sec);
+        cursor: pointer;
+        padding: 2px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        text-decoration: none;
+      }
+      .wordmark {
+        font-weight: 800;
+        color: var(--fg);
+        font-size: 17px;
+        letter-spacing: -0.01em;
+      }
+      .docs-chip {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--tab);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 2px 6px;
+        margin-left: 2px;
+      }
+      .nav-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      /* search */
+      .search {
+        position: relative;
+      }
+      .search-icon {
+        position: absolute;
+        left: 11px;
+        top: 50%;
+        transform: translateY(-50%);
+        pointer-events: none;
+      }
+      .search-input {
+        width: 248px;
+        max-width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 8px 30px 8px 32px;
+        color: var(--fg);
+        font-family: var(--mono);
+        font-size: 12.5px;
+        outline: none;
+      }
+      .search-input:focus {
+        border-color: var(--yellow);
+      }
+      .search-kbd {
+        position: absolute;
+        right: 9px;
+        top: 50%;
+        transform: translateY(-50%);
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--tab);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        padding: 1px 5px;
+        pointer-events: none;
+      }
+      .search-results {
+        position: absolute;
+        top: 42px;
+        right: 0;
+        width: 300px;
+        max-width: 84vw;
+        background: var(--card);
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+        z-index: 60;
+        overflow: hidden;
+      }
+      .search-result {
+        display: block;
+        padding: 10px 14px;
+        text-decoration: none;
+        border-bottom: 1px solid var(--raised);
+        cursor: pointer;
+      }
+      .search-result:last-child {
+        border-bottom: 0;
+      }
+      .search-result:hover {
+        background: var(--raised);
+      }
+      .sr-label {
+        color: var(--fg);
+        font-weight: 600;
+        font-size: 13.5px;
+      }
+      .sr-group {
+        color: var(--muted);
+        font-size: 11px;
+        font-family: var(--mono);
+        margin-top: 2px;
+      }
+      .search-empty {
+        padding: 14px;
+        color: var(--muted);
+        font-size: 13px;
+        font-family: var(--mono);
+      }
+
+      .gh-link {
+        display: flex;
+        align-items: center;
+        color: var(--sec);
+      }
+      .gh-link:hover {
+        color: var(--fg);
+      }
+      .btn-install {
+        color: var(--card);
+        text-decoration: none;
+        background: var(--yellow);
+        border-radius: 8px;
+        padding: 8px 15px;
+        font-weight: 700;
+        font-size: 13.5px;
+        white-space: nowrap;
+      }
+
+      /* body */
+      .body {
+        flex: 1;
+        display: flex;
+        min-height: 0;
+        position: relative;
+      }
+      .backdrop {
+        display: none;
+      }
+
+      /* sidebar */
+      .sidebar {
+        width: 248px;
+        flex: none;
+        border-right: 1px solid var(--border);
+        overflow-y: auto;
+        padding: 20px 12px 40px;
+      }
+      .nav-group {
+        margin-bottom: 8px;
+      }
+      .nav-group-head {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        width: 100%;
+        cursor: pointer;
+        padding: 7px 10px;
+        background: none;
+        border: 0;
+        text-align: left;
+        font-family: var(--mono);
+        font-size: 11px;
+        letter-spacing: 0.07em;
+        color: var(--yellow);
+        text-transform: uppercase;
+        user-select: none;
+      }
+      .caret {
+        font-size: 9px;
+        width: 9px;
+        color: var(--muted);
+        transition: transform 0.12s ease;
+      }
+      .nav-group.collapsed .caret {
+        transform: rotate(-90deg);
+      }
+      .nav-group.collapsed .nav-items {
+        display: none;
+      }
+      .nav-item {
+        display: block;
+        padding: 8px 12px;
+        margin: 1px 0;
+        border-radius: 7px;
+        font-size: 13.5px;
+        font-weight: 500;
+        color: var(--sec);
+        background: transparent;
+        border-left: 2px solid transparent;
+        text-decoration: none;
+        transition:
+          color 0.12s,
+          background 0.12s;
+      }
+      .nav-item:hover {
+        color: var(--fg);
+      }
+      .nav-item.active {
+        color: var(--bright);
+        font-weight: 700;
+        background: var(--raised);
+        border-left-color: var(--yellow);
+      }
+
+      /* content */
+      .content {
+        flex: 1;
+        overflow-y: auto;
+        min-width: 0;
+        position: relative;
+        padding: 34px 52px 90px;
+      }
+
+      /* right-rail TOC */
+      .toc {
+        width: 212px;
+        flex: none;
+        border-left: 1px solid var(--border);
+        overflow-y: auto;
+        padding: 32px 20px;
+      }
+      .toc-cap {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        letter-spacing: 0.09em;
+        color: var(--muted);
+        text-transform: uppercase;
+        margin-bottom: 14px;
+      }
+      .toc-item {
+        display: block;
+        padding: 6px 0 6px 13px;
+        border-left: 2px solid var(--border);
+        cursor: pointer;
+        font-size: 13px;
+        line-height: 1.4;
+        color: var(--muted);
+        text-decoration: none;
+        transition: color 0.12s;
+      }
+      .toc-item:hover {
+        color: var(--sec2);
+      }
+      .toc-item.active {
+        color: var(--yellow);
+        border-left-color: var(--yellow);
+      }
+
+      /* ---- responsive: drawer sidebar, hidden TOC, page scroll ---- */
+      @media (max-width: 980px) {
+        body {
+          height: auto;
+          overflow: auto;
+        }
+        .shell {
+          padding: 0;
+        }
+        .card {
+          width: 100%;
+          height: auto;
+          min-height: 100vh;
+          border: 0;
+          border-radius: 0;
+          box-shadow: none;
+        }
+        .menu-btn {
+          display: inline-flex;
+        }
+        .body {
+          display: block;
+        }
+        .sidebar {
+          position: fixed;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          z-index: 70;
+          width: 280px;
+          max-width: 82vw;
+          background: var(--card);
+          border-right: 1px solid var(--border);
+          transform: translateX(-100%);
+          transition: transform 0.2s ease;
+          padding-top: 24px;
+        }
+        body.drawer-open .sidebar {
+          transform: none;
+        }
+        body.drawer-open .backdrop {
+          display: block;
+          position: fixed;
+          inset: 0;
+          z-index: 65;
+          background: rgba(0, 0, 0, 0.5);
+        }
+        .content {
+          overflow: visible;
+          padding: 28px 24px 64px;
+        }
+        .toc {
+          display: none;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .search-input {
+          width: 150px;
+        }
+        .search-kbd {
+          display: none;
+        }
+        .topnav {
+          gap: 12px;
+          padding: 14px 18px;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .doc {
+          animation: none;
+        }
+      }
+    </style>
+  </body>
+</html>

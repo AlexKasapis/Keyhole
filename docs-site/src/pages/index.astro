@@ -1,0 +1,60 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Note from '../components/Note.astro';
+import { INSTALL_DISPLAY, INSTALL_COPY } from '../lib/install';
+
+const quick = `<span class="c-lime">$</span> ${INSTALL_DISPLAY}`;
+const nix = `<span class="c-muted"># Nix flake — try it without installing, or install into your profile</span>
+<span class="c-lime">$</span> nix run github:AlexKasapis/Keyhole
+<span class="c-lime">$</span> nix profile install github:AlexKasapis/Keyhole`;
+const distro = `<span class="c-muted"># Debian / Ubuntu — download the .deb from Releases, then:</span>
+<span class="c-lime">$</span> sudo apt install ./keyhole_*_amd64.deb
+<span class="c-muted"># Fedora / openSUSE — download the .rpm, then:</span>
+<span class="c-lime">$</span> sudo dnf install ./keyhole-*.x86_64.rpm   <span class="c-muted"># or: zypper install</span>`;
+const source = `<span class="c-lime">$</span> git clone https://github.com/AlexKasapis/Keyhole
+<span class="c-lime">$</span> cd Keyhole
+<span class="c-lime">$</span> cargo build --release
+<span class="c-muted"># binary at ./target/release/keyhole</span>`;
+const verify = `<span class="c-lime">$</span> keyhole --version
+<span class="c-sec">keyhole 0.1.2</span>`;
+---
+
+<DocsLayout pageId="installation">
+  <p>
+    Keyhole ships as a single, statically-linked binary with no runtime dependencies. Pick
+    whichever channel fits your setup — they all land you on the same <code>keyhole</code> command.
+  </p>
+
+  <h3 id="quick" data-toc="quick">Quick install</h3>
+  <p>
+    The install script detects your platform and architecture, downloads the matching release,
+    verifies its checksum (and cosign signature, if <code>cosign</code> is present), and drops the
+    binary into <code>~/.local/bin</code>.
+  </p>
+  <CodeBlock cmd={INSTALL_COPY} code={quick} />
+  <Note kind="note">
+    Make sure <code>~/.local/bin</code> is on your <code>$PATH</code>. The script prints the exact
+    line to add if it isn't.
+  </Note>
+
+  <h3 id="pkg" data-toc="pkg">Package managers</h3>
+  <p>Prebuilt packages are attached to every <a href="https://github.com/AlexKasapis/Keyhole/releases" target="_blank" rel="noopener">GitHub release</a>.</p>
+  <CodeBlock cmd="nix profile install github:AlexKasapis/Keyhole" code={nix} />
+  <CodeBlock cmd="sudo apt install ./keyhole_*_amd64.deb" code={distro} />
+  <Note kind="note">
+    Homebrew, the AUR, and a <code>cargo install keyhole</code> crates.io release are on the way —
+    the install script, Nix, and the <code>.deb</code> / <code>.rpm</code> assets are the supported
+    channels today.
+  </Note>
+
+  <h3 id="source" data-toc="source">From source</h3>
+  <p>A recent Rust toolchain is the only prerequisite; the full feature set is always built in.</p>
+  <CodeBlock
+    cmd="git clone https://github.com/AlexKasapis/Keyhole && cd Keyhole && cargo build --release"
+    code={source}
+  />
+
+  <h3 id="verify" data-toc="verify">Verify</h3>
+  <CodeBlock cmd="keyhole --version" code={verify} />
+</DocsLayout>

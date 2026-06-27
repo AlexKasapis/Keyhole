@@ -1,0 +1,190 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Note from '../components/Note.astro';
+
+const redisCode = `[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span> = <span class="c-lime">"redis"</span>
+<span class="c-green">name</span> = <span class="c-lime">"local"</span>
+<span class="c-green">host</span> = <span class="c-lime">"127.0.0.1"</span>
+<span class="c-green">port</span> = <span class="c-purple">6379</span>
+<span class="c-green">db</span>   = <span class="c-purple">0</span>`;
+const redisPlain = `[[connection]]
+type = "redis"
+name = "local"
+host = "127.0.0.1"
+port = 6379
+db   = 0`;
+
+const amqpCode = `[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span> = <span class="c-lime">"amqp"</span>
+<span class="c-green">name</span> = <span class="c-lime">"activemq"</span>
+<span class="c-green">host</span> = <span class="c-lime">"127.0.0.1"</span>
+<span class="c-green">port</span> = <span class="c-purple">5672</span>
+<span class="c-muted"># AMQP 1.0 can't list destinations — curate them:</span>
+<span class="c-green">destinations</span> = [<span class="c-lime">"topic:events"</span>, <span class="c-lime">"queue:orders"</span>]`;
+const amqpPlain = `[[connection]]
+type = "amqp"
+name = "activemq"
+host = "127.0.0.1"
+port = 5672
+destinations = ["topic:events", "queue:orders"]`;
+
+const rabbitCode = `[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span>     = <span class="c-lime">"rabbitmq"</span>
+<span class="c-green">name</span>     = <span class="c-lime">"rabbit"</span>
+<span class="c-green">host</span>     = <span class="c-lime">"127.0.0.1"</span>
+<span class="c-green">port</span>     = <span class="c-purple">5672</span>
+<span class="c-green">vhost</span>    = <span class="c-lime">"/"</span>
+<span class="c-green">username</span> = <span class="c-lime">"guest"</span>
+<span class="c-green">password</span> = <span class="c-lime">"env:RABBIT_PW"</span>`;
+const rabbitPlain = `[[connection]]
+type     = "rabbitmq"
+name     = "rabbit"
+host     = "127.0.0.1"
+port     = 5672
+vhost    = "/"
+username = "guest"
+password = "env:RABBIT_PW"`;
+
+const tlsCode = `[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span>     = <span class="c-lime">"rabbitmq"</span>
+<span class="c-green">name</span>     = <span class="c-lime">"prod"</span>
+<span class="c-green">host</span>     = <span class="c-lime">"rabbit.internal"</span>
+<span class="c-green">port</span>     = <span class="c-purple">5671</span>
+<span class="c-green">tls</span>      = <span class="c-purple">true</span>
+<span class="c-green">username</span> = <span class="c-lime">"app"</span>
+<span class="c-green">password</span> = <span class="c-lime">"env:RABBIT_PW"</span>   <span class="c-muted"># or keyring[:account] / prompt</span>`;
+const tlsPlain = `[[connection]]
+type     = "rabbitmq"
+name     = "prod"
+host     = "rabbit.internal"
+port     = 5671
+tls      = true
+username = "app"
+password = "env:RABBIT_PW"`;
+
+const tabs = [
+  { id: 'redis', label: 'Redis', dot: '#fb4934' },
+  { id: 'amqp', label: 'AMQP 1.0', dot: '#83a598' },
+  { id: 'rabbit', label: 'RabbitMQ', dot: '#fe8019' },
+];
+---
+
+<DocsLayout pageId="connecting">
+  <p>
+    Keyhole connects to brokers you describe in your config file — one <code>[[connection]]</code>
+    table each, tagged by <code>type</code>. Pick one from the list on launch, or jump to it with
+    <code>--connect &lt;name&gt;</code>. Every connection is opened read-only by default.
+  </p>
+
+  <h3 id="define" data-toc="define">Defining a connection</h3>
+  <p>Pick a broker to see its <code>[[connection]]</code> block:</p>
+
+  <div class="broker-tabs" data-broker-tabs>
+    {
+      tabs.map((t, i) => (
+        <button
+          class:list={['broker-tab', { active: i === 0 }]}
+          type="button"
+          data-broker-tab={t.id}
+        >
+          <span class="bdot" style={`background:${t.dot}`} />
+          {t.label}
+        </button>
+      ))
+    }
+  </div>
+
+  <div data-broker-panel="redis">
+    <CodeBlock cmd={redisPlain} code={redisCode} dense />
+  </div>
+  <div data-broker-panel="amqp" hidden>
+    <CodeBlock cmd={amqpPlain} code={amqpCode} dense />
+  </div>
+  <div data-broker-panel="rabbit" hidden>
+    <CodeBlock cmd={rabbitPlain} code={rabbitCode} dense />
+  </div>
+
+  <h3 id="redis" data-toc="redis"><span class="h3-dot" style="background:#fb4934"></span>Redis</h3>
+  <p>
+    The fullest experience: keyspace browser, value inspector, the read-only console, and every tail
+    type (pub/sub, pattern, streams, keyspace events, MONITOR). Choose the database with the
+    <code>db</code> field, or switch it live once connected.
+  </p>
+
+  <h3 id="amqp" data-toc="amqp"><span class="h3-dot" style="background:#83a598"></span>AMQP 1.0</h3>
+  <p>
+    Browse and tail topics and queues. AMQP 1.0 can't enumerate destinations, so you list the ones
+    you care about in <code>destinations</code> — or point <code>management_url</code> at a Jolokia
+    console (e.g. ActiveMQ's) to auto-discover them.
+  </p>
+
+  <h3 id="rabbit" data-toc="rabbit">
+    <span class="h3-dot" style="background:#fe8019"></span>RabbitMQ
+  </h3>
+  <p>
+    Tap any exchange to watch routed messages flow through — type
+    <code>exchange:name[/binding_key]</code> at the Tail anchor. Set the virtual host with
+    <code>vhost</code> (default <code>/</code>).
+  </p>
+
+  <h3 id="tls" data-toc="tls">TLS &amp; auth</h3>
+  <p>
+    Set <code>tls = true</code> for a TLS connection (the <code>rediss://</code> / <code>amqps://</code>
+    listener on the wire). Authenticate with <code>username</code> and a <code>password</code> spec.
+  </p>
+  <CodeBlock cmd={tlsPlain} code={tlsCode} dense />
+  <Note kind="warning">
+    Never put a literal password in the file. <code>password</code> is a spec —
+    <code>env:VAR</code>, <code>keyring[:account]</code>, or <code>prompt</code> — resolved at
+    connect time.
+  </Note>
+</DocsLayout>
+
+<style>
+  .broker-tabs {
+    display: flex;
+    gap: 8px;
+    margin: 14px 0 4px;
+    flex-wrap: wrap;
+  }
+  .broker-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    border: 1px solid var(--border-strong);
+    background: var(--raised);
+    color: var(--sec);
+    font-family: var(--mono);
+    font-weight: 600;
+    font-size: 12.5px;
+    border-radius: 8px;
+    padding: 8px 14px;
+  }
+  .broker-tab.active {
+    background: var(--tab);
+    color: var(--bright);
+  }
+  .bdot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+</style>
+
+<script>
+  const root = document.querySelector<HTMLElement>('[data-broker-tabs]');
+  if (root) {
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[data-broker-tab]'));
+    const panels = Array.from(document.querySelectorAll<HTMLElement>('[data-broker-panel]'));
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => {
+        const id = tab.getAttribute('data-broker-tab');
+        for (const t of tabs) t.classList.toggle('active', t === tab);
+        for (const p of panels) p.hidden = p.getAttribute('data-broker-panel') !== id;
+      });
+    }
+  }
+</script>

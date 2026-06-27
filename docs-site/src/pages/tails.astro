@@ -1,0 +1,70 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+
+const start = `<span class="c-muted"># focus the bottom panel (Ctrl-↓), pick the Pub/Sub or Tail anchor,</span>
+<span class="c-muted"># type a source spec, then press Enter:</span>
+pubsub:news                  <span class="c-muted"># Redis SUBSCRIBE</span>
+psub:orders.*                <span class="c-muted"># Redis PSUBSCRIBE (pattern)</span>
+stream:telemetry             <span class="c-muted"># Redis stream, new entries</span>
+keyspace                     <span class="c-muted"># Redis keyspace events</span>
+topic:events                 <span class="c-muted"># AMQP 1.0 topic</span>
+exchange:amq.topic/order.*   <span class="c-muted"># RabbitMQ exchange tap</span>`;
+
+const pattern = `<span class="c-muted"># Pub/Sub anchor: psub:orders.*</span>
+<span class="c-muted">14:02:09.118  orders.created     {"id":48213,"total":24.90}</span>
+<span class="c-muted">14:02:09.640  orders.paid        {"id":48213,"ok":true}</span>`;
+---
+
+<DocsLayout pageId="tails">
+  <p>
+    A tail is a live stream of events rendered into the bottom panel, newest at the bottom. You can
+    run several at once — each gets its own tab.
+  </p>
+
+  <h3 id="types" data-toc="types">Tail types</h3>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:130px">broker</th>
+        <th>tail sources</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="mono" style="color:#fb4934">Redis</td>
+        <td>pub/sub · pattern pub/sub · streams · keyspace events · MONITOR</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:#83a598">AMQP 1.0</td>
+        <td>topic tails · queue tails</td>
+      </tr>
+      <tr>
+        <td class="mono" style="color:#fe8019">RabbitMQ</td>
+        <td>exchange taps</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="start" data-toc="start">Starting a tail</h3>
+  <p>
+    Focus the bottom panel with <kbd>Ctrl</kbd>+<kbd>↓</kbd>, cycle to the <strong>Pub/Sub</strong>
+    or <strong>Tail</strong> anchor with <kbd>Tab</kbd>, then type a source spec and press
+    <kbd>Enter</kbd>. The spec's prefix selects the source type:
+  </p>
+  <CodeBlock cmd="psub:orders.*" code={start} />
+
+  <h3 id="pattern" data-toc="pattern">Pattern tails</h3>
+  <p>
+    A pattern tail (<code>psub:orders.*</code>) subscribes to a glob and labels each event with the
+    concrete channel it arrived on, padded to a fixed 18-column field so payloads stay aligned.
+  </p>
+  <CodeBlock cmd="psub:orders.*" code={pattern} />
+
+  <h3 id="scrollback" data-toc="scrollback">Pause &amp; scrollback</h3>
+  <p>
+    The feed always follows the newest event. Press <kbd>p</kbd> to pause and resume the view — the
+    tail keeps running (and recording) underneath. Scrollback is a ring buffer capped at
+    <code>tail_scrollback</code> (default 2000); older events scroll off the top.
+  </p>
+</DocsLayout>

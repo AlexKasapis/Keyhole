@@ -1,0 +1,85 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Note from '../components/Note.astro';
+
+const file = `<span class="c-muted"># ~/.config/keyhole/config.toml</span>
+
+[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span> = <span class="c-lime">"redis"</span>
+<span class="c-green">name</span> = <span class="c-lime">"prod-cache"</span>
+<span class="c-green">host</span> = <span class="c-lime">"127.0.0.1"</span>
+<span class="c-green">port</span> = <span class="c-purple">6379</span>
+
+[<span class="c-yellow">settings</span>]
+<span class="c-green">tail_scrollback</span> = <span class="c-purple">2000</span>
+
+[<span class="c-yellow">theme</span>]
+<span class="c-green">base</span> = <span class="c-lime">"gruvbox"</span>`;
+
+const override = `<span class="c-muted"># read a config file from anywhere</span>
+<span class="c-lime">$</span> keyhole --config ./keyhole.toml --connect prod-cache`;
+
+const profiles = `<span class="c-muted"># config.toml</span>
+[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span>     = <span class="c-lime">"redis"</span>
+<span class="c-green">name</span>     = <span class="c-lime">"prod-cache"</span>
+<span class="c-green">host</span>     = <span class="c-lime">"cache.internal"</span>
+<span class="c-green">port</span>     = <span class="c-purple">6380</span>
+<span class="c-green">tls</span>      = <span class="c-purple">true</span>
+<span class="c-green">password</span> = <span class="c-lime">"env:REDIS_PW"</span>
+
+<span class="c-lime">$</span> keyhole --connect prod-cache`;
+---
+
+<DocsLayout pageId="config">
+  <p>
+    Saved connections and preferences live in a single TOML file. Connections are
+    <code>[[connection]]</code> tables; global behaviour goes under <code>[settings]</code>, and
+    colours under <code>[theme]</code>.
+  </p>
+
+  <h3 id="file" data-toc="file">Config file</h3>
+  <CodeBlock cmd="$EDITOR ~/.config/keyhole/config.toml" code={file} dense />
+
+  <h3 id="loc" data-toc="loc">Locations</h3>
+  <p>
+    Keyhole reads its config from the platform config directory — on Linux,
+    <code>~/.config/keyhole/config.toml</code>. Point it at any other file with <code>--config</code>.
+  </p>
+  <CodeBlock cmd="keyhole --config ./keyhole.toml --connect prod-cache" code={override} />
+
+  <h3 id="flags" data-toc="flags">Flags</h3>
+  <table class="flags">
+    <tbody>
+      <tr><td class="flag">--config &lt;file&gt;</td><td>Read config from a custom path.</td></tr>
+      <tr><td class="flag">--connect &lt;name&gt;</td><td>Open a saved connection on startup.</td></tr>
+      <tr>
+        <td class="flag">--log-level &lt;filter&gt;</td>
+        <td>Log verbosity, e.g. <code>info</code> or <code>keyhole=debug</code>.</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3 id="profiles" data-toc="profiles">Profiles</h3>
+  <p>
+    Every <code>[[connection]]</code> is a named profile. Launch one straight away by name instead
+    of picking it from the list:
+  </p>
+  <CodeBlock cmd="keyhole --connect prod-cache" code={profiles} dense />
+  <Note kind="tip">
+    Passwords are never stored as literals — <code>password</code> is a spec: <code>env:VAR</code>,
+    <code>keyring[:account]</code>, or <code>prompt</code>, resolved at connect time.
+  </Note>
+</DocsLayout>
+
+<style>
+  .flags td {
+    font-size: 13px;
+  }
+  .flags td.flag {
+    width: 200px;
+    font-family: var(--mono);
+    color: var(--green);
+  }
+</style>

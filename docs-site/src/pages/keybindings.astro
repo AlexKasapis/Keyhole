@@ -1,0 +1,150 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import { KEYBINDINGS } from '../lib/keybindings';
+---
+
+<DocsLayout pageId="keybindings">
+  <p>Keyhole is keyboard-first. Filter the cheat-sheet to find the binding you need.</p>
+
+  <div class="kb-filter">
+    <svg class="kb-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#928374" stroke-width="2.2" aria-hidden="true"
+      ><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg
+    >
+    <input
+      class="kb-input"
+      type="text"
+      placeholder="Filter keys or actions…"
+      autocomplete="off"
+      spellcheck="false"
+      aria-label="Filter keybindings"
+      data-kb-input
+    />
+  </div>
+
+  {
+    KEYBINDINGS.map((g) => (
+      <div class="kb-group" id={g.slug} data-toc={g.slug} data-kb-group={g.slug}>
+        <div class="kb-grouptitle">{g.title}</div>
+        <div class="kb-table">
+          {g.bindings.map((b) => (
+            <div class="kb-row" data-kb-row data-kb-desc={b.desc}>
+              <div class="kb-keys">
+                {b.keys.map((k) => (
+                  <kbd>{k}</kbd>
+                ))}
+              </div>
+              <div class="kb-desc">{b.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    ))
+  }
+
+  <div class="kb-empty" data-kb-empty hidden>No bindings match "<span data-kb-q></span>".</div>
+</DocsLayout>
+
+<style>
+  .kb-filter {
+    position: relative;
+    margin: 6px 0 22px;
+  }
+  .kb-icon {
+    position: absolute;
+    left: 13px;
+    top: 50%;
+    transform: translateY(-50%);
+    pointer-events: none;
+  }
+  .kb-input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 11px 14px 11px 36px;
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 13px;
+    outline: none;
+  }
+  .kb-input:focus {
+    border-color: var(--yellow);
+  }
+
+  .kb-group {
+    margin-bottom: 26px;
+  }
+  .kb-grouptitle {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.07em;
+    color: var(--yellow);
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .kb-table {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  .kb-row {
+    display: grid;
+    grid-template-columns: 170px 1fr;
+    align-items: center;
+    border-bottom: 1px solid var(--raised);
+  }
+  .kb-row:last-child {
+    border-bottom: 0;
+  }
+  .kb-keys {
+    padding: 10px 16px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .kb-desc {
+    padding: 10px 16px;
+    color: var(--sec2);
+    font-size: 14px;
+  }
+  .kb-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 13px;
+  }
+</style>
+
+<script>
+  import { filterKeybindings } from '../lib/keybindings';
+
+  const input = document.querySelector<HTMLInputElement>('[data-kb-input]');
+  const groupEls = Array.from(document.querySelectorAll<HTMLElement>('[data-kb-group]'));
+  const emptyEl = document.querySelector<HTMLElement>('[data-kb-empty]');
+  const qEcho = document.querySelector<HTMLElement>('[data-kb-q]');
+
+  function apply(): void {
+    if (!input) return;
+    const q = input.value;
+    const surviving = filterKeybindings(q);
+    const bySlug = new Map(surviving.map((g) => [g.slug, new Set(g.bindings.map((b) => b.desc))]));
+
+    for (const groupEl of groupEls) {
+      const slug = groupEl.getAttribute('data-kb-group') ?? '';
+      const keep = bySlug.get(slug);
+      let anyVisible = false;
+      for (const row of groupEl.querySelectorAll<HTMLElement>('[data-kb-row]')) {
+        const visible = !!keep && keep.has(row.getAttribute('data-kb-desc') ?? '');
+        row.hidden = !visible;
+        if (visible) anyVisible = true;
+      }
+      groupEl.hidden = !anyVisible;
+    }
+
+    if (emptyEl) emptyEl.hidden = surviving.length > 0;
+    if (qEcho) qEcho.textContent = q;
+  }
+
+  input?.addEventListener('input', apply);
+</script>

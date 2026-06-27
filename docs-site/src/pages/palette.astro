@@ -1,0 +1,112 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+
+const settings = [
+  { label: 'Theme', value: 'gruvbox' },
+  { label: 'Animations', value: 'on' },
+  { label: 'AMQP peek mode', value: 'browse' },
+];
+---
+
+<DocsLayout pageId="palette">
+  <p>
+    Keyhole keeps a command palette for app-level actions, opened with <kbd>:</kbd>. It's
+    deliberately small today — the keyboard drives most actions directly (see
+    <a href="/keybindings">Keybindings</a>).
+  </p>
+
+  <h3 id="open" data-toc="open">Opening the palette</h3>
+  <p>
+    Press <kbd>:</kbd> from any normal pane. <kbd>↑</kbd> <kbd>↓</kbd> move the highlight,
+    <kbd>Enter</kbd> runs the selected command, and <kbd>Esc</kbd> closes it. There's no text box —
+    it's a short, arrow-driven list, not a fuzzy finder.
+  </p>
+  <div class="palette" aria-hidden="true">
+    <div class="palette-head"><span class="c-yellow">:</span> command palette</div>
+    <div class="palette-list">
+      <div class="palette-item active">Settings page</div>
+    </div>
+  </div>
+
+  <h3 id="cmds" data-toc="cmds">Commands</h3>
+  <p>
+    The palette currently exposes a single command — <strong>Settings</strong> — with more to come.
+    Everyday actions like tailing, recording, filtering and sorting are direct keybindings rather
+    than palette entries.
+  </p>
+
+  <h3 id="settings" data-toc="settings">Settings</h3>
+  <p>
+    Selecting <strong>Settings page</strong> opens an overlay you adjust in place with <kbd>←</kbd> /
+    <kbd>→</kbd>. <kbd>Enter</kbd> or <kbd>Esc</kbd> closes it.
+  </p>
+  <div class="settings" aria-hidden="true">
+    {
+      settings.map((s, i) => (
+        <div class:list={['settings-row', { active: i === 0 }]}>
+          <span>{s.label}</span>
+          <span class="settings-val">‹ {s.value} ›</span>
+        </div>
+      ))
+    }
+  </div>
+</DocsLayout>
+
+<style>
+  .palette {
+    margin: 14px 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: var(--mono);
+    max-width: 360px;
+  }
+  .palette-head {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 13px;
+  }
+  .palette-list {
+    padding: 5px 0;
+    font-size: 13px;
+  }
+  .palette-item {
+    padding: 8px 16px;
+    color: var(--sec2);
+  }
+  .palette-item.active {
+    background: var(--raised);
+    color: var(--bright);
+  }
+
+  .settings {
+    margin: 14px 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg);
+    font-family: var(--mono);
+    font-size: 13px;
+    max-width: 360px;
+  }
+  .settings-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 9px 16px;
+    border-bottom: 1px solid var(--raised);
+    color: var(--sec2);
+  }
+  .settings-row:last-child {
+    border-bottom: 0;
+  }
+  .settings-row.active {
+    background: var(--raised);
+    color: var(--bright);
+  }
+  .settings-val {
+    color: var(--yellow);
+  }
+</style>

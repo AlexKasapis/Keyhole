@@ -1,0 +1,49 @@
+---
+// A note / tip / warning callout — the TUI "labeled box" motif: a sharp-cornered
+// 1px box with a coloured mono label floating on its top border. The label text
+// and colour signal the kind.
+interface Props {
+  kind?: 'note' | 'tip' | 'warning';
+}
+const { kind = 'note' } = Astro.props;
+---
+
+<div class:list={['note', `note--${kind}`]}>
+  <div class="note-label">{kind}</div>
+  <p class="note-body"><slot /></p>
+</div>
+
+<style>
+  .note {
+    position: relative;
+    margin: 20px 0;
+    border: 1px solid var(--border-strong);
+    border-radius: 2px;
+    padding: 14px 16px 12px;
+  }
+  .note-label {
+    position: absolute;
+    top: -9px;
+    left: 13px;
+    background: var(--card);
+    padding: 0 5px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .note--note .note-label {
+    color: var(--green);
+  }
+  .note--tip .note-label {
+    color: var(--yellow);
+  }
+  .note--warning .note-label {
+    color: var(--red);
+  }
+  .note-body {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--sec3);
+    margin: 0;
+  }
+</style>

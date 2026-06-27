@@ -1,0 +1,50 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Note from '../components/Note.astro';
+
+const format = `{<span class="c-blue">"seq"</span>:<span class="c-purple">0</span>,<span class="c-blue">"ts"</span>:<span class="c-lime">"2026-06-27T14:02:09.118247Z"</span>,<span class="c-blue">"connection"</span>:<span class="c-lime">"prod-cache"</span>,<span class="c-blue">"source"</span>:<span class="c-lime">"orders.created"</span>,<span class="c-blue">"source_type"</span>:<span class="c-lime">"pubsub"</span>,<span class="c-blue">"encoding"</span>:<span class="c-lime">"json"</span>,<span class="c-blue">"payload"</span>:<span class="c-lime">"{\\"id\\":48213,\\"total\\":24.9}"</span>}
+{<span class="c-blue">"seq"</span>:<span class="c-purple">1</span>,<span class="c-blue">"ts"</span>:<span class="c-lime">"2026-06-27T14:02:09.640512Z"</span>,<span class="c-blue">"connection"</span>:<span class="c-lime">"prod-cache"</span>,<span class="c-blue">"source"</span>:<span class="c-lime">"orders.paid"</span>,<span class="c-blue">"source_type"</span>:<span class="c-lime">"pubsub"</span>,<span class="c-blue">"encoding"</span>:<span class="c-lime">"json"</span>,<span class="c-blue">"payload"</span>:<span class="c-lime">"{\\"id\\":48213,\\"ok\\":true}"</span>}`;
+
+const jq = `<span class="c-muted"># pull the payload of every recorded pub/sub event</span>
+<span class="c-lime">$</span> jq -r <span class="c-sec">'select(.source_type=="pubsub") | .payload'</span> *.jsonl`;
+---
+
+<DocsLayout pageId="recording">
+  <p>
+    Any live tail can be recorded to a lossless JSONL file — one JSON object per line — that's
+    friendly to <code>jq</code> and browsable in-app.
+  </p>
+
+  <h3 id="rec" data-toc="rec">Recording a tail</h3>
+  <p>
+    With a live tail focused, press <kbd>r</kbd> to start or stop recording — a red
+    <span class="c-red">● REC <em>n</em> (<em>bytes</em>)</span> indicator appears in the header while
+    it runs. Files are written to <code>~/.local/share/keyhole/recordings/</code> as
+    <code>&lt;connection&gt;-&lt;source_type&gt;-&lt;target&gt;-&lt;timestamp&gt;.jsonl</code>.
+  </p>
+  <Note kind="note">
+    Recording is lossless even when the on-screen feed drops events under load.
+    <kbd>r</kbd> only acts on a live tail — it's a no-op on the Console, Pub/Sub, and Tail anchors.
+  </Note>
+
+  <h3 id="format" data-toc="format">JSONL format</h3>
+  <p>
+    Each line is a self-contained record: a sequence number, an RFC&nbsp;3339 timestamp, the
+    connection and source, the payload encoding (<code>utf8</code>, <code>json</code>, or
+    <code>base64</code>), and the payload. A <code>meta</code> array carries source-specific extras
+    (a stream entry id, a routing key) and is omitted when empty.
+  </p>
+  <CodeBlock cmd="head -n2 *.jsonl" code={format} dense />
+
+  <h3 id="jq" data-toc="jq">Working with jq</h3>
+  <CodeBlock cmd={`jq -r 'select(.source_type=="pubsub") | .payload' *.jsonl`} code={jq} dense />
+
+  <h3 id="browse" data-toc="browse">Browse recordings</h3>
+  <p>
+    Open the <strong>Recordings</strong> tab with <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> to
+    browse saved files read-only, newest first. <kbd>Ctrl</kbd>+<kbd>←</kbd> /
+    <kbd>Ctrl</kbd>+<kbd>→</kbd> switch between the list and the viewer; <kbd>↑</kbd> <kbd>↓</kbd>
+    scroll; <kbd>r</kbd> renames and <kbd>d</kbd> <kbd>d</kbd> deletes.
+  </p>
+</DocsLayout>

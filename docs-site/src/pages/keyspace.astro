@@ -1,0 +1,47 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Note from '../components/Note.astro';
+
+const filter = `<span class="c-muted"># filter input — glob match, scoped to the tree</span>
+<span class="c-green">/</span> session:*`;
+const console = `<span class="c-green">&gt;</span> HGETALL session:9f2ac1     <span class="c-muted"># ok</span>
+<span class="c-green">&gt;</span> DEL session:9f2ac1         <span class="c-red"># blocked — read-only</span>`;
+---
+
+<DocsLayout pageId="keyspace">
+  <p>
+    The two top panes are where you spend most of your time: a navigable view of the keyspace on the
+    left, and a typed inspector for the selected value on the right.
+  </p>
+
+  <h3 id="keys" data-toc="keys">The keys pane</h3>
+  <p>
+    Keys are grouped by their <code>:</code>-delimited prefix into a collapsible tree, with the count
+    of members shown per group. Each row carries the key's type, TTL, and serialized size.
+  </p>
+
+  <h3 id="value" data-toc="value">Value inspector</h3>
+  <p>
+    The inspector renders each Redis type natively — strings, hashes, lists, sets, sorted sets and
+    streams each get a purpose-built view.
+  </p>
+
+  <h3 id="filter" data-toc="filter">Filter &amp; sort</h3>
+  <p>
+    Hit <kbd>/</kbd> and type a glob to filter; cycle the sort column with <kbd>o</kbd>, and flip the
+    direction with <kbd>O</kbd>.
+  </p>
+  <CodeBlock cmd="session:*" code={filter} />
+
+  <h3 id="console" data-toc="console">Read-only console</h3>
+  <p>
+    The <strong>Console</strong> tab gives you a command line that only accepts read paths. Mutating
+    commands are rejected before they ever reach the server.
+  </p>
+  <CodeBlock cmd="HGETALL session:9f2ac1" code={console} />
+  <Note kind="note">
+    Read-only is enforced before a command leaves Keyhole — mutating commands never reach the
+    server, so the console is safe to point at production.
+  </Note>
+</DocsLayout>
