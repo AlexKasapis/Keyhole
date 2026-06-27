@@ -263,6 +263,9 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 // peeked message list + body preview (right). The hints follow
                 // whether the keyboard is on the destinations or the message list;
                 // Ctrl-→/← move between them (Ctrl-↑↓ reach the bottom tails).
+                // Both states close with the shared cluster — tails route,
+                // `: palette`, `? help`, `Esc back` — so the AMQP body advertises
+                // the same globals as the Redis keys pane and the Recordings tab.
                 let on_messages = app.active_conn().is_some_and(|c| c.peek.focused);
                 if on_messages {
                     owned(&[
@@ -270,7 +273,10 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                         ("/", "filter"),
                         ("P", "publish"),
                         ("Ctrl-←", "destinations"),
+                        ("Tab/Ctrl-↓", "tails"),
+                        (":", "palette"),
                         ("?", "help"),
+                        ("Esc", "back"),
                     ])
                 } else {
                     owned(&[
@@ -281,7 +287,9 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                         ("t", "tail"),
                         ("P", "publish"),
                         ("Tab/Ctrl-↓", "tails"),
+                        (":", "palette"),
                         ("?", "help"),
+                        ("Esc", "back"),
                     ])
                 }
             } else {
@@ -2090,6 +2098,213 @@ mod tests {
         insta::assert_snapshot!(
             "browser_amqp_message_preview",
             render_lines(&mut app, 90, 24)
+        );
+    }
+
+    #[tokio::test]
+    async fn amqp_message_pane_border_follows_border_focused_not_accent() {
+        // F1: the focused message-list border uses the shared `border_focused`
+        // tint like every other Ctrl-arrow pane — not `accent`. The two coincide
+        // in the built-in palettes, so drive them apart and check the border.
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        app.screen = Screen::Browser;
+        app.theme.border_focused = Style::new().fg(Color::Magenta);
+        app.theme.accent = Style::new().fg(Color::Cyan);
+        // Ctrl-→ focuses the message list, so its border should light up.
+        app.connections[0].peek.focused = true;
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+        let frame = terminal.draw(|f| render(f, &mut app)).expect("render");
+        let buf = frame.buffer;
+        let w = buf.area.width as usize;
+        // The message list is the upper-right pane; its top-left corner is the
+        // rightmost `┌` on row 0 (the left one is the unfocused Destinations box).
+        let corner = (0..w)
+            .filter(|&c| buf.content()[c].symbol() == "┌")
+            .max()
+            .expect("the message pane has a top-left corner");
+        assert_eq!(
+            buf.content()[corner].style().fg,
+            Some(Color::Magenta),
+            "the focused message border uses border_focused, not accent"
+        );
+    }
+
+    #[tokio::test]
+    async fn amqp_message_cursor_follows_focus() {
+        // F2/F4: the selected message's `▶` cursor carries the row selection
+        // style while focused (not `accent`), and parks to a dim cursor when the
+        // keyboard is elsewhere — the keys/destinations/recordings convention.
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        app.screen = Screen::Browser;
+        app.theme.selected = Style::new().fg(Color::Green);
+        app.theme.dim = Style::new().fg(Color::DarkGray);
+        app.theme.accent = Style::new().fg(Color::Cyan);
+        app.connections[0].peek.selected = 0;
+
+        // The `▶` glyph in the right half is the message cursor (the left-half
+        // one is the destination cursor).
+        let cursor_fg = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+            let frame = terminal.draw(|f| render(f, app)).expect("render");
+            let buf = frame.buffer;
+            let w = buf.area.width as usize;
+            (0..buf.content().len())
+                .find(|&i| buf.content()[i].symbol() == "▶" && i % w >= w / 2)
+                .map(|i| buf.content()[i].style().fg)
+                .expect("the message list shows a cursor")
+        };
+
+        app.connections[0].peek.focused = true;
+        assert_eq!(
+            cursor_fg(&mut app),
+            Some(Color::Green),
+            "the focused message cursor uses the selection style, not accent"
+        );
+
+        app.connections[0].peek.focused = false;
+        assert_eq!(
+            cursor_fg(&mut app),
+            Some(Color::DarkGray),
+            "the unfocused message list keeps a dim parked cursor"
+        );
+    }
+
+    #[tokio::test]
+    async fn key_list_selection_dims_when_bottom_panel_focused() {
+        // F4: the key list parks its selection to `dim` when the bottom panel
+        // holds the keyboard (and brightens when it has it back), so the focused
+        // pane is unambiguous — the shared list convention via `selection_style`.
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        app.theme.selected = Style::new().fg(Color::Green);
+        app.theme.dim = Style::new().fg(Color::DarkGray);
+        app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].rebuild_view();
+        app.connections[0].browser.phase = ScanPhase::Complete;
+        app.connections[0].browser.table.select(Some(0));
+
+        // The key cursor `▶` is in the left half (the value pane is the right).
+        let cursor_fg = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(90, 24)).unwrap();
+            let frame = terminal.draw(|f| render(f, app)).expect("render");
+            let buf = frame.buffer;
+            let w = buf.area.width as usize;
+            (0..buf.content().len())
+                .find(|&i| buf.content()[i].symbol() == "▶" && i % w < w / 2)
+                .map(|i| buf.content()[i].style().fg)
+                .expect("the key list shows a cursor")
+        };
+
+        app.connections[0].focus = PaneFocus::Keys;
+        assert_eq!(
+            cursor_fg(&mut app),
+            Some(Color::Green),
+            "the focused key list shows the bright selection"
+        );
+
+        app.connections[0].focus = PaneFocus::Bottom;
+        assert_eq!(
+            cursor_fg(&mut app),
+            Some(Color::DarkGray),
+            "the key list parks to a dim cursor when the bottom panel is focused"
+        );
+    }
+
+    #[tokio::test]
+    async fn amqp_body_footer_advertises_shared_globals() {
+        // F3: the AMQP body (destinations ⇄ messages) advertises the same global
+        // cluster as the Redis keys pane and the Recordings tab — the tails
+        // route, `: palette`, `? help` and `Esc back` — on both panes. The body
+        // footer used to drop them, so the same class of pane felt different.
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        app.screen = Screen::Browser;
+        for on_messages in [false, true] {
+            app.connections[0].peek.focused = on_messages;
+            let pairs = hint_sections(&app);
+            let has = |k: &str, a: &str| pairs.iter().any(|(key, act)| *key == k && act == a);
+            let pane = if on_messages {
+                "messages"
+            } else {
+                "destinations"
+            };
+            assert!(
+                has(":", "palette"),
+                "AMQP {pane} footer advertises the palette: {pairs:?}"
+            );
+            assert!(
+                has("?", "help"),
+                "AMQP {pane} footer offers help: {pairs:?}"
+            );
+            assert!(
+                has("Esc", "back"),
+                "AMQP {pane} footer offers back: {pairs:?}"
+            );
+            assert!(
+                has("Tab/Ctrl-↓", "tails"),
+                "AMQP {pane} footer routes to the tails: {pairs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn recordings_list_box_border_follows_focus() {
+        // F5: the recordings list is now a box whose border brightens
+        // (border_focused) while it holds the keyboard and dims (border) when
+        // the viewer does — the same focus cue as the Browser panes, via
+        // `border_style`. (Text snapshots show the box glyphs but not the
+        // focus colour, so assert the colour here.)
+        use crate::recording::{RecordingView, ViewRecord};
+        let (mut app, _rx) = test_app();
+        app.screen = Screen::Recordings;
+        app.theme.border_focused = Style::new().fg(Color::Magenta);
+        app.theme.border = Style::new().fg(Color::DarkGray);
+        app.recordings = vec![crate::app::RecordingFile {
+            name: "rec.jsonl".into(),
+            size: 16,
+            modified: None,
+        }];
+        app.recordings_state.select(Some(0));
+        app.recording_view = Some((
+            "rec.jsonl".into(),
+            RecordingView {
+                connection: None,
+                source_type: None,
+                records: vec![ViewRecord {
+                    seq: 0,
+                    time: "0".into(),
+                    source: "s".into(),
+                    payload: "p".into(),
+                }],
+                error: None,
+            },
+        ));
+
+        // The list box's top-left `┌` is the first corner on the row below the
+        // home frame's top border (the viewer box's corner sits further right).
+        let list_corner_fg = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 14)).unwrap();
+            let frame = terminal.draw(|f| render(f, app)).expect("render");
+            let buf = frame.buffer;
+            let w = buf.area.width as usize;
+            (w..2 * w)
+                .find(|&i| buf.content()[i].symbol() == "┌")
+                .map(|i| buf.content()[i].style().fg)
+                .expect("the recordings list is boxed")
+        };
+
+        app.recordings_focus = RecordingsFocus::List;
+        assert_eq!(
+            list_corner_fg(&mut app),
+            Some(Color::Magenta),
+            "the focused list border uses border_focused"
+        );
+
+        app.recordings_focus = RecordingsFocus::Viewer;
+        assert_eq!(
+            list_corner_fg(&mut app),
+            Some(Color::DarkGray),
+            "the list border dims to border when the viewer is focused"
         );
     }
 

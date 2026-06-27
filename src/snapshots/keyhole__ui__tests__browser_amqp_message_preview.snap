@@ -1,6 +1,5 @@
 ---
 source: src/ui.rs
-assertion_line: 2082
 expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Destinations ─────────────────────────────┐┌ queue:orders · 2 msgs ────────────────────┐
@@ -26,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter tails it · topic = live multicast · queue = non-destructive browse                │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓ messages · / filter · P publish · Ctrl-← destinations · ? help
+ ↑↓ messages · / filter · P publish · Ctrl-← destinations · Tab/Ctrl-↓ tails · : palette ·

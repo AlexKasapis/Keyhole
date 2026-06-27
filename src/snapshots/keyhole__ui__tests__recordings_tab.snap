@@ -1,19 +1,18 @@
 ---
 source: src/ui.rs
-assertion_line: 1921
 expression: "render_lines(&mut app, 100, 14)"
 ---
 ┌ Connections │ Recordings ────────────────────────────────────────────────────────────────────────┐
-│▶ prod-pubsub-o…   4.0 KiB  2026-06-19 09:08│ prod-pubsub-orders-20260619-090807.jsonl            │
-│                                            │ pubsub · prod                                       │
-│                                            │ 2 records · 4.0 KiB · 2026-06-19 09:08              │
-│                                            │                                                     │
-│                                            │ #0    09:08:07.123 orders  first event              │
-│                                            │ #1    09:08:07.456 orders  second event             │
-│                                            │                                                     │
-│                                            │                                                     │
-│                                            │                                                     │
-│                                            │                                                     │
-│                                            │                                                     │
+│┌ Recordings ──────────────────────────────┐┌ prod-pubsub-orders-20260619-090807.jsonl ──────────┐│
+││▶ prod-pubsub…   4.0 KiB  2026-06-19 09:08││ pubsub · prod                                      ││
+││                                          ││ 2 records · 4.0 KiB · 2026-06-19 09:08             ││
+││                                          ││                                                    ││
+││                                          ││ #0    09:08:07.123 orders  first event             ││
+││                                          ││ #1    09:08:07.456 orders  second event            ││
+││                                          ││                                                    ││
+││                                          ││                                                    ││
+││                                          ││                                                    ││
+││                                          ││                                                    ││
+│└──────────────────────────────────────────┘└────────────────────────────────────────────────────┘│
 └──────────────────────────────────────────────────────────────────────────────────────────────────┘
  ↑↓ move · r rename · dd delete · Ctrl-→ viewer · Tab connections · : palette · ? help · Esc back

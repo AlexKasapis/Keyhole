@@ -1,10 +1,9 @@
 ---
 source: src/ui.rs
-assertion_line: 2059
 expression: "render_lines(&mut app, 90, 24)"
 ---
 ┌ Destinations ─────────────────────────────┐┌ queue:orders · 2 msgs ────────────────────┐
-│  Destination                      Kind    ││  00:00:00.000  orders             order #1│
+│  Destination                      Kind    ││▶ 00:00:00.000  orders             order #1│
 │▶ orders                           [queue] ││  00:00:00.000  orders             {"id":2}│
 │  alerts                           [topic] ││                                           │
 │                                           ││                                           │

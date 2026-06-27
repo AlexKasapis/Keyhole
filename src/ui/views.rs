@@ -7,7 +7,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
+    Block, Cell, Clear, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
     RenderDirection, Row, Sparkline, Table, TableState, Wrap,
 };
 use ratatui::Frame;
@@ -368,7 +368,7 @@ fn key_table_pane(
                 .title_style(theme.heading)
                 .border_style(border_style(theme, focus == PaneFocus::Keys)),
         )
-        .row_highlight_style(theme.selected)
+        .row_highlight_style(selection_style(theme, focus == PaneFocus::Keys))
         .highlight_symbol("▶ ");
     // The rows are already sliced to the window, so the widget gets a
     // viewport-local state: the selection rebased onto the slice and a zero
@@ -460,7 +460,7 @@ fn amqp_destination_pane(
         .header(Row::new(["Destination", "Kind"]).style(theme.header))
         .column_spacing(2)
         .block(block)
-        .row_highlight_style(theme.selected)
+        .row_highlight_style(selection_style(theme, list_focused))
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(table, area, &mut conn.destinations.table);
 }
@@ -544,9 +544,13 @@ fn amqp_message_list(
             .enumerate()
             .map(|(row, &i)| {
                 let mut line = event_line(&conn.peek.events[i], theme);
-                if focused && row == selected {
-                    line.spans.insert(0, Span::styled("▶ ", theme.accent));
-                    line.style = theme.selected;
+                if row == selected {
+                    // A bright cursor while the list holds the keyboard, a dim
+                    // "parked" one when it doesn't — the shared list convention
+                    // (keys / destinations / recordings), via `selection_style`.
+                    let style = selection_style(theme, focused);
+                    line.spans.insert(0, Span::styled("▶ ", style));
+                    line.style = style;
                 } else {
                     line.spans.insert(0, Span::raw("  "));
                 }
@@ -566,13 +570,12 @@ fn amqp_message_list(
     }
     conn.peek.scroll = conn.peek.scroll.min(max_scroll(lines.len(), inner_h));
 
-    let border = if focused { theme.accent } else { theme.border };
     let para = Paragraph::new(lines)
         .block(
             Block::bordered()
                 .title(title)
                 .title_style(theme.heading)
-                .border_style(border),
+                .border_style(border_style(theme, focused)),
         )
         .scroll((conn.peek.scroll, 0));
     frame.render_widget(para, area);
@@ -1085,14 +1088,16 @@ fn recordings_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
     recording_viewer(frame, app, theme, viewer_area);
 }
 
-/// The left pane: one row per recording. The name column flexes to the pane
-/// width; the size and modified-time columns are fixed-width tails. Borderless.
-/// While the viewer (right) holds the keyboard the selection dims to read as a
-/// parked cursor — the focus cue for this borderless pane.
+/// The left pane: one row per recording, in a titled box whose border brightens
+/// while it holds the keyboard — the same boxed, focus-tinted frame as the
+/// Browser's key and destination lists. The name column flexes to the pane
+/// width; the size and modified-time columns are fixed-width tails. While the
+/// viewer (right) holds the keyboard the selection dims to read as a parked
+/// cursor (see [`selection_style`]).
 fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let list_focused = app.recordings_focus == RecordingsFocus::List;
-    // Inner width minus the highlight symbol (2); no border now.
-    let inner_w = area.width.saturating_sub(2) as usize;
+    // Inner width minus the box border (2) and the highlight symbol (2).
+    let inner_w = area.width.saturating_sub(4) as usize;
     const SIZE_COL: usize = 12; // right-aligned size + two trailing spaces
     const DATE_COL: usize = 16; // "YYYY-MM-DD HH:MM"
     let name_w = inner_w.saturating_sub(SIZE_COL + DATE_COL).max(8);
@@ -1111,28 +1116,38 @@ fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
             ]))
         })
         .collect();
-    // Bright selection while the list is focused; a dim, "parked" cursor when
-    // the viewer has the keyboard.
-    let highlight = if list_focused {
-        theme.selected
-    } else {
-        theme.dim
-    };
     let list = List::new(items)
-        .highlight_style(highlight)
+        .block(
+            Block::bordered()
+                .title(" Recordings ")
+                .title_style(theme.heading)
+                .border_style(border_style(theme, list_focused)),
+        )
+        .highlight_style(selection_style(theme, list_focused))
         .highlight_symbol("▶ ");
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
 }
 
-/// The right pane: a metadata header plus every record of the selected
-/// recording. A single left border rules it off from the list — it brightens
-/// (the focus cue) while the viewer holds the keyboard. Not a bounded preview —
-/// the whole file is loaded, so the record count is exact (it shows what fits
-/// the pane; selecting another recording re-targets the viewer).
+/// The right pane: every record of the selected recording, in a titled box (the
+/// name rides in the title) whose border brightens while the viewer holds the
+/// keyboard — matching the Browser's value pane. Not a bounded preview — the
+/// whole file is loaded, so the record count is exact (it shows what fits the
+/// pane; selecting another recording re-targets the viewer).
 fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let focused = app.recordings_focus == RecordingsFocus::Viewer;
-    let block = Block::default()
-        .borders(Borders::LEFT)
+    // The loaded recording's name rides in the title — the analog of the value
+    // pane's key title — so the body need not repeat it. A generic label stands
+    // in before a recording is selected.
+    let title = match &app.recording_view {
+        Some((name, _)) => format!(
+            " {} ",
+            truncate(name, area.width.saturating_sub(4) as usize)
+        ),
+        None => " Viewer ".to_string(),
+    };
+    let block = Block::bordered()
+        .title(title)
+        .title_style(theme.heading)
         .border_style(border_style(theme, focused))
         .padding(Padding::horizontal(1));
     let inner = block.inner(area);
@@ -1149,7 +1164,7 @@ fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
 
     let width = inner.width as usize;
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::styled(truncate(name, width), theme.heading));
+    // The name is in the box title; the body opens with the source meta.
     // Source type / connection, taken from the first record.
     let mut meta = String::new();
     if let Some(source_type) = &view.source_type {
@@ -1206,8 +1221,8 @@ fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
     }
 
     // Clamp the scroll offset against the content height (a viewport-derived
-    // render write, mirroring the Browser value pane); inner height is the
-    // full pane since the divider is a side border, not a top/bottom one.
+    // render write, mirroring the Browser value pane); `inner` already excludes
+    // the box border, so its height is the visible content height.
     let inner_h = inner.height as usize;
     app.recordings_scroll = app.recordings_scroll.min(max_scroll(lines.len(), inner_h));
     frame.render_widget(
@@ -2013,13 +2028,28 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 // -- helpers ----------------------------------------------------------------
 
 /// The border style for a pane: the highlighted `border_focused` when it owns
-/// the keyboard, the plain `border` otherwise. Keeps the focused-pane tint in
-/// one place across the key list and the bottom subpanel.
+/// the keyboard, the plain `border` otherwise. The one definition of the
+/// focused-pane tint across every Ctrl-arrow-navigated pane — the key list,
+/// destinations, the message list, the bottom subpanel and the recordings
+/// list/viewer — so the focus cue can never drift between them.
 fn border_style(theme: &Theme, focused: bool) -> Style {
     if focused {
         theme.border_focused
     } else {
         theme.border
+    }
+}
+
+/// The row-highlight style for a selectable list: the bright `selected` while
+/// the pane holds the keyboard, dimmed to a "parked" cursor when another pane
+/// does. The companion to [`border_style`] — shared by every Ctrl-arrow list
+/// (keys, destinations, messages, recordings) so the selection reads the same
+/// everywhere and the focused list is unambiguous.
+fn selection_style(theme: &Theme, focused: bool) -> Style {
+    if focused {
+        theme.selected
+    } else {
+        theme.dim
     }
 }
 
