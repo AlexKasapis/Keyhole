@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Gruvbox is now the default theme**, applied when no `[theme]` `base` is set
+  in the config. Existing profiles that pin `base = "dark"` or `"light"` are
+  unaffected. The settings page's theme cycle now leads with gruvbox.
+
 ## [0.1.2] - 2026-06-26
 
 ### Changed

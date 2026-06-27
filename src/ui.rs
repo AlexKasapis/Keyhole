@@ -581,6 +581,11 @@ mod tests {
         // trough) and brightest one second in (the peak). The hue is preserved —
         // only the brightness moves — so the pulse stays faithful to the palette.
         let (mut app, _rx) = app_with_connection().await;
+        // Pin the dark palette: this test is about the breath (a green dot's
+        // luminance over time), and `dot_green_at` asserts a *pure*-green dot,
+        // which only the dark palette's `success` (Color::Green) yields — the
+        // default gruvbox `success` is an olive RGB, not pure green.
+        app.theme = crate::theme::Theme::dark();
         app.screen = Screen::Browser;
         let trough = dot_green_at(&mut app, 0);
         let peak = dot_green_at(&mut app, 1);
@@ -618,6 +623,9 @@ mod tests {
             CancellationToken::new(),
             None,
         );
+        // Pin the dark palette (see `connected_server_dot_breathes_on_the_tick_clock`):
+        // the dot is `theme.success`, and `dot_green_at` asserts a pure-green dot.
+        app.theme = crate::theme::Theme::dark();
         let handle = mock::handle(1, "prod").await;
         app.connections.push(Connection::new(handle));
         // Home (Connections tab) is the default screen for this test app.
@@ -1021,8 +1029,8 @@ mod tests {
         let text = screen_text(&mut app);
         assert!(text.contains("Settings"), "the settings title renders");
         assert!(text.contains("Theme"), "the theme option renders");
-        // The default (unset) base reads as the first cycle entry, "dark".
-        assert!(text.contains("dark"), "current theme shown");
+        // The default (unset) base reads as the first cycle entry, "gruvbox".
+        assert!(text.contains("gruvbox"), "current theme shown");
         // The animation option renders alongside it, at its default (on).
         assert!(text.contains("Animations"), "the animation option renders");
         assert!(text.contains("‹ on ›"), "current animation setting shown");

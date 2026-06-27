@@ -245,29 +245,26 @@ mod tests {
     #[test]
     fn settings_cycles_theme_live_and_persists() {
         let (mut app, path) = app_with_config_path();
-        // Default base is unset (dark). Right steps dark -> light -> gruvbox -> dark.
+        // Default base is unset (gruvbox). Right steps gruvbox -> dark -> light -> gruvbox.
         app.settings = Some(SettingsState::default());
         app.handle_key(key(KeyCode::Right));
-        assert_eq!(app.theme_base(), Some("light"));
-        assert_eq!(
-            app.theme.accent.fg,
-            Theme::light().accent.fg,
-            "applied live"
-        );
+        assert_eq!(app.theme_base(), Some("dark"));
+        assert_eq!(app.theme.accent.fg, Theme::dark().accent.fg, "applied live");
 
         app.handle_key(key(KeyCode::Right));
-        assert_eq!(app.theme_base(), Some("gruvbox"));
-        assert_eq!(app.theme.accent.fg, Theme::gruvbox().accent.fg);
+        assert_eq!(app.theme_base(), Some("light"));
+        assert_eq!(app.theme.accent.fg, Theme::light().accent.fg);
 
         // The choice is persisted to the config file as it changes.
         let saved = crate::config::load(&path).expect("config reloads");
-        assert_eq!(saved.theme.base.as_deref(), Some("gruvbox"));
+        assert_eq!(saved.theme.base.as_deref(), Some("light"));
 
-        // Wrapping forward returns to dark; Left wraps the other way.
+        // Wrapping forward returns to the default gruvbox; Left wraps the other way.
         app.handle_key(key(KeyCode::Right));
-        assert_eq!(app.theme_base(), Some("dark"));
+        assert_eq!(app.theme_base(), Some("gruvbox"));
+        assert_eq!(app.theme.accent.fg, Theme::gruvbox().accent.fg);
         app.handle_key(key(KeyCode::Left));
-        assert_eq!(app.theme_base(), Some("gruvbox"), "Left wraps backwards");
+        assert_eq!(app.theme_base(), Some("light"), "Left wraps backwards");
 
         // Esc closes the settings overlay.
         app.handle_key(key(KeyCode::Esc));
@@ -285,7 +282,7 @@ mod tests {
 
         // Right on the Theme row cycles the theme; the animation is untouched.
         app.handle_key(key(KeyCode::Right));
-        assert_eq!(app.theme_base(), Some("light"));
+        assert_eq!(app.theme_base(), Some("dark"));
         assert_eq!(
             app.animation_speed(),
             crate::config::AnimationSpeed::On,
@@ -300,7 +297,7 @@ mod tests {
         assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::Off);
         assert_eq!(
             app.theme_base(),
-            Some("light"),
+            Some("dark"),
             "the theme is left as it was"
         );
 
@@ -365,7 +362,7 @@ mod tests {
         app.palette = Some(PaletteState::default());
         app.settings = Some(SettingsState::default());
         app.handle_key(key(KeyCode::Right));
-        assert_eq!(app.theme_base(), Some("light"));
+        assert_eq!(app.theme_base(), Some("dark"));
     }
 
     #[test]

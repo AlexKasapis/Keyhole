@@ -1,7 +1,8 @@
 //! Named styles for the UI: one source of colour so widgets never hardcode
 //! styling. A [`Theme`] is built once at startup from the `[theme]` config
-//! section (a `dark`/`light` base plus optional per-style colour overrides) and
-//! honours `NO_COLOR` by falling back to a colourless, modifier-only palette.
+//! section (a base palette — `gruvbox` (the default), `dark`, or `light` — plus
+//! optional per-style colour overrides) and honours `NO_COLOR` by falling back
+//! to a colourless, modifier-only palette.
 
 use std::str::FromStr;
 
@@ -42,12 +43,13 @@ pub struct Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::dark()
+        Self::gruvbox()
     }
 }
 
 impl Theme {
-    /// The default dark palette (cyan accents on a dark status bar).
+    /// The original dark palette (cyan accents on a dark status bar). Selectable
+    /// as `base = "dark"`; the default is [`Self::gruvbox`].
     pub fn dark() -> Self {
         Self {
             status_bar: Style::new().bg(Color::Indexed(236)).fg(Color::Gray),
@@ -117,8 +119,9 @@ impl Theme {
 
     /// A warm "Gruvbox"-flavoured dark palette: orange accents and a yellow
     /// heading over a soft brown-black base, with the retro green/red signal
-    /// colours. A second coloured dark theme beside [`Self::dark`], selectable
-    /// from the settings page.
+    /// colours. The default palette — applied when no `base` is configured — and
+    /// a coloured dark theme beside [`Self::dark`], selectable from the settings
+    /// page.
     pub fn gruvbox() -> Self {
         // Gruvbox tones, by their canonical hex (see https://github.com/morhetz/gruvbox).
         let bg_status = Color::Rgb(0x3c, 0x38, 0x36); // bg1
@@ -192,9 +195,11 @@ impl Theme {
             return Self::plain();
         }
         let mut theme = match cfg.base.as_deref() {
+            Some(b) if b.eq_ignore_ascii_case("dark") => Self::dark(),
             Some(b) if b.eq_ignore_ascii_case("light") => Self::light(),
             Some(b) if b.eq_ignore_ascii_case("gruvbox") => Self::gruvbox(),
-            _ => Self::dark(),
+            // Absent or unrecognised base falls back to the default, gruvbox.
+            _ => Self::gruvbox(),
         };
         override_fg(&mut theme.accent, &cfg.accent);
         override_fg(&mut theme.heading, &cfg.heading);
@@ -216,10 +221,10 @@ impl Theme {
 /// The built-in theme bases the settings page cycles through, in order. Each
 /// name is matched (case-insensitively) by [`Theme::from_config`]; the first is
 /// the default applied for an absent or unrecognised `base`.
-pub const THEME_BASES: [&str; 3] = ["dark", "light", "gruvbox"];
+pub const THEME_BASES: [&str; 3] = ["gruvbox", "dark", "light"];
 
 /// The index of `base` within [`THEME_BASES`], defaulting to `0` (the first,
-/// `dark`) for an absent or unrecognised name — mirroring the fallback in
+/// `gruvbox`) for an absent or unrecognised name — mirroring the fallback in
 /// [`Theme::from_config`]. Lets the settings page show and step the selection.
 pub fn theme_base_index(base: Option<&str>) -> usize {
     base.and_then(|b| {
@@ -250,8 +255,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn base_selects_light_or_dark() {
-        let dark = Theme::from_config(&ThemeConfig::default(), false);
+    fn base_selects_palette_and_defaults_to_gruvbox() {
+        // An absent base resolves to the default palette — gruvbox (orange accent).
+        let default = Theme::from_config(&ThemeConfig::default(), false);
+        assert_eq!(default.accent.fg, Some(Color::Rgb(0xfe, 0x80, 0x19)));
+        // An explicit `dark` still selects the dark palette (cyan): it has its own
+        // match arm and must not fall through to the gruvbox default.
+        let dark = Theme::from_config(
+            &ThemeConfig {
+                base: Some("dark".into()),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(dark.accent.fg, Some(Color::Cyan));
         let light = Theme::from_config(
             &ThemeConfig {
@@ -367,6 +383,9 @@ mod tests {
     #[test]
     fn invalid_colour_is_ignored_keeping_base() {
         let cfg = ThemeConfig {
+            // Pin a non-default base so the kept colour is the dark palette's cyan,
+            // independent of whichever palette is the default.
+            base: Some("dark".into()),
             accent: Some("not-a-colour".into()),
             ..Default::default()
         };
@@ -411,15 +430,15 @@ mod tests {
     }
 
     #[test]
-    fn theme_base_index_finds_the_cycle_position_or_defaults_to_dark() {
+    fn theme_base_index_finds_the_cycle_position_or_defaults_to_gruvbox() {
         // Each known base resolves to its slot in the cycle order …
-        assert_eq!(THEME_BASES, ["dark", "light", "gruvbox"]);
-        assert_eq!(theme_base_index(Some("dark")), 0);
-        assert_eq!(theme_base_index(Some("light")), 1);
-        assert_eq!(theme_base_index(Some("gruvbox")), 2);
+        assert_eq!(THEME_BASES, ["gruvbox", "dark", "light"]);
+        assert_eq!(theme_base_index(Some("gruvbox")), 0);
+        assert_eq!(theme_base_index(Some("dark")), 1);
+        assert_eq!(theme_base_index(Some("light")), 2);
         // … case-insensitively …
-        assert_eq!(theme_base_index(Some("GruvBox")), 2);
-        // … while an absent or unknown base falls back to dark (index 0),
+        assert_eq!(theme_base_index(Some("GruvBox")), 0);
+        // … while an absent or unknown base falls back to gruvbox (index 0),
         // matching `from_config`'s own fallback.
         assert_eq!(theme_base_index(None), 0);
         assert_eq!(theme_base_index(Some("solarized")), 0);

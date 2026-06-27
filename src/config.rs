@@ -38,7 +38,7 @@ pub struct Config {
 /// ignored. `NO_COLOR` (env) overrides everything with a colourless palette.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThemeConfig {
-    /// Base palette: `dark` (default) or `light`.
+    /// Base palette: `gruvbox` (default), `dark`, or `light`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
