@@ -5,16 +5,16 @@ expression: "render_lines(&mut app, 90, 20)"
 ┌ Server  ● connected ───────────────────────────────────────────────────────────────────┐
 │ prod · 127.0.0.1:6379 · db0                                                            │
 └────────────────────────────────────────────────────────────────────────────────────────┘
-┌ Keys ─────────────────────────────────────┐┌ user:1 ───────────────────────────────────┐
-│  Key             Type    TTL       Size   ││string · Utf8 · showing 5 of 5 bytes       │
-│  ▾ session (1)                            ││                                           │
-│    abc           hash    2m 0s     128 B  ││alice                                      │
-│  ▾ user (1)                               ││                                           │
-│▶   1             string  2m 0s     128 B  ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-│                                           ││                                           │
-└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Keys ──────────────────────────────────────┬ user:1 ───────────────────────────────────┐
+│  Key              Type    TTL       Size   │ string · Utf8 · showing 5 of 5 bytes      │
+│  ▾ session (1)                             │                                           │
+│    abc            hash    2m 0s     128 B  │ alice                                     │
+│  ▾ user (1)                                │                                           │
+│▶   1              string  2m 0s     128 B  │                                           │
+│                                            │                                           │
+│                                            │                                           │
+│                                            │                                           │
+└────────────────────────────────────────────┴───────────────────────────────────────────┘
 ┌ Details │ Console │ Monitor │ Keyspace │ Pub/Sub │ Tail ───────────────────────────────┐
 │                                                                                        │
 │Just type a command and press Enter to run. Writes and admin commands are refused.      │

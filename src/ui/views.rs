@@ -261,13 +261,14 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         server_stats_band(frame, conn, health, now, anim_speed, theme, band_area);
     }
 
-    let [table_area, value_area] =
-        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .areas(body_area);
-
     // AMQP browses a curated destination list (no key scan), so its body is a
-    // destination list + queue-peek pane rather than the key table + value pane.
+    // destination list + queue-peek pane — two separate bordered panes the
+    // keyboard moves between — rather than the Redis key table + its attached
+    // value inspector.
     if !conn.caps.uses_key_scan() {
+        let [table_area, value_area] =
+            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .areas(body_area);
         amqp_destination_pane(frame, conn, focus, theme, table_area);
         amqp_peek_pane(frame, conn, theme, value_area);
         if let Some(panel_area) = panel_area {
@@ -276,32 +277,125 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         return;
     }
 
-    key_table_pane(frame, conn, focus, theme, table_area);
-
-    value_pane(frame, conn, theme, value_area);
+    // Redis: the key table and its value inspector share one bordered region —
+    // the value is a section of the Keys pane, not a separately focusable pane.
+    keys_value_pane(frame, conn, focus, theme, body_area);
 
     if let Some(panel_area) = panel_area {
         panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
     }
 }
 
-/// The Redis key table (left body pane): a self-windowed viewport over the
+/// The Redis body: the key table and its value inspector, drawn as ONE bordered
+/// region split by a single vertical divider. The value pane has no border of its
+/// own — it reads as the right-hand section of the Keys pane, not a peer pane the
+/// keyboard can move into (there is no Ctrl-→ into it; the inspector simply
+/// follows the key selection). The shared border and divider take the keys-pane
+/// focus tint, so the whole unit brightens together when it holds the keyboard
+/// and dims when the bottom panel does.
+fn keys_value_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    focus: PaneFocus,
+    theme: &Theme,
+    area: Rect,
+) {
+    let bs = border_style(theme, focus == PaneFocus::Keys);
+
+    // The outer border carries the " Keys " title; draw it, then work inside.
+    let outer = Block::bordered()
+        .title(" Keys ")
+        .title_style(theme.heading)
+        .border_style(bs);
+    let inner = outer.inner(area);
+    frame.render_widget(outer, area);
+
+    // Split the inner area: the key table, a one-column divider, the value.
+    let [table_inner, div_area, value_inner] = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(inner);
+
+    key_table_body(frame, conn, focus, theme, table_inner);
+    value_body(frame, conn, theme, value_inner);
+
+    // The divider only renders once it actually got its column and the box has
+    // top/bottom borders to anchor the ┬/┴ junctions; on a degenerate (tiny) area
+    // the two halves simply abut without it.
+    if div_area.width == 1 && area.height >= 2 {
+        draw_value_divider(frame, conn, theme, area, div_area.x, bs);
+    }
+}
+
+/// Draw the vertical divider between the key table and the value section: a line
+/// down the inner rows, ┬/┴ junctions where it meets the outer border, and the
+/// value section's title (the selected key, or "Value") hung on the top border to
+/// the right of the junction — the cue that the value is this pane's right column.
+fn draw_value_divider(
+    frame: &mut Frame,
+    conn: &Connection,
+    theme: &Theme,
+    area: Rect,
+    x: u16,
+    bs: Style,
+) {
+    let top = area.y;
+    let bottom = area.y + area.height - 1;
+    let buf = frame.buffer_mut();
+    // The line spans the inner rows between the two border rows.
+    for y in (top + 1)..bottom {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol("│").set_style(bs);
+        }
+    }
+    // Junctions with the outer border.
+    if let Some(cell) = buf.cell_mut((x, top)) {
+        cell.set_symbol("┬").set_style(bs);
+    }
+    if let Some(cell) = buf.cell_mut((x, bottom)) {
+        cell.set_symbol("┴").set_style(bs);
+    }
+    // The value section's title rides the top border, right of the junction. It
+    // aligns with the value content below (both one column past the divider).
+    let on_key = conn.selected().is_some();
+    let title = match (on_key, &conn.inspector.value_key) {
+        (true, Some(k)) => format!(" {k} "),
+        _ => " Value ".to_string(),
+    };
+    let title_x = x + 1;
+    // `set_stringn` clamps to the buffer's right edge, so the trailing ┐ corner is
+    // never overwritten; cap the width at the inner span for good measure.
+    let avail = area
+        .x
+        .saturating_add(area.width)
+        .saturating_sub(title_x + 1) as usize;
+    buf.set_stringn(title_x, top, &title, avail, theme.heading);
+}
+
+/// The Redis key table (left body section): a self-windowed viewport over the
 /// sorted/grouped view. Only the rows inside the visible window are turned into
 /// `Row`s each frame — building the whole list on a large keyspace (a `format!`ed
 /// cell per column) is what makes the browser crawl, even though the widget only
 /// ever paints the visible rows — so the scroll window is computed here and the
 /// widget handed just that slice. The followed scroll offset is written back onto
 /// `conn.browser.table` (one of the render path's height-dependent writes).
-fn key_table_pane(
+///
+/// Block-less by design: it renders into the inner area of the shared Keys/Value
+/// box (see [`keys_value_pane`]), which already draws the border and " Keys "
+/// title, so only the one header row is excluded from the viewport here.
+fn key_table_body(
     frame: &mut Frame,
     conn: &mut Connection,
     focus: PaneFocus,
     theme: &Theme,
     table_area: Rect,
 ) {
-    // The viewport excludes the two border rows and the one header row.
+    // No border rows here (the shared box owns them); only the header row is
+    // excluded from the viewport.
     let total = conn.browser.view.len();
-    let viewport = table_area.height.saturating_sub(3) as usize;
+    let viewport = table_area.height.saturating_sub(1) as usize;
     let selected = conn.browser.table.selected();
     let offset = visible_offset(conn.browser.table.offset(), selected, viewport, total);
     *conn.browser.table.offset_mut() = offset;
@@ -362,12 +456,6 @@ fn key_table_pane(
     let table = Table::new(rows, widths)
         .header(Row::new(["Key", "Type", "TTL", "Size"]).style(theme.header))
         .column_spacing(2)
-        .block(
-            Block::bordered()
-                .title(" Keys ")
-                .title_style(theme.heading)
-                .border_style(border_style(theme, focus == PaneFocus::Keys)),
-        )
         .row_highlight_style(selection_style(theme, focus == PaneFocus::Keys))
         .highlight_symbol("▶ ");
     // The rows are already sliced to the window, so the widget gets a
@@ -378,18 +466,19 @@ fn key_table_pane(
     frame.render_stateful_widget(table, table_area, &mut win);
 }
 
-/// The value inspector (right body pane): renders the selected key's value, or a
-/// neutral prompt when the cursor sits on a group header rather than a key.
+/// The value inspector (right body section): renders the selected key's value, or
+/// a neutral prompt when the cursor sits on a group header rather than a key.
 /// Clamps the scroll offset to the rendered height — another height-dependent
 /// render write (see [`max_scroll`]).
-fn value_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, value_area: Rect) {
+///
+/// Block-less by design: it is the right column of the shared Keys/Value box (see
+/// [`keys_value_pane`]). The box draws the border and the divider, and the value's
+/// title (the selected key) rides that divider's top border — so here the content
+/// only carries a one-column left pad to sit clear of the divider line.
+fn value_body(frame: &mut Frame, conn: &mut Connection, theme: &Theme, value_area: Rect) {
     // When the cursor sits on a group header (not a key), show a neutral prompt
     // rather than "loading…" or the last-inspected key's stale value.
     let on_key = conn.selected().is_some();
-    let title = match (on_key, &conn.inspector.value_key) {
-        (true, Some(k)) => format!(" {k} "),
-        _ => " Value ".to_string(),
-    };
     let value_lines = if on_key {
         render_value(theme, conn.inspector.value.as_ref())
     } else {
@@ -399,17 +488,12 @@ fn value_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, value_are
         )]
     };
     // The bound uses logical line count (wrapping may split lines further, as the
-    // console's scroll does too); inner height excludes the two border rows.
-    let inner_h = value_area.height.saturating_sub(2) as usize;
+    // console's scroll does too); the only inset is the one-column left pad.
+    let inner_h = value_area.height as usize;
     conn.inspector
         .clamp_scroll(max_scroll(value_lines.len(), inner_h));
     let value = Paragraph::new(value_lines)
-        .block(
-            Block::bordered()
-                .title(title)
-                .title_style(theme.heading)
-                .border_style(theme.border),
-        )
+        .block(Block::default().padding(Padding::left(1)))
         .wrap(Wrap { trim: false })
         .scroll((conn.inspector.value_scroll, 0));
     frame.render_widget(value, value_area);

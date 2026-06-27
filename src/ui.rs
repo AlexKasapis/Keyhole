@@ -2317,6 +2317,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keys_value_pane_is_one_box_with_a_shared_focus_tint() {
+        // The value inspector is the right-hand section of the Keys box, not a
+        // separate (Ctrl-→-navigable) pane: a single bordered region split by one
+        // divider, whose border AND divider take the keys-pane focus tint together
+        // — so the whole unit brightens/dims as one part.
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        app.theme.border_focused = Style::new().fg(Color::Magenta);
+        app.theme.border = Style::new().fg(Color::DarkGray);
+        app.connections[0].browser.keys = vec![entry("user:1", ValueType::String)];
+        app.connections[0].rebuild_view();
+        app.connections[0].browser.phase = ScanPhase::Complete;
+        // Rows: [user hdr, user:1] — select the key so the value section's title is
+        // the key name, riding the divider's top border.
+        app.connections[0].browser.table.select(Some(1));
+        app.connections[0].inspector.value_key = Some("user:1".into());
+        app.connections[0].inspector.value = Some(ValueView::Str {
+            total_bytes: 5,
+            shown_bytes: 5,
+            text: "alice".into(),
+            encoding: PayloadEncoding::Utf8,
+        });
+
+        // The Keys box top-border row: its `┌` corner and the `┬` divider junction.
+        let border_tint = |app: &mut App| -> (Option<Color>, Option<Color>) {
+            let mut terminal = Terminal::new(TestBackend::new(90, 20)).unwrap();
+            let frame = terminal.draw(|f| render(f, app)).expect("render");
+            let buf = frame.buffer;
+            let w = buf.area.width as usize;
+            let syms: Vec<String> = buf
+                .content()
+                .iter()
+                .map(|c| c.symbol().to_string())
+                .collect();
+            let keys_row = (0..buf.area.height as usize)
+                .find(|&r| syms[r * w..r * w + 7].concat() == "┌ Keys ")
+                .expect("the Keys box is drawn");
+            let row = &buf.content()[keys_row * w..(keys_row + 1) * w];
+            let fg = |glyph: &str| {
+                row.iter()
+                    .find(|c| c.symbol() == glyph)
+                    .and_then(|c| c.style().fg)
+            };
+            (fg("┌"), fg("┬"))
+        };
+
+        // Structure: exactly one box (no `┐┌` double border between two panes),
+        // and the value section's title rides the divider's top border.
+        let text = render_lines(&mut app, 90, 20);
+        assert!(
+            !text.lines().any(|l| l.contains("┐┌")),
+            "the value is not a separate box: {text}"
+        );
+        assert!(
+            text.lines().any(|l| l.contains("┬ user:1")),
+            "the value's title rides the shared divider: {text}"
+        );
+
+        // Keys focused: the corner and the divider both light up (border_focused).
+        app.connections[0].focus = PaneFocus::Keys;
+        assert_eq!(
+            border_tint(&mut app),
+            (Some(Color::Magenta), Some(Color::Magenta)),
+            "border and divider brighten together when the keys pane is focused"
+        );
+
+        // Bottom panel focused: both dim back to `border`, still in lockstep.
+        app.connections[0].focus = PaneFocus::Bottom;
+        assert_eq!(
+            border_tint(&mut app),
+            (Some(Color::DarkGray), Some(Color::DarkGray)),
+            "border and divider dim together when the bottom panel is focused"
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_browser_with_stats() {
         // The Browser with its merged server-stats band atop the keys + value
         // panes (the former Dashboard content, now part of the main panel).
