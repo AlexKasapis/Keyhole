@@ -305,7 +305,8 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     format!("filter {pattern}")
                 };
                 vec![
-                    ("↑↓→", "nav".to_string()),
+                    ("↑↓", "move".to_string()),
+                    ("Enter", "fold".to_string()),
                     ("z", "all".to_string()),
                     ("/", filter),
                     ("oO", "sort".to_string()),
@@ -734,7 +735,7 @@ mod tests {
                 " ↑↓ move · Enter connect · a add",
                 "Esc Esc quit",
             ),
-            (Screen::Browser, " ↑↓→ nav · z all", "Esc back"),
+            (Screen::Browser, " ↑↓ move · Enter fold · z all", "Esc back"),
             (Screen::Recordings, " ↑↓ move · r rename", "Esc back"),
         ];
         for (screen, head, tail) in cases {
@@ -751,8 +752,8 @@ mod tests {
                 "{screen:?} footer should still list {tail:?}: {footer:?}"
             );
             // The old grouping labels are gone (each is a word followed by a
-            // space). "nav" is excluded: it is now a real action word, paired
-            // with the ↑↓→ key in the Browser footer, not a group header.
+            // space). The Browser footer now pairs ↑↓ with "move" and Enter with
+            // "fold" — flat action words, not group headers.
             for label in ["conn ", "view ", "groups ", "go ", "app "] {
                 assert!(
                     !footer.contains(label),
@@ -880,12 +881,12 @@ mod tests {
     async fn browser_footer_advertises_nav_and_has_no_grouping_toggle() {
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        // Keys are always grouped; the footer carries the combined ↑↓→ nav hint
-        // (Right folds the cursor's group) and never a grouping toggle.
+        // Keys are always grouped; the footer pairs ↑↓ with move and Enter with
+        // fold (Enter folds the cursor's group) and never a grouping toggle.
         let text = render_lines(&mut app, 160, 8);
         assert!(
-            text.contains("↑↓→ nav"),
-            "browser footer advertises the combined nav hint"
+            text.contains("↑↓ move") && text.contains("Enter fold"),
+            "browser footer advertises move + the Enter fold hint"
         );
         assert!(!text.contains("p group"), "no `p group` toggle");
         assert!(!text.contains("ungroup"), "no `p ungroup` toggle");

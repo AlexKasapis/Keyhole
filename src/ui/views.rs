@@ -1921,7 +1921,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("Browser — focus follows the pane", theme.heading),
         Line::from("  Ctrl-↑ keys · Ctrl-↓ bottom (lands on Console)"),
         Line::from("  Tab cycles the bottom tabs · focused pane is highlighted"),
-        Line::from("  keys: / filter · o/O sort · z fold all · →/l fold group"),
+        Line::from("  keys: / filter · o/O sort · z fold all · Enter/l fold group"),
         Line::from(""),
         Line::styled("Bottom subpanel (Redis)", theme.heading),
         Line::from("  Details · Console · Monitor · Keyspace · Pub/Sub · Tail"),

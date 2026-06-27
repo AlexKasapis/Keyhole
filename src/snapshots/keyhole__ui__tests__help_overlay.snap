@@ -1,6 +1,5 @@
 ---
 source: src/ui.rs
-assertion_line: 1993
 expression: "render_lines(&mut app, 90, 40)"
 ---
 ┌ Connections │ Recordings ──────────────────────────────────────────────────────────────┐
@@ -22,7 +21,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │Browser — focus follows the pane                                │           │
 │           │  Ctrl-↑ keys · Ctrl-↓ bottom (lands on Console)                │           │
 │           │  Tab cycles the bottom tabs · focused pane is highlighted      │           │
-│           │  keys: / filter · o/O sort · z fold all · →/l fold group       │           │
+│           │  keys: / filter · o/O sort · z fold all · Enter/l fold group   │           │
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
 │           │  Details · Console · Monitor · Keyspace · Pub/Sub · Tail       │           │

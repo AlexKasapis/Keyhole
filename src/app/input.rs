@@ -594,12 +594,17 @@ impl App {
             Action::Down => self.nav(1),
             Action::Top => self.nav_edge(true),
             Action::Bottom => self.nav_edge(false),
-            Action::Enter => {
-                if self.screen == Screen::Home {
-                    self.connect_selected_profile();
+            // Enter is the context action: it connects on the Connections screen
+            // and folds/unfolds the cursor's group in the Browser (replacing the
+            // former Right binding — `l` still folds via `Action::ToggleGroup`).
+            Action::Enter => match self.screen {
+                Screen::Home => self.connect_selected_profile(),
+                Screen::Browser => {
+                    self.toggle_selected_group();
                 }
-            }
-            // Right (or `l`): on a group header, fold/unfold it; on a key, no-op.
+                Screen::Recordings => {}
+            },
+            // `l`: on a group header (or a key within it), fold/unfold the group.
             Action::ToggleGroup => {
                 if self.screen == Screen::Browser {
                     self.toggle_selected_group();

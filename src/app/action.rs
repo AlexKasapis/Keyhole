@@ -27,7 +27,8 @@ pub enum Action {
     Down,
     Top,
     Bottom,
-    /// Context action: connect (connections screen) / no-op elsewhere.
+    /// Context action: connect the selected profile (Connections) / fold-unfold
+    /// the cursor's group (Browser). A no-op on the Recordings tab.
     Enter,
     /// Open the add-connection form.
     AddConnection,
@@ -58,7 +59,8 @@ pub enum Action {
     ToggleSortDir,
     /// Collapse or expand every group at once (Browser).
     ToggleAllGroups,
-    /// Collapse or expand the group at the cursor (Browser). Bound to Right.
+    /// Collapse or expand the group at the cursor (Browser). Bound to `l`; Enter
+    /// folds too (via [`Action::Enter`] on the Browser screen — see `App::apply`).
     ToggleGroup,
     /// Toggle recording on the focused live-feed subpanel (Browser); rename the
     /// selected recording on the Recordings tab. No longer refreshes the key list.
@@ -83,7 +85,7 @@ pub fn map_key(key: &KeyEvent) -> Option<Action> {
         (false, Home) => Some(Action::Top),
         (false, End) => Some(Action::Bottom),
         (false, Enter) => Some(Action::Enter),
-        (false, Right | Char('l')) => Some(Action::ToggleGroup),
+        (false, Char('l')) => Some(Action::ToggleGroup),
         (false, Char('a')) => Some(Action::AddConnection),
         (false, Char('e')) => Some(Action::EditConnection),
         (false, Char('d')) => Some(Action::DeleteRecording),
@@ -134,16 +136,22 @@ mod tests {
         assert_eq!(keys_focus(Char('p')), None, "p is a feed control");
         assert_eq!(keys_focus(Char('x')), None, "x is a feed control");
         assert_eq!(keys_focus(Char('r')), None, "r records a feed");
-        // Space is unbound (group folding is Right/`l`), so it never reaches
+        // Space is unbound (group folding is Enter/`l`), so it never reaches
         // the console either. The other list bindings stay.
         assert_eq!(keys_focus(Char(' ')), None, "Space is unbound");
         assert_eq!(keys_focus(Char('z')), Some(Action::ToggleAllGroups));
         assert_eq!(keys_focus(Char('/')), Some(Action::StartFilter));
         assert_eq!(keys_focus(Down), Some(Action::Down));
         assert_eq!(keys_focus(Char('j')), None, "vim movement is gone");
-        // Right / `l` fold the cursor's group and stay live in the keys pane.
-        assert_eq!(keys_focus(Right), Some(Action::ToggleGroup));
+        // `l` folds the cursor's group; Right no longer does (Enter folds now,
+        // dispatched per-screen in `App::apply` — see the browser tests).
         assert_eq!(keys_focus(Char('l')), Some(Action::ToggleGroup));
+        assert_eq!(keys_focus(Right), None, "Right no longer folds");
+        assert_eq!(
+            keys_focus(Enter),
+            Some(Action::Enter),
+            "Enter folds (in Browser)"
+        );
     }
 
     #[test]
@@ -155,7 +163,11 @@ mod tests {
         assert_eq!(plain(Home), Some(Action::Top));
         assert_eq!(plain(End), Some(Action::Bottom));
         assert_eq!(plain(Enter), Some(Action::Enter));
-        assert_eq!(plain(Right), Some(Action::ToggleGroup));
+        assert_eq!(
+            plain(Right),
+            None,
+            "Right is unbound: Enter folds the group now"
+        );
         assert_eq!(plain(Char('l')), Some(Action::ToggleGroup));
         assert_eq!(plain(Char('a')), Some(Action::AddConnection));
         assert_eq!(plain(Char('e')), Some(Action::EditConnection));
@@ -215,8 +227,8 @@ mod tests {
         // `[` / `]` once stepped the Redis database; that switcher is gone.
         assert_eq!(plain(Char('[')), None, "'[' is unbound: no DB switcher");
         assert_eq!(plain(Char(']')), None, "']' is unbound: no DB switcher");
-        // Space once folded the selected group; folding is now Right / `l`.
-        assert_eq!(plain(Char(' ')), None, "Space is unbound: fold with Right");
+        // Space once folded the selected group; folding is now Enter / `l`.
+        assert_eq!(plain(Char(' ')), None, "Space is unbound: fold with Enter");
         // The vim-style movement keys are gone: arrows / Home / End are the only
         // navigation now (the Page keys no longer page — nothing scrolls).
         for c in ['j', 'k', 'g', 'G'] {

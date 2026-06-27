@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │❯                                                                                       │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- ↑↓→ nav · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help · Esc back
+ ↑↓ move · Enter fold · z all · / filter · oO sort · Tab/Ctrl-↓ panel · : palette · ? help

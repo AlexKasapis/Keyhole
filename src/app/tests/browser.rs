@@ -517,7 +517,7 @@ async fn browser_view_is_always_grouped_with_headers() {
 }
 
 #[tokio::test]
-async fn browser_right_collapses_and_expands_selected_group() {
+async fn browser_enter_collapses_and_expands_selected_group() {
     let (mut app, _rx) = browser_with_keys(vec![
         stream_entry("user:1", ValueType::String),
         stream_entry("user:2", ValueType::String),
@@ -530,11 +530,13 @@ async fn browser_right_collapses_and_expands_selected_group() {
         Some("user")
     );
 
-    app.apply(Action::ToggleGroup); // collapse
+    // Enter folds the cursor's group (the binding that replaced Right) …
+    app.handle_key(key(KeyCode::Enter)); // collapse
     assert!(app.connections[0].browser.collapsed.contains("user"));
     assert!(view_keys(&app.connections[0]).is_empty(), "keys hidden");
 
-    app.apply(Action::ToggleGroup); // expand
+    // … and `l` still folds too, as an alias.
+    app.handle_key(ch('l')); // expand
     assert!(!app.connections[0].browser.collapsed.contains("user"));
     assert_eq!(view_keys(&app.connections[0]), ["user:1", "user:2"]);
 }
@@ -555,7 +557,7 @@ async fn browser_collapse_works_from_a_key_inside_the_group() {
     app.connections[0].browser.table.select(Some(4));
     assert_eq!(app.connections[0].selected().unwrap().key, "user:2");
 
-    app.apply(Action::ToggleGroup); // Right, from inside the group
+    app.apply(Action::ToggleGroup); // fold, from inside the group
     assert!(
         app.connections[0].browser.collapsed.contains("user"),
         "the cursor's group folds even from a key row"

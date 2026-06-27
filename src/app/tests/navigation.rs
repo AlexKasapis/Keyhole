@@ -178,10 +178,10 @@ fn key_release_events_are_ignored() {
 }
 
 #[tokio::test]
-async fn browser_opens_with_keys_focused_so_right_folds_groups() {
+async fn browser_opens_with_keys_focused_so_enter_folds_groups() {
     // Regression: the Browser used to open in command mode (Console is tab 0),
     // so a fold keystroke went to the console instead of the group. It now opens
-    // with the keys pane focused, where Right folds the selected group.
+    // with the keys pane focused, where Enter folds the selected group.
     let (mut app, _rx) = test_app();
     let id = connect(&mut app, 1, "prod").await;
     finish_initial_scan(
@@ -196,19 +196,28 @@ async fn browser_opens_with_keys_focused_so_right_folds_groups() {
     assert!(!app.bottom_focused(), "opens with the keys pane focused");
     assert_eq!(app.mode, InputMode::Normal);
 
-    // The group starts folded; Right on the keys pane expands it, and runs
+    // The group starts folded; Enter on the keys pane expands it, and runs
     // nothing in the console.
     app.connections[0].browser.table.select(Some(0));
     let folded = app.connections[0].browser.collapsed.len();
     assert!(folded > 0, "groups start folded");
-    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Enter));
     assert!(
         app.connections[0].browser.collapsed.len() < folded,
-        "Right folds/unfolds the selected group"
+        "Enter folds/unfolds the selected group"
     );
     assert!(
         app.connections[0].console.input.is_empty(),
-        "Right did not leak into the console"
+        "Enter did not leak into the console"
+    );
+
+    // Right no longer folds — it is unbound in the keys pane now.
+    let after_enter = app.connections[0].browser.collapsed.len();
+    app.handle_key(key(KeyCode::Right));
+    assert_eq!(
+        app.connections[0].browser.collapsed.len(),
+        after_enter,
+        "Right is inert: Enter is the fold key"
     );
 }
 
