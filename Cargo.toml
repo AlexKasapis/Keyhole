@@ -168,7 +168,7 @@ lapin = "4"
 # small, blocking, rustls-based client (no OpenSSL) driven off the async runtime
 # via `spawn_blocking`. Pinned to 2.x for a stable API; reusable for the planned
 # RabbitMQ HTTP management phase.
-ureq = "2"
+ureq = "3"
 
 [dev-dependencies]
 # Snapshot testing of rendered TUI frames (see src/ui — snapshot module).
