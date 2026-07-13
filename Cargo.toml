@@ -166,9 +166,8 @@ lapin = "4"
 # enumerate destinations, so when an `amqp` profile names its broker's web
 # console (default :8161) we enrich the browser over Jolokia's HTTP API — a
 # small, blocking, rustls-based client (no OpenSSL) driven off the async runtime
-# via `spawn_blocking`. Pinned to 2.x for a stable API; reusable for the planned
-# RabbitMQ HTTP management phase.
-ureq = "2"
+# via `spawn_blocking`. Reusable for the planned RabbitMQ HTTP management phase.
+ureq = "3"
 
 [dev-dependencies]
 # Snapshot testing of rendered TUI frames (see src/ui — snapshot module).
