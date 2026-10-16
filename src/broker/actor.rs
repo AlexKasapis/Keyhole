@@ -526,6 +526,11 @@ async fn process(
     let _ = result;
 }
 
+// Returns the same `Result` as `Sender::send` so it can sit in the same match
+// arms as the direct sends above; the caller discards it (a send error only
+// means the UI is gone). The payload-sized `Err` is therefore never propagated,
+// which is what `result_large_err` guards against.
+#[allow(clippy::result_large_err)]
 async fn emit_error(
     events: &Sender<AppEvent>,
     id: ConnId,

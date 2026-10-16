@@ -235,8 +235,10 @@ pub async fn open_stream(
                         for (id, flat) in entries {
                             st.last_id = id.clone();
                             let fields = flat
-                                .chunks_exact(2)
-                                .map(|c| (c[0].clone(), c[1].clone()))
+                                .as_chunks::<2>()
+                                .0
+                                .iter()
+                                .map(|[field, value]| (field.clone(), value.clone()))
                                 .collect();
                             events.push(stream_event(&st.key, id, fields));
                         }

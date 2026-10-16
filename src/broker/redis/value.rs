@@ -82,8 +82,15 @@ pub fn render_hash(len: usize, flat: Vec<String>) -> ValueView {
 /// parse as a float is dropped rather than failing the whole inspection.
 pub fn render_zset(len: usize, flat: Vec<String>) -> ValueView {
     let items = flat
-        .chunks_exact(2)
-        .filter_map(|c| c[1].parse::<f64>().ok().map(|score| (c[0].clone(), score)))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter_map(|[member, score]| {
+            score
+                .parse::<f64>()
+                .ok()
+                .map(|score| (member.clone(), score))
+        })
         .collect();
     ValueView::ZSet { len, items }
 }
@@ -110,8 +117,10 @@ pub fn render_stream(len: usize, raw: Vec<(String, Vec<String>)>) -> ValueView {
 /// Pair a flat `[a, b, a, b, …]` list into `(a, b)` tuples, dropping a trailing
 /// unpaired element (only present in a truncated reply).
 fn pair_up(flat: Vec<String>) -> Vec<(String, String)> {
-    flat.chunks_exact(2)
-        .map(|c| (c[0].clone(), c[1].clone()))
+    flat.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[a, b]| (a.clone(), b.clone()))
         .collect()
 }
 
@@ -240,6 +249,28 @@ mod tests {
                 assert_eq!(items, vec![("a".to_string(), 1.5), ("c".to_string(), -2.0)]);
             }
             _ => panic!("expected ZSet"),
+        }
+    }
+
+    #[test]
+    fn zset_drops_trailing_unpaired_member() {
+        // Same truncation hazard as HSCAN: a member with no score must be dropped.
+        match render_zset(2, strs(&["a", "1", "b", "2", "dangling"])) {
+            ValueView::ZSet { items, .. } => {
+                assert_eq!(items, vec![("a".to_string(), 1.0), ("b".to_string(), 2.0)]);
+            }
+            _ => panic!("expected ZSet"),
+        }
+    }
+
+    #[test]
+    fn stream_entry_drops_trailing_unpaired_field() {
+        let raw = vec![("1-0".to_string(), strs(&["k", "v", "dangling"]))];
+        match render_stream(1, raw) {
+            ValueView::Stream { entries, .. } => {
+                assert_eq!(entries[0].fields, vec![("k".to_string(), "v".to_string())]);
+            }
+            _ => panic!("expected Stream"),
         }
     }
 
