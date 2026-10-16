@@ -17,11 +17,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "astro": "^7.0.3"
+    "astro": "^7.2.8"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.4",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^5.0.5"
   }
 }
