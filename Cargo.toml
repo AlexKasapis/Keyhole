@@ -159,7 +159,7 @@ bytes = "1"
 percent-encoding = "2.3.2"
 # AMQP 1.0 client: ActiveMQ / Amazon MQ / RabbitMQ-4.x. `rustls` enables
 # `amqps://` for Amazon MQ's TLS endpoint (:5671).
-fe2o3-amqp = { version = "0.15.1", features = ["rustls"] }
+fe2o3-amqp = { version = "0.18.2", features = ["rustls"] }
 # AMQP 0.9.1 client: RabbitMQ (all versions). lapin's default features are
 # `rustls` + `default-runtime` (= tokio), so it binds to the app's existing
 # tokio runtime out of the box (`ConnectionProperties::default()`) and speaks
