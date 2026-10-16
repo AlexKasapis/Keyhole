@@ -154,7 +154,7 @@ clap_complete = "4"
 clap_mangen = "0.3"
 # `serde-well-known` provides the RFC 3339 (de)serializers for recording timestamps.
 time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-well-known", "macros"] }
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1"
 percent-encoding = "2.3.2"
 # AMQP 1.0 client: ActiveMQ / Amazon MQ / RabbitMQ-4.x. `rustls` enables

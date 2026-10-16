@@ -1948,7 +1948,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "clap",
  "clap_complete",
