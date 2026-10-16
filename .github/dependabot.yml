@@ -16,6 +16,11 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Mirrors the `<0.7.20` cap in Cargo.toml (fe2o3-amqp 0.15 does not compile
+      # against tokio-util 0.7.20); drop both once fe2o3-amqp is on >= 0.18.
+      - dependency-name: "tokio-util"
+        versions: [">=0.7.20"]
 
   - package-ecosystem: github-actions
     directory: "/"

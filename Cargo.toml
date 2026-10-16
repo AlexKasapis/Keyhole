@@ -112,7 +112,10 @@ gnome-keyring = "*"
 [dependencies]
 # --- async runtime ---
 tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal"] }
-tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken + TaskTracker
+# Capped below 0.7.20: that release added `Encoder<&[u8]> for LengthDelimitedCodec`,
+# which breaks type inference inside fe2o3-amqp 0.15 (E0283 in transport/mod.rs).
+# Upstream only fixed it in fe2o3-amqp 0.18.3; lift the cap when we move to >= 0.18.
+tokio-util = { version = ">=0.7, <0.7.20", features = ["rt"] }   # CancellationToken + TaskTracker
 futures-util = "0.3"
 async-trait = "0.1"
 
