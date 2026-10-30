@@ -21,7 +21,15 @@ version = 2
 yanked = "deny"
 # Advisory IDs to temporarily tolerate, each with a justification + tracking note.
 # Keep this empty; add entries only with a comment explaining why and when it goes.
-ignore = []
+ignore = [
+    # zvariant / zvariant_derive / zbus_names were merged into zbus 6.0 and
+    # marked unmaintained. We reach them via keyring -> secret-service 5.x,
+    # which still pins zbus ^5. Remove once secret-service ships a zbus 6
+    # release (https://github.com/z-galaxy/zbus/issues/2043).
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; blocked on secret-service" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; blocked on secret-service" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; blocked on secret-service" },
+]
 
 [licenses]
 version = 2
