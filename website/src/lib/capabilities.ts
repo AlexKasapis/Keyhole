@@ -18,6 +18,30 @@ export const CAPABILITIES: readonly Capability[] = [
       'Walk the Redis keyspace and inspect every value, with a live server-statistics band running alongside.',
   },
   {
+    name: 'Queue & exchange browser',
+    support: [false, true, true],
+    detail:
+      'AMQP 1.0: a curated list of topics and queues, or ActiveMQ discovery over Jolokia. RabbitMQ: every queue and exchange in the vhost, with message counts, consumers and rates, from its management API.',
+  },
+  {
+    name: 'Queue peek',
+    support: [false, true, true],
+    detail:
+      'Read the messages sitting in a queue: browse (AMQP 1.0 reads copies; RabbitMQ puts each message straight back), skip, or destructive.',
+  },
+  {
+    name: 'Publish a message',
+    support: [false, true, true],
+    detail:
+      'Send one message to a queue, topic or exchange behind a deliberate keystroke. RabbitMQ asks for the routing key and reports confirms, NACKs and unroutable messages.',
+  },
+  {
+    name: 'Server stats + client lists',
+    support: [true, false, true],
+    detail:
+      'Redis: a live statistics band, Server Details and the connected clients. RabbitMQ: overview totals, node health, publish and deliver rates, and Connections and Consumers tabs.',
+  },
+  {
     name: 'Read-only command console',
     support: [true, false, false],
     detail:
@@ -27,7 +51,7 @@ export const CAPABILITIES: readonly Capability[] = [
     name: 'Realtime tails',
     support: [true, true, true],
     detail:
-      'Pub/sub, pattern pub/sub, streams, keyspace events and MONITOR for Redis; topic & queue tails for AMQP 1.0; exchange taps for RabbitMQ.',
+      'Pub/sub, pattern pub/sub, streams, keyspace events and MONITOR for Redis; topic & queue tails for AMQP 1.0; exchange taps for RabbitMQ, started from the list.',
   },
   {
     name: 'Record live tail → JSONL',

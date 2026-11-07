@@ -2,8 +2,8 @@ import { describe, it, expect } from 'vitest';
 import { NAV, PAGES, getPage } from '../src/lib/nav';
 
 describe('nav model', () => {
-  it('describes the nine documented pages', () => {
-    expect(PAGES).toHaveLength(9);
+  it('describes the ten documented pages', () => {
+    expect(PAGES).toHaveLength(10);
   });
 
   it('roots Installation at the docs index', () => {

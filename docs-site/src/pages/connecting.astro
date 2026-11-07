@@ -64,6 +64,31 @@ tls      = true
 username = "app"
 password = "env:RABBIT_PW"`;
 
+const mgmtCode = `[[<span class="c-yellow">connection</span>]]
+<span class="c-green">type</span>     = <span class="c-lime">"rabbitmq"</span>
+<span class="c-green">name</span>     = <span class="c-lime">"amazon-mq"</span>
+<span class="c-green">host</span>     = <span class="c-lime">"b-1234abcd.mq.eu-west-1.amazonaws.com"</span>
+<span class="c-green">port</span>     = <span class="c-purple">5671</span>
+<span class="c-green">tls</span>      = <span class="c-purple">true</span>
+<span class="c-green">username</span> = <span class="c-lime">"app"</span>
+<span class="c-green">password</span> = <span class="c-lime">"env:RABBIT_PW"</span>
+<span class="c-muted"># Amazon MQ and CloudAMQP serve the API on https://&lt;host&gt; (port 443):</span>
+<span class="c-green">management_url</span> = <span class="c-lime">"https://b-1234abcd.mq.eu-west-1.amazonaws.com"</span>
+<span class="c-muted"># Optional: another user for the API (default: username / password)</span>
+<span class="c-green">management_username</span> = <span class="c-lime">"monitor"</span>
+<span class="c-green">management_password</span> = <span class="c-lime">"env:RABBIT_MGMT_PW"</span>`;
+const mgmtPlain = `[[connection]]
+type     = "rabbitmq"
+name     = "amazon-mq"
+host     = "b-1234abcd.mq.eu-west-1.amazonaws.com"
+port     = 5671
+tls      = true
+username = "app"
+password = "env:RABBIT_PW"
+management_url = "https://b-1234abcd.mq.eu-west-1.amazonaws.com"
+management_username = "monitor"
+management_password = "env:RABBIT_MGMT_PW"`;
+
 const tabs = [
   { id: 'redis', label: 'Redis', dot: '#fb4934' },
   { id: 'amqp', label: 'AMQP 1.0', dot: '#83a598' },
@@ -124,9 +149,62 @@ const tabs = [
     <span class="h3-dot" style="background:#fe8019"></span>RabbitMQ
   </h3>
   <p>
-    Tap any exchange to watch routed messages flow through — type
-    <code>exchange:name[/binding_key]</code> at the Tail anchor. Set the virtual host with
-    <code>vhost</code> (default <code>/</code>).
+    Browse the virtual host's queues and exchanges, peek a queue's messages, tap an exchange to watch
+    routed messages flow through, and publish — see the <a href="/rabbitmq">RabbitMQ browser</a>.
+    Set the virtual host with <code>vhost</code> (default <code>/</code>); Keyhole shows only that
+    one. The list, peeks, stats and the connection and consumer tabs come from RabbitMQ's HTTP
+    management API (below). Taps only need AMQP: without the API, type
+    <code>exchange:name[/binding_key]</code> at the Tail anchor.
+  </p>
+
+  <h3 id="mgmt" data-toc="mgmt">RabbitMQ management API</h3>
+  <p>
+    AMQP 0.9.1 can't list queues or exchanges or report stats, so Keyhole reads them from the
+    <code>rabbitmq_management</code> plugin's HTTP API. By default it looks for it at
+    <code>http://&lt;host&gt;:15672</code> (<code>https://&lt;host&gt;:15671</code> with
+    <code>tls = true</code>) and logs in with the connection's <code>username</code> and
+    <code>password</code>: RabbitMQ has one user database for both. Three optional fields override
+    that:
+  </p>
+  <table>
+    <tbody>
+      <tr>
+        <td class="mono">management_url</td>
+        <td>The API's base URL, when it isn't at the default address.</td>
+      </tr>
+      <tr>
+        <td class="mono">management_username</td>
+        <td>Another user for the API. Default: <code>username</code>.</td>
+      </tr>
+      <tr>
+        <td class="mono">management_password</td>
+        <td>
+          That user's password, as a secret spec: <code>env:VAR</code> or
+          <code>keyring[:account]</code> (the account defaults to <code>management_username</code>,
+          else the connection name). <code>prompt</code> isn't supported here. Default: the AMQP
+          <code>password</code>.
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Managed brokers such as Amazon MQ for RabbitMQ and CloudAMQP serve the API on
+    <code>https://&lt;host&gt;</code> (port 443), so set <code>management_url</code> for them:
+  </p>
+  <CodeBlock cmd={mgmtPlain} code={mgmtCode} dense />
+  <p>
+    Keyhole checks the API when it connects. If it can't reach it, or the login is refused, the
+    connection still opens and taps still work: the destination pane says where it looked and why
+    it failed, and <kbd>r</kbd> tries again. The stats band and the Server Details, Connections and
+    Consumers tabs are only there when the check at connect succeeded, so reconnect once the API
+    answers.
+  </p>
+  <p>
+    The user needs at least the <code>management</code> tag and the vhost permissions: read
+    permission on a queue to peek it. Node health and everyone's connections and consumers need the
+    <code>monitoring</code> or <code>administrator</code> tag. A <code>management</code>-only user
+    sees only their own connections and consumers, and totals and rates for only their vhosts; the
+    tabs say so.
   </p>
 
   <h3 id="tls" data-toc="tls">TLS &amp; auth</h3>

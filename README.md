@@ -58,9 +58,19 @@ keyhole   # launch the TUI
 | Capability                          | Redis        | AMQP 1.0          | RabbitMQ              |
 |-------------------------------------|:------------:|:-----------------:|:---------------------:|
 | Keyspace browser + value inspector  | ✅           | —                 | —                     |
+| Queue / topic / exchange browser    | —            | ✅ curated¹       | ✅²                   |
+| Queue peek (browse/skip/destructive) | —           | ✅                | ✅²                   |
+| Publish a message                   | —            | ✅                | ✅²                   |
+| Server stats + client lists         | ✅           | —                 | ✅²                   |
 | Read-only command console           | ✅           | —                 | —                     |
 | Realtime tails                      | ✅           | ✅                | ✅                    |
 | Record live tail → JSONL            | ✅           | ✅                | ✅                    |
+
+¹ AMQP 1.0 can't list destinations: you list them in the profile, or Keyhole
+discovers ActiveMQ's over Jolokia (`management_url`).
+² Needs RabbitMQ's HTTP management API (`management_url`, default
+`http://<host>:15672`); a publish picks its queue or exchange from that list.
+Exchange taps need only AMQP.
 
 All three brokers are always built in.
 
@@ -68,6 +78,8 @@ All three brokers are always built in.
 
 - **Connections** — saved connection profiles in TOML (`~/.config/keyhole/config.toml`).
 - **Browser** (Redis) — navigate the keyspace and inspect values, with a live server-statistics band and a pinned, read-only command console.
+- **Destination browser** (AMQP 1.0, RabbitMQ) — list topics and queues (AMQP 1.0: curated, or discovered over Jolokia) or a RabbitMQ vhost's queues and exchanges with message counts, consumers and rates; peek a queue's messages (browse, skip or destructive); tap a topic or exchange from the list; and publish a message (RabbitMQ asks for the routing key).
+- **RabbitMQ stats** — a Server band and Server Details tab (versions, totals, node health, publish and deliver rates), plus Connections and Consumers tabs, from the management API.
 - **Realtime** — live tails of pub/sub, pattern pub/sub, streams, keyspace events, and `MONITOR` (Redis); topic/queue tails (AMQP 1.0); and exchange taps (RabbitMQ).
 - **Recording** — record any live tail to a lossless JSONL file, browsable in the in-app recordings viewer.
 

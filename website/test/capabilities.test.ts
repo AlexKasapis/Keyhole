@@ -12,8 +12,8 @@ describe('capability cell mapping', () => {
 });
 
 describe('capability data', () => {
-  it('lists the four capabilities', () => {
-    expect(CAPABILITIES).toHaveLength(4);
+  it('lists the eight capabilities', () => {
+    expect(CAPABILITIES).toHaveLength(8);
   });
 
   it('marks the keyspace browser and command console as Redis-only', () => {
@@ -22,6 +22,20 @@ describe('capability data', () => {
       'Keyspace browser + value inspector',
       'Read-only command console',
     ]);
+  });
+
+  it('marks the browser, peek and publish as AMQP 1.0 and RabbitMQ only', () => {
+    const queueBrokers = CAPABILITIES.filter((c) => !c.support[0] && c.support[1] && c.support[2]);
+    expect(queueBrokers.map((c) => c.name)).toEqual([
+      'Queue & exchange browser',
+      'Queue peek',
+      'Publish a message',
+    ]);
+  });
+
+  it('marks stats and client lists as Redis and RabbitMQ', () => {
+    const stats = CAPABILITIES.filter((c) => c.support[0] && !c.support[1] && c.support[2]);
+    expect(stats.map((c) => c.name)).toEqual(['Server stats + client lists']);
   });
 
   it('marks tails and recording as supported across all three brokers', () => {

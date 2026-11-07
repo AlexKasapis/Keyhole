@@ -53,6 +53,13 @@ const pattern = `<span class="c-muted"># Pub/Sub anchor: psub:orders.*</span>
     <kbd>Enter</kbd>. The spec's prefix selects the source type:
   </p>
   <CodeBlock cmd="psub:orders.*" code={start} />
+  <p>
+    Each tail opens a tab of its own, and <kbd>x</kbd> closes it. On AMQP 1.0 and RabbitMQ you can
+    also press <kbd>t</kbd> on a topic or an exchange in the destination list. A RabbitMQ tap binds
+    a temporary queue to the exchange, so it sees only messages published after it starts and takes
+    nothing from your queues; a RabbitMQ queue can't be tailed (see
+    <a href="/rabbitmq#tap">Tapping exchanges</a>).
+  </p>
 
   <h3 id="pattern" data-toc="pattern">Pattern tails</h3>
   <p>

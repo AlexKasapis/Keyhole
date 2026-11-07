@@ -39,7 +39,7 @@ export interface NavGroup {
 export const NAV: readonly NavGroup[] = [
   { id: 'gs', title: 'Getting started', pageIds: ['installation', 'quickstart'] },
   { id: 'conn', title: 'Connecting', pageIds: ['connecting'] },
-  { id: 'use', title: 'Using Keyhole', pageIds: ['keyspace', 'tails', 'recording'] },
+  { id: 'use', title: 'Using Keyhole', pageIds: ['keyspace', 'rabbitmq', 'tails', 'recording'] },
   { id: 'ref', title: 'Reference', pageIds: ['keybindings', 'config', 'palette'] },
 ];
 
@@ -80,12 +80,13 @@ export const PAGES: readonly PageMeta[] = [
     group: 'Connecting',
     href: '/connecting',
     title: 'Connect a broker · Keyhole docs',
-    keywords: 'redis amqp rabbitmq connection string url tls auth password vhost',
+    keywords: 'redis amqp rabbitmq connection string url tls auth password vhost management api',
     toc: [
       ['define', 'Defining a connection'],
       ['redis', 'Redis'],
       ['amqp', 'AMQP 1.0'],
       ['rabbit', 'RabbitMQ'],
+      ['mgmt', 'Management API'],
       ['tls', 'TLS & auth'],
     ],
   },
@@ -101,6 +102,23 @@ export const PAGES: readonly PageMeta[] = [
       ['value', 'Value inspector'],
       ['filter', 'Filter & sort'],
       ['console', 'Read-only console'],
+    ],
+  },
+  {
+    id: 'rabbitmq',
+    label: 'RabbitMQ browser',
+    group: 'Using Keyhole',
+    href: '/rabbitmq',
+    title: 'RabbitMQ browser · Keyhole docs',
+    keywords:
+      'rabbitmq queues exchanges peek browse destructive skip quorum delivery limit publish routing key tap stats connections consumers',
+    toc: [
+      ['list', 'Queues & exchanges'],
+      ['tap', 'Tapping exchanges'],
+      ['peek', 'Peeking queues'],
+      ['modes', 'Peek modes'],
+      ['publish', 'Publishing'],
+      ['server', 'Stats, connections & consumers'],
     ],
   },
   {

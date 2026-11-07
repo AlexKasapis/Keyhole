@@ -1,0 +1,191 @@
+---
+import DocsLayout from '../components/DocsLayout.astro';
+import CodeBlock from '../components/CodeBlock.astro';
+import Note from '../components/Note.astro';
+
+const list = `<span class="c-muted">  Name                   Kind     Msgs  Ready/Unacked  Consumers   Rate</span>
+<span class="c-yellow">▶</span> orders                 queue     412        400/12          2  9.6/s
+  orders.audit           quorum   1000       1000/0           0  2.0/s
+  events                 stream   5200       5200/0           1  4.1/s
+  amq.topic              topic                                    0.0/s
+  orders.x               direct                                   9.6/s`;
+const listPlain = `Name  Kind  Msgs  Ready/Unacked  Consumers  Rate`;
+
+const settings = `[<span class="c-yellow">settings</span>]
+<span class="c-green">peek_mode</span> = <span class="c-lime">"browse"</span>          <span class="c-muted"># or "skip" / "destructive"</span>
+<span class="c-green">browse_refresh_ms</span> = <span class="c-purple">5000</span>     <span class="c-muted"># list refresh; 0 turns it off</span>
+<span class="c-green">value_preview_bytes</span> = <span class="c-purple">65536</span> <span class="c-muted"># body bytes a peek shows per message</span>`;
+const settingsPlain = `[settings]
+peek_mode = "browse"
+browse_refresh_ms = 5000
+value_preview_bytes = 65536`;
+---
+
+<DocsLayout pageId="rabbitmq">
+  <p>
+    A RabbitMQ connection opens on the Browser: the virtual host's queues and exchanges on the
+    left, the selected one's details or peeked messages on the right, and the bottom panel with
+    <strong>Server Details</strong>, <strong>Connections</strong>, <strong>Consumers</strong> and the
+    <strong>Tail</strong> anchor. The list, peeks, stats and the Connections and Consumers tabs come
+    from the management API (see <a href="/connecting#mgmt">Connect a broker</a>); without it you
+    can still tap an exchange by name at the Tail anchor.
+  </p>
+
+  <h3 id="list" data-toc="list">Queues &amp; exchanges</h3>
+  <p>
+    The list shows the profile's <code>vhost</code> only: its queues first, then its exchanges. The
+    default exchange (<code>""</code>) is left out; <code>amq.*</code> exchanges stay, and internal
+    ones such as <code>amq.rabbitmq.trace</code> are dimmed.
+  </p>
+  <CodeBlock cmd={listPlain} code={list} dense />
+  <table>
+    <tbody>
+      <tr>
+        <td class="mono">Kind</td>
+        <td>
+          <code>queue</code> (classic), <code>quorum</code> or <code>stream</code>; an exchange's type:
+          <code>topic</code>, <code>direct</code>, <code>fanout</code>, <code>headers</code>, or a
+          plugin's.
+        </td>
+      </tr>
+      <tr>
+        <td class="mono">Msgs</td>
+        <td>Messages in the queue, then how many are ready and how many delivered but unacked.</td>
+      </tr>
+      <tr>
+        <td class="mono">Consumers</td>
+        <td>Consumers on the queue.</td>
+      </tr>
+      <tr>
+        <td class="mono">Rate</td>
+        <td>Messages published per second, into the queue or into the exchange.</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    Columns drop off from the right on a narrow terminal. A figure the broker doesn't report shows
+    <code>—</code>; with the broker's metrics collector off, every count and rate does, and the
+    pane says why. The list loads on connect, refreshes every <code>browse_refresh_ms</code> while
+    the Browser is showing, and <kbd>r</kbd> refreshes it now (and retries an API that failed). The
+    cursor stays on its queue or exchange, and what the server deleted drops out. A vhost with more
+    than 5,000 queues or exchanges shows the first 5,000 of each.
+  </p>
+
+  <h3 id="tap" data-toc="tap">Tapping exchanges</h3>
+  <p>
+    Press <kbd>t</kbd> or <kbd>Enter</kbd> on an exchange to tap it. A <strong>topic</strong>,
+    <strong>fanout</strong> or <strong>headers</strong> exchange is tapped with the binding key
+    <code>#</code>, which takes every message it routes (a headers binding without arguments
+    matches every message). A <strong>direct</strong> exchange only routes exact keys, so the Tail
+    anchor opens with <code>exchange:name/</code> typed for you to add one. Another exchange type
+    is tapped with <code>#</code>, which it may not match. Internal exchanges can be tapped too.
+  </p>
+  <p>
+    A tap binds a temporary, exclusive, auto-deleting queue to the exchange and reads the copies
+    routed to it, so your real queues lose nothing. It shows messages published after it starts,
+    in a tab of its own in the bottom panel; <kbd>x</kbd> closes it. See
+    <a href="/tails">Realtime tails</a>.
+  </p>
+  <Note kind="note">
+    A queue can't be tailed: reading it would consume its messages. Peek it, or tap an exchange that
+    routes to it.
+  </Note>
+
+  <h3 id="peek" data-toc="peek">Peeking queues</h3>
+  <p>
+    Press <kbd>Enter</kbd> on a queue to peek it: Keyhole reads up to 200 messages from the head of
+    the queue through the API's <code>/get</code> and lists them on the right. The count reads
+    <code>200+</code> when there may be more, so on a full queue the newest messages can lie beyond
+    the window. <kbd>Ctrl</kbd>+<kbd>→</kbd> moves into the list, <kbd>/</kbd> filters it, and the
+    preview shows the selected message's body (up to <code>value_preview_bytes</code>, marked when
+    cut) and its exchange, routing key, <code>redelivered</code> flag, properties and headers.
+  </p>
+  <p>
+    A peek runs only when you press <kbd>Enter</kbd>: never as the cursor moves, and never on a list
+    refresh. <kbd>Enter</kbd> on the queue again steps into its messages; peeking another queue
+    replaces them. A stream queue can't be peeked (RabbitMQ refuses <code>basic.get</code> on
+    streams): tap an exchange that routes to it instead.
+  </p>
+
+  <h3 id="modes" data-toc="modes">Peek modes</h3>
+  <p>
+    How a peek reads a queue is the <code>peek_mode</code> setting, shared with AMQP 1.0. Change it
+    on the Settings page (<kbd>:</kbd>, then <strong>Settings page</strong>, the
+    <strong>AMQP peek mode</strong> row) or in the config file:
+  </p>
+  <CodeBlock cmd={settingsPlain} code={settings} dense />
+  <table>
+    <tbody>
+      <tr>
+        <td class="mono">browse</td>
+        <td>
+          The default. RabbitMQ has no read-only peek, so each message is taken and put straight
+          back (<code>ack_requeue_true</code>), in order. Back on the queue it's flagged
+          <code>redelivered</code>, the queue's get and redeliver stats move, and the messages are
+          briefly unavailable to consumers while the peek runs.
+        </td>
+      </tr>
+      <tr>
+        <td class="mono">destructive</td>
+        <td>Reads and removes the messages (<code>ack_requeue_false</code>).</td>
+      </tr>
+      <tr>
+        <td class="mono">skip</td>
+        <td>Doesn't read queues at all. The list and taps still work.</td>
+      </tr>
+    </tbody>
+  </table>
+  <Note kind="warning">
+    On RabbitMQ 3.x, each browse peek of a quorum queue raises its messages'
+    <code>x-delivery-count</code>. With a <code>delivery-limit</code> (an argument or a policy), a
+    message peeked past the limit is dropped, or dead-lettered if the queue has a dead-letter
+    exchange; with a limit below 1, every peek drops or dead-letters what it reads. Keyhole warns
+    on those queues before and after a peek. RabbitMQ 4.x only raises
+    <code>x-acquired-count</code> on a peek, which never reaches the limit, so there's no warning.
+  </Note>
+
+  <h3 id="publish" data-toc="publish">Publishing</h3>
+  <p>
+    Press <kbd>P</kbd> on the selected queue or exchange to publish one message. It goes over AMQP
+    with publisher confirms on, marked persistent, and carries only the body you type: no headers,
+    content type or other properties.
+  </p>
+  <ul>
+    <li>
+      <strong>A queue</strong> is published to through the default exchange under its own name, so
+      you only type the body.
+    </li>
+    <li>
+      <strong>A direct or topic exchange</strong> first asks for the routing key, filled in with the
+      last one you used on it this session; <kbd>Enter</kbd> moves on to the body, and an empty key
+      is a valid one.
+    </li>
+    <li>
+      <strong>A fanout or headers exchange</strong> skips the key. A headers exchange routes on
+      headers, which the publish doesn't set, so only a binding without header arguments takes it.
+    </li>
+    <li>Internal exchanges refuse client publishes, so <kbd>P</kbd> isn't offered on them.</li>
+  </ul>
+  <p>
+    The footer reports the outcome, and the details pane keeps it: <code>Published to …</code> once
+    the broker confirms; <code>unroutable: …</code> when no queue took the message (no such queue, or
+    no binding for the key); <code>NACKed</code> when the broker wouldn't take it, such as a full
+    queue that rejects publishes; and <code>refused: …</code> when the broker closed the channel,
+    such as an <code>ACCESS_REFUSED</code>. The next publish opens a new channel. A publish doesn't
+    peek the queue again, because a peek takes messages off it: press <kbd>Enter</kbd> to see the
+    new message.
+  </p>
+
+  <h3 id="server" data-toc="server">Stats, connections &amp; consumers</h3>
+  <p>
+    The Server band at the top shows the connection's address and <code>vhost</code>, and its dot
+    turns to a warning on a node alarm. The <strong>Server Details</strong> tab has the RabbitMQ and
+    Erlang versions and cluster name, message, queue, connection and consumer totals, each node's
+    health (alarms, uptime, memory, file descriptors, free disk), and Publish/s and Deliver/s
+    graphs. The <strong>Connections</strong> tab lists each client by the name it gave, with its
+    peer, user, channels, state, byte rates and age; <strong>Consumers</strong> lists queue,
+    consumer tag, channel, ack mode, prefetch and whether it's active. A tab's list is fetched only
+    while that tab is focused, and <kbd>↑</kbd> <kbd>↓</kbd> <kbd>Home</kbd> <kbd>End</kbd> scroll
+    it.
+  </p>
+</DocsLayout>
