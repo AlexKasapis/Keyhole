@@ -2271,7 +2271,7 @@ mod tests {
             ("orders", "To watch them, tap an exchange"),
             ("amq.direct", "routing key after exchange:name/"),
             ("amq.fanout", "copies every message"),
-            ("amq.headers", "header-based taps aren't"),
+            ("amq.headers", "the tap receives every message"),
             ("amq.rabbitmq.trace", "topic exchange (internal)"),
         ] {
             select_destination(&mut app, name);

@@ -307,8 +307,8 @@ async fn rabbitmq_auto_refresh_lists_on_the_browse_clock() {
 }
 
 #[tokio::test]
-async fn rabbitmq_t_taps_a_topic_or_fanout_exchange_with_hash() {
-    for name in ["keyhole.demo", "amq.fanout"] {
+async fn rabbitmq_t_taps_a_topic_fanout_or_headers_exchange_with_hash() {
+    for name in ["keyhole.demo", "amq.fanout", "amq.headers"] {
         let (mut app, _rx, mut cmds) = listed_app();
         select_row(&mut app, name);
         app.handle_key(ch('t'));
@@ -358,22 +358,6 @@ async fn rabbitmq_t_on_a_direct_exchange_asks_for_the_routing_key() {
         }
         other => panic!("expected a Subscribe, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn rabbitmq_t_on_a_headers_exchange_explains_why_not() {
-    let (mut app, _rx, mut cmds) = listed_app();
-    select_row(&mut app, "amq.headers");
-    app.handle_key(ch('t'));
-    assert!(sent(&mut cmds).is_empty());
-    assert!(app.active_conn().unwrap().subs.is_empty());
-    let status = app.status.as_ref().expect("status set");
-    assert!(status.is_error);
-    assert!(
-        status.message.contains("header-based taps"),
-        "{}",
-        status.message
-    );
 }
 
 #[tokio::test]

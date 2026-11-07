@@ -203,9 +203,9 @@ impl BrokerConnection for RabbitmqConnection {
         // The default `#` binding key matches every routing key on a *topic*
         // exchange and is ignored by a *fanout* exchange, but a *direct* exchange
         // matches it only against the literal key `#` — so the tap could attach
-        // yet stay silent. A *headers* exchange ignores the key too, and a
-        // binding without header arguments matches every message, so the tap
-        // gets everything (checked on 3.13). The last listing knows each
+        // yet stay silent. A *headers* exchange ignores the key, and a binding
+        // without header arguments matches every message, so the tap gets
+        // everything (checked on 3.13) like a fanout. The last listing knows each
         // exchange's type; without it (no management API, or an exchange it
         // hasn't listed) flag the ambiguity whenever the catch-all default is
         // in use (mirroring the Redis keyspace notice).
@@ -220,14 +220,10 @@ impl BrokerConnection for RabbitmqConnection {
             return None;
         }
         match self.exchange_types.get(exchange) {
-            Some(ExchangeType::Topic | ExchangeType::Fanout) => None,
+            Some(ExchangeType::Topic | ExchangeType::Fanout | ExchangeType::Headers) => None,
             Some(ExchangeType::Direct) => Some(format!(
                 "`{exchange}` is a direct exchange: binding key `#` only matches messages \
                  routed with the key `#` — tap exchange:{exchange}/<routing-key> instead"
-            )),
-            Some(ExchangeType::Headers) => Some(format!(
-                "`{exchange}` is a headers exchange: a tap can't filter on headers, so it \
-                 gets every message"
             )),
             Some(ExchangeType::Other(_)) | None => Some(
                 "binding key `#` matches every key on a topic exchange and is ignored by \
@@ -806,14 +802,14 @@ mod tests {
             exchange: name.into(),
             binding_key: key.into(),
         };
-        // `#` fits a topic or fanout exchange.
+        // `#` fits a topic or fanout exchange, and a headers exchange ignores
+        // it: the tap gets every message.
         assert_eq!(conn.tail_notice(&tap("spike.topic", "#")).await, None);
         assert_eq!(conn.tail_notice(&tap("spike.fanout", "#")).await, None);
-        // A known direct or headers exchange gets a specific advisory.
+        assert_eq!(conn.tail_notice(&tap("spike.headers", "#")).await, None);
+        // A known direct exchange gets a specific advisory.
         let direct = conn.tail_notice(&tap("spike.direct", "#")).await.unwrap();
         assert!(direct.contains("direct exchange"), "{direct}");
-        let headers = conn.tail_notice(&tap("spike.headers", "#")).await.unwrap();
-        assert!(headers.contains("gets every message"), "{headers}");
         // An exchange the listing didn't include: the type is unknown.
         let unknown = conn.tail_notice(&tap("elsewhere", "#")).await.unwrap();
         assert!(
@@ -1257,6 +1253,83 @@ mod integration_tests {
             })
             .await;
         assert!(tap.is_ok(), "{:#}", tap.err().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_headers_exchange_tap_receives_every_message() {
+        use lapin::options::ExchangeDeleteOptions;
+        use lapin::types::AMQPValue;
+
+        let exchange = unique("keyhole.it.headers");
+        let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
+            .await
+            .unwrap();
+        let channel = setup.create_channel().await.unwrap();
+        channel
+            .exchange_declare(
+                exchange.as_str().into(),
+                ExchangeKind::Headers,
+                ExchangeDeclareOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .unwrap();
+
+        // The tap binds with `#` and no arguments, which a headers exchange
+        // matches against every message.
+        let mut conn = connected().await;
+        let mut stream = conn
+            .subscribe(SubSpec::Exchange {
+                exchange: exchange.clone(),
+                binding_key: "#".into(),
+            })
+            .await
+            .expect("headers exchange tap");
+
+        let mut headers = FieldTable::default();
+        headers.insert("kind".into(), AMQPValue::LongString("order".into()));
+        for (body, props) in [
+            (
+                "with headers",
+                BasicProperties::default().with_headers(headers),
+            ),
+            ("without headers", BasicProperties::default()),
+        ] {
+            channel
+                .basic_publish(
+                    exchange.as_str().into(),
+                    "".into(),
+                    BasicPublishOptions::default(),
+                    body.as_bytes(),
+                    props,
+                )
+                .await
+                .unwrap()
+                .await
+                .unwrap();
+        }
+
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            match timeout(Duration::from_secs(8), stream.next()).await {
+                Ok(Some(ev)) => bodies.push(ev.payload),
+                _ => break,
+            }
+        }
+        drop(stream);
+        channel
+            .exchange_delete(exchange.as_str().into(), ExchangeDeleteOptions::default())
+            .await
+            .unwrap();
+        setup.close(200, "bye".into()).await.ok();
+
+        assert_eq!(
+            bodies,
+            [
+                Payload::Utf8("with headers".into()),
+                Payload::Utf8("without headers".into()),
+            ]
+        );
     }
 
     /// Poll `fetch` on the blocking pool until `done` holds (the stats behind

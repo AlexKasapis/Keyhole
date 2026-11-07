@@ -880,8 +880,8 @@ fn rabbitmq_details_pane(frame: &mut Frame, dest: &Destination, theme: &Theme, a
                     routing key after exchange:name/ — a direct exchange only routes exact \
                     keys."
                     .to_string(),
-                Some(ExchangeType::Headers) => "A headers exchange routes on message headers \
-                    rather than the binding key, and header-based taps aren't supported."
+                Some(ExchangeType::Headers) => "Press t or Enter to tap it: the tap receives \
+                    every message routed through the exchange, with no header filter."
                     .to_string(),
                 Some(ExchangeType::Other(t)) => format!(
                     "Press t or Enter to tap it with binding key #, which may not match \

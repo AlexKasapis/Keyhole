@@ -401,11 +401,11 @@ impl App {
 
     /// Open a live tail on the highlighted destination: an AMQP 1.0 topic or
     /// queue, or a RabbitMQ exchange tap. How an exchange is tapped follows its
-    /// type: a topic or fanout exchange takes the catch-all `#` binding key; a
-    /// direct exchange needs a routing key, so the Tail anchor opens with
-    /// `exchange:name/` for the user to finish; a headers exchange routes on
-    /// headers, and header-based taps aren't supported. A RabbitMQ queue can't
-    /// be tailed without consuming from it.
+    /// type: a topic, fanout or headers exchange takes the catch-all `#`
+    /// binding key (a headers binding without arguments matches every
+    /// message); a direct exchange needs a routing key, so the Tail anchor
+    /// opens with `exchange:name/` for the user to finish. A RabbitMQ queue
+    /// can't be tailed without consuming from it.
     fn tail_selected_destination(&mut self) {
         let Some((dest, rabbitmq)) = self.active_conn().and_then(|c| {
             let dest = c.selected_destination()?.clone();
@@ -423,11 +423,8 @@ impl App {
             (DestKind::Exchange, Some(ExchangeType::Direct)) => {
                 self.open_tail_anchor_with(format!("exchange:{}/", dest.name))
             }
-            (DestKind::Exchange, Some(ExchangeType::Headers)) => {
-                self.set_status("header-based taps aren't supported".to_string(), true)
-            }
-            // Topic and fanout take `#`. An unknown (plugin) type is tapped the
-            // same way; the tap's notice says `#` may not match.
+            // Topic, fanout and headers take `#`. An unknown (plugin) type is
+            // tapped the same way; the tap's notice says `#` may not match.
             (DestKind::Exchange, _) => self.start_subscribe(dest.spec()),
             (DestKind::Queue | DestKind::Topic, _) => {
                 self.set_status("can't tail a queue without consuming it".to_string(), true)

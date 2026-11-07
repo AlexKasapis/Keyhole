@@ -380,10 +380,11 @@ between 3.x and 4.x (Phase 0, Q1; used in Phase 4).
 - **`a` / `d` (add / delete).** Not offered on RabbitMQ, because the list comes from the
   broker. The footer shouldn't advertise them.
 - **`t` on a row:**
-  - **topic / fanout exchange:** tap with `#`.
+  - **topic / fanout / headers exchange:** tap with `#`. A headers exchange is tapped like
+    fanout (user decision 2026-11-07): the spy queue's binding has no header arguments, so
+    it matches every message routed through the exchange (verified on 3.13.7).
   - **direct exchange:** open the Tail anchor pre-filled with `exchange:name/` so the user
     types the routing key.
-  - **headers exchange:** show a status that header-based taps aren't supported.
   - **queue:** explain that a queue can't be tailed without consuming from it, and suggest
     tapping an exchange that routes to it (queue taps are listed under follow-ups).
 
