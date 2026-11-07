@@ -22,7 +22,7 @@ use tokio_util::task::TaskTracker;
 
 use super::{
     BrokerConnection, BrokerEventStream, BrowseReq, Capabilities, ConnId, InspectReq, PeekReq,
-    PublishReq, SubSpec,
+    PublishReq, RosterKind, SubSpec,
 };
 use crate::event::AppEvent;
 use crate::recording::{RecordSink, Recorder, RecordingStatus, FLUSH_EVERY};
@@ -63,6 +63,9 @@ pub enum ConnCommand {
     /// Refresh the server statistics (Redis `INFO`, RabbitMQ's overview and
     /// nodes). The reply, success or failure, is an [`AppEvent::StatsUpdated`].
     RefreshStats,
+    /// Refresh the connections or consumers roster (RabbitMQ). The reply,
+    /// success or failure, is an [`AppEvent::RosterUpdated`].
+    RefreshRoster(RosterKind),
     Ping,
     /// Open a tail for `spec`; start recording immediately if `record`.
     Subscribe {
@@ -513,6 +516,12 @@ async fn process(
             let result = conn.stats().await.map_err(|e| e.to_string());
             events.send(AppEvent::StatsUpdated { id, result }).await
         }
+        ConnCommand::RefreshRoster(kind) => {
+            let result = conn.roster(kind).await.map_err(|e| format!("{e:#}"));
+            events
+                .send(AppEvent::RosterUpdated { id, kind, result })
+                .await
+        }
         ConnCommand::Ping => match conn.ping().await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -587,7 +596,7 @@ pub(crate) mod mock {
     use crate::broker::{
         BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, BrowsePage, BrowseReq,
         Capabilities, ConnId, DestKind, DestinationInfo, DestinationList, ExchangeType, InspectReq,
-        PeekReq, QueueType, ServerStats, SubSpec, ValueView,
+        PeekReq, QueueType, Roster, RosterKind, ServerStats, SubSpec, ValueView,
     };
     use crate::event::AppEvent;
 
@@ -626,6 +635,10 @@ pub(crate) mod mock {
         pub list: DestinationList,
         /// When set, `list_destinations` fails with this message instead.
         pub list_err: Option<String>,
+        /// What `roster` returns; an empty roster of the asked kind when unset.
+        pub roster: Option<Roster>,
+        /// When set, `roster` fails with this message instead.
+        pub roster_err: Option<String>,
     }
 
     impl MockBroker {
@@ -647,6 +660,8 @@ pub(crate) mod mock {
                 notice: None,
                 list: DestinationList::default(),
                 list_err: None,
+                roster: None,
+                roster_err: None,
             }
         }
 
@@ -729,6 +744,16 @@ pub(crate) mod mock {
                 anyhow::bail!("{e}");
             }
             Ok(self.list.clone())
+        }
+
+        async fn roster(&mut self, kind: RosterKind) -> anyhow::Result<Roster> {
+            if let Some(e) = &self.roster_err {
+                anyhow::bail!("{e}");
+            }
+            Ok(self
+                .roster
+                .clone()
+                .unwrap_or_else(|| Roster::empty(kind, false, false)))
         }
     }
 
@@ -1202,6 +1227,71 @@ mod tests {
             }
             other => panic!("expected a failed StatsUpdated, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn a_roster_refresh_replies_with_its_kind_success_or_failure() {
+        // Like stats, every refresh gets exactly one reply, tied to its kind,
+        // so the tab can tell its request is done.
+        let mut mock = MockBroker::new();
+        mock.roster = Some(crate::broker::Roster {
+            rows: crate::broker::RosterRows::Consumers(vec![crate::broker::QueueConsumer {
+                queue: "orders".into(),
+                tag: "ctag-1".into(),
+                ..Default::default()
+            }]),
+            own_only: true,
+            stats_disabled: false,
+        });
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("roster")).await;
+        handle.send(ConnCommand::RefreshRoster(RosterKind::Consumers));
+        match next(&mut rx).await {
+            Some(AppEvent::RosterUpdated {
+                kind: RosterKind::Consumers,
+                result: Ok(roster),
+                ..
+            }) => {
+                assert_eq!(roster.len(), 1);
+                assert!(roster.own_only);
+            }
+            other => panic!("expected RosterUpdated, got {other:?}"),
+        }
+
+        let mut failing = MockBroker::new();
+        failing.roster_err = Some("management API unavailable at u: refused".into());
+        let (handle, mut rx, _t, _c) = spawn(failing, temp_dir("roster-err")).await;
+        handle.send(ConnCommand::RefreshRoster(RosterKind::Connections));
+        match next(&mut rx).await {
+            Some(AppEvent::RosterUpdated {
+                kind: RosterKind::Connections,
+                result: Err(e),
+                ..
+            }) => assert_eq!(e, "management API unavailable at u: refused"),
+            other => panic!("expected a failed RosterUpdated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_default_roster_is_unsupported() {
+        // A broker without rosters (Redis, AMQP) keeps the trait's default.
+        struct NoRoster;
+        #[async_trait::async_trait]
+        impl BrokerConnection for NoRoster {
+            async fn connect(&mut self) -> anyhow::Result<Capabilities> {
+                Ok(Capabilities::amqp())
+            }
+            async fn ping(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn subscribe(&mut self, _spec: SubSpec) -> anyhow::Result<BrokerEventStream> {
+                anyhow::bail!("no tails")
+            }
+        }
+        let err = NoRoster
+            .roster(RosterKind::Connections)
+            .await
+            .expect_err("unsupported");
+        assert!(err.to_string().contains("does not list its clients"));
     }
 
     #[tokio::test]

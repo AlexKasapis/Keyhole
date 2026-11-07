@@ -219,6 +219,13 @@ impl Capabilities {
     pub fn can_tail(&self) -> bool {
         self.can_console || matches!(self.r#type, BrokerType::Amqp | BrokerType::Rabbitmq)
     }
+
+    /// Whether the broker lists its connections and consumers
+    /// ([`BrokerConnection::roster`]): RabbitMQ, from the same management API
+    /// as its stats, so only with the dashboard.
+    pub fn lists_clients(&self) -> bool {
+        self.can_dashboard && matches!(self.r#type, BrokerType::Rabbitmq)
+    }
 }
 
 /// The Redis value type of a key (and the "missing" / "unknown" cases).
@@ -957,6 +964,8 @@ impl RabbitmqStats {
 pub struct NodeHealth {
     pub name: String,
     pub running: Option<bool>,
+    /// Seconds since the node started.
+    pub uptime: Option<u64>,
     pub mem_used: Option<u64>,
     /// The memory high watermark: publishers block above it.
     pub mem_limit: Option<u64>,
@@ -992,6 +1001,114 @@ impl NodeHealth {
     }
 }
 
+/// Which client roster to fetch: the vhost's connections or its consumers.
+/// Each has its own bottom-panel tab (RabbitMQ, from its management API).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RosterKind {
+    Connections,
+    Consumers,
+}
+
+impl RosterKind {
+    /// The lowercase noun for messages: `connections`, `consumers`.
+    pub fn noun(self) -> &'static str {
+        match self {
+            RosterKind::Connections => "connections",
+            RosterKind::Consumers => "consumers",
+        }
+    }
+}
+
+/// A client roster's rows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RosterRows {
+    Connections(Vec<ClientConnection>),
+    Consumers(Vec<QueueConsumer>),
+}
+
+/// The vhost's connections or consumers, as the broker lists them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Roster {
+    pub rows: RosterRows,
+    /// Only the user's own connections, or the consumers on its own
+    /// channels: without the `monitoring` tag the API lists nothing else.
+    pub own_only: bool,
+    /// The broker's metrics collector is off, so it lists none at all.
+    pub stats_disabled: bool,
+}
+
+impl Roster {
+    /// A roster of `kind` with no rows.
+    pub fn empty(kind: RosterKind, own_only: bool, stats_disabled: bool) -> Self {
+        let rows = match kind {
+            RosterKind::Connections => RosterRows::Connections(Vec::new()),
+            RosterKind::Consumers => RosterRows::Consumers(Vec::new()),
+        };
+        Self {
+            rows,
+            own_only,
+            stats_disabled,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.rows {
+            RosterRows::Connections(rows) => rows.len(),
+            RosterRows::Consumers(rows) => rows.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// One client connection in the Connections tab. Any figure can be missing:
+/// the broker leaves out what it doesn't know.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClientConnection {
+    /// The broker's name for it: the `peer -> broker` address pair.
+    pub name: String,
+    /// The client's own name for the connection, when it gave one.
+    pub client_name: Option<String>,
+    pub user: Option<String>,
+    /// The client's `host:port`.
+    pub peer: Option<String>,
+    pub channels: Option<u64>,
+    /// `running`, `blocked`, `flow`, `closing`, …
+    pub state: Option<String>,
+    pub connected_at: Option<OffsetDateTime>,
+    /// Bytes per second received from the client. The broker's smoothed
+    /// rates can dip below zero.
+    pub recv_rate: Option<f64>,
+    /// Bytes per second sent to the client.
+    pub send_rate: Option<f64>,
+}
+
+impl ClientConnection {
+    /// The name to show: the client's own, else the broker's address pair.
+    pub fn display_name(&self) -> &str {
+        self.client_name.as_deref().unwrap_or(&self.name)
+    }
+}
+
+/// One consumer in the Consumers tab.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueConsumer {
+    pub queue: String,
+    pub tag: String,
+    /// The channel it consumes on: the client's `host:port` and the channel
+    /// number.
+    pub channel: Option<String>,
+    /// Whether the broker waits for acks (`false` for an auto-ack consumer).
+    pub ack_required: Option<bool>,
+    /// The channel's prefetch limit; `0` means unlimited.
+    pub prefetch: Option<u64>,
+    pub active: Option<bool>,
+    /// Why it is or isn't receiving: `up`, `single_active`, `waiting`, …
+    pub activity_status: Option<String>,
+}
+
 /// The interface every broker implements. The connection actor owns one of
 /// these as a `Box<dyn BrokerConnection>` and calls it in response to commands.
 #[async_trait]
@@ -1017,6 +1134,13 @@ pub trait BrokerConnection: Send {
     /// off via [`Capabilities::can_dashboard`]).
     async fn stats(&mut self) -> anyhow::Result<BrokerStats> {
         anyhow::bail!("this broker does not support a stats dashboard")
+    }
+
+    /// Fetch the connections or consumers roster (RabbitMQ, from its
+    /// management API). Asked for only while its tab is focused. Default:
+    /// unsupported (gated off via [`Capabilities::lists_clients`]).
+    async fn roster(&mut self, _kind: RosterKind) -> anyhow::Result<Roster> {
+        anyhow::bail!("this broker does not list its clients")
     }
 
     /// Peek a bounded batch of the messages currently sitting in a queue (AMQP
@@ -1283,6 +1407,42 @@ mod tests {
         // doesn't. Both destination browsers peek queues; Redis has none.
         assert!(r.auto_refresh() && rmq.auto_refresh() && !a.auto_refresh());
         assert!(a.peeks_queues() && rmq.peeks_queues() && !r.peeks_queues());
+
+        // Only RabbitMQ lists its clients, through the management API that
+        // also gives it the dashboard.
+        assert!(!rmq.lists_clients() && !a.lists_clients() && !r.lists_clients());
+        let probed = Capabilities {
+            can_dashboard: true,
+            ..Capabilities::rabbitmq()
+        };
+        assert!(probed.lists_clients());
+    }
+
+    #[test]
+    fn a_roster_knows_its_rows() {
+        let empty = Roster::empty(RosterKind::Consumers, true, false);
+        assert!(matches!(&empty.rows, RosterRows::Consumers(rows) if rows.is_empty()));
+        assert!(empty.is_empty() && empty.own_only && !empty.stats_disabled);
+        let empty = Roster::empty(RosterKind::Connections, false, true);
+        assert!(matches!(&empty.rows, RosterRows::Connections(rows) if rows.is_empty()));
+        assert!(empty.stats_disabled);
+        let roster = Roster {
+            rows: RosterRows::Connections(vec![ClientConnection::default(); 2]),
+            own_only: false,
+            stats_disabled: false,
+        };
+        assert_eq!(roster.len(), 2);
+        assert!(!roster.is_empty());
+        assert_eq!(RosterKind::Connections.noun(), "connections");
+        assert_eq!(RosterKind::Consumers.noun(), "consumers");
+
+        let mut conn = ClientConnection {
+            name: "172.17.0.1:56648 -> 172.17.0.2:5672".into(),
+            ..Default::default()
+        };
+        assert_eq!(conn.display_name(), "172.17.0.1:56648 -> 172.17.0.2:5672");
+        conn.client_name = Some("orders-api".into());
+        assert_eq!(conn.display_name(), "orders-api");
     }
 
     #[test]

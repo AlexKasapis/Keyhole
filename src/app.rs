@@ -41,7 +41,7 @@ use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle, SpawnParam
 use crate::broker::factory::connection_for;
 use crate::broker::{
     BrokerEvent, BrokerStats, BrokerType, BrowsePage, Capabilities, ConnId, DestinationList,
-    ExchangeType, InspectReq, SubSpec, ValueType, ValueView,
+    ExchangeType, InspectReq, Roster, RosterKind, SubSpec, ValueType, ValueView,
 };
 use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;

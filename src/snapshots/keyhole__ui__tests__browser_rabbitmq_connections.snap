@@ -1,0 +1,44 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 160, 40)"
+---
+┌ Server  ● connected ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ rabbit · 127.0.0.1:5672 · vhost shop                                                                                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Destinations ────────────────────────────────────────────────────────────────┐┌ orders ──────────────────────────────────────────────────────────────────────┐
+│  Name                    Kind        Msgs  Ready/Unacked  Consumers      Rate││Type       classic queue                                                      │
+│▶ orders                  queue       1980        1960/20          2     9.6/s││Messages   1980 (1960 ready · 20 unacked)                                     │
+│  payments                quorum         3            3/0          0         —││Consumers  2                                                                  │
+│  audit                   stream         0            0/0          0         —││Publish    9.6/s                                                              │
+│  amq.direct              direct                                             —││                                                                              │
+│  amq.fanout              fanout                                             —││Press Enter to peek its messages. RabbitMQ puts each one back on the queue,   │
+│  amq.headers             headers                                            —││flagged redelivered.                                                          │
+│  amq.rabbitmq.trace      topic                                              —││                                                                              │
+│  keyhole.demo            topic                                         19.6/s││Tailing a queue would consume its messages. To watch them, tap an exchange    │
+│                                                                              ││that routes to it.                                                            │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+┌ Details │ Connections │ Consumers │ Tail ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Connections (3)                                                                                                                                              │
+│ Name                                                                             Peer                  User       Chan State           Recv        Send  Age │
+│ keyhole-dev-rabbitmq-0                                                           172.18.0.1:40112      keyhole       1 running      182 B/s   2.0 KiB/s   3m │
+│ 172.18.0.1:40098 -> 172.18.0.4:5672                                              172.18.0.1:40098      keyhole       1 running    1.8 KiB/s       0 B/s   2h │
+│ orders-api                                                                       10.0.4.17:51234       orders        4 blocked            —           —   2d │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Tab nav · ? help

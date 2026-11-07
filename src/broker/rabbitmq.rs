@@ -19,26 +19,16 @@
 //! Redis dedicated-socket model) so the returned stream is `'static` and the
 //! actor's main connection stays free for liveness checks.
 //!
-//! Listing queues and exchanges, peeking and stats need the HTTP management API
-//! ([`mgmt`]), which `connect` probes after the AMQP login. A failed probe leaves
-//! the connection usable for tails, without the stats band.
+//! Listing queues and exchanges, peeking, stats and the connection and consumer
+//! rosters need the HTTP management API ([`mgmt`]), which `connect` probes after
+//! the AMQP login. A failed probe leaves the connection usable for tails,
+//! without the stats band or the roster tabs.
 //!
 //! A **queue peek** ([`RabbitmqConnection::peek`]) is the one read that touches
 //! a real queue: the management API's `/get` takes the messages off the queue
 //! and, in browse mode, puts them straight back (`ack_requeue_true`) flagged
 //! `redelivered`. It only runs when the user opens a queue.
 
-// The browser lists queues and exchanges and peeks queues through the client,
-// and the stats band reads the overview and nodes; the connection/consumer
-// rosters use the rest of it in a later phase. `expect` fails the build once
-// everything is used, so this can't outlive its reason.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the connection/consumer rosters don't call the management client yet"
-    )
-)]
 mod mgmt;
 
 use std::collections::HashMap;
@@ -58,13 +48,14 @@ use lapin::types::FieldTable;
 use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
 
 use self::mgmt::{
-    AckMode, ApiError, ExchangeInfo, GetMessage, Management, MessageProperties, MgmtClient,
-    NodeInfo, Overview, QueueInfo,
+    AckMode, ApiError, ConnectionInfo, ConsumerInfo, ExchangeInfo, GetMessage, Management,
+    MessageProperties, MgmtClient, NodeInfo, Overview, QueueInfo,
 };
 use super::{
-    BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, Capabilities, DestKind,
-    DestinationInfo, DestinationList, ExchangeType, NodeHealth, Payload, PeekReq, QueueType,
-    RabbitmqStats, SubSpec, STREAM_PEEK_HINT,
+    BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, Capabilities, ClientConnection,
+    DestKind, DestinationInfo, DestinationList, ExchangeType, NodeHealth, Payload, PeekReq,
+    QueueConsumer, QueueType, RabbitmqStats, Roster, RosterKind, RosterRows, SubSpec,
+    STREAM_PEEK_HINT,
 };
 use crate::config::{PeekMode, RabbitmqProfile};
 
@@ -283,6 +274,53 @@ impl BrokerConnection for RabbitmqConnection {
         }
     }
 
+    /// The vhost's connections or consumers. Like the stats, this runs on the
+    /// stats clock (while its tab is focused), so it never re-probes. Without
+    /// the `monitoring` tag the API lists only the user's own; with the
+    /// metrics collector off it lists nothing, so nothing is asked.
+    async fn roster(&mut self, kind: RosterKind) -> anyhow::Result<Roster> {
+        let unavailable = self.unavailable();
+        // A failed probe answers here without touching the network.
+        let client = self
+            .mgmt
+            .client()
+            .map_err(|e| anyhow::anyhow!("{:#}", e.context(unavailable.clone())))?
+            .clone();
+        let probe = self.mgmt.probe();
+        let own_only = !probe.is_some_and(mgmt::Probe::can_monitor);
+        // With metrics off, connections come back `[]` and consumers as a
+        // 400, so an empty list would only mislead.
+        if probe.is_some_and(|p| p.stats_disabled) {
+            return Ok(Roster::empty(kind, own_only, true));
+        }
+        let fetched = tokio::task::spawn_blocking(move || -> anyhow::Result<RosterRows> {
+            Ok(match kind {
+                RosterKind::Connections => connection_rows(client.connections()?),
+                RosterKind::Consumers => consumer_rows(client.consumers()?),
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("the {} task failed: {e}", kind.noun()))?;
+        match fetched {
+            Ok(rows) => Ok(Roster {
+                rows,
+                own_only,
+                stats_disabled: false,
+            }),
+            // The node's metrics went off after the probe.
+            Err(e) if e.downcast_ref::<ApiError>().is_some_and(is_stats_refusal) => {
+                Ok(Roster::empty(kind, own_only, true))
+            }
+            Err(e) => {
+                // No reply at all: later refreshes fail fast until a re-probe.
+                if e.downcast_ref::<ApiError>().is_none() {
+                    self.mgmt.mark_unreachable(&e);
+                }
+                Err(anyhow::anyhow!("{:#}", e.context(unavailable)))
+            }
+        }
+    }
+
     /// Peek a queue through the management API's `/get`: browse mode puts the
     /// messages back (`ack_requeue_true`, which RabbitMQ flags `redelivered`),
     /// destructive mode removes them (`ack_requeue_false`). Bodies are capped at
@@ -401,6 +439,7 @@ fn node_health(n: NodeInfo) -> NodeHealth {
     NodeHealth {
         name: n.name,
         running: n.running,
+        uptime: n.uptime.map(|ms| ms / 1000),
         mem_used: n.mem_used,
         mem_limit: n.mem_limit,
         mem_alarm: n.mem_alarm,
@@ -433,6 +472,85 @@ fn is_stream_refusal(error: &ApiError) -> bool {
             .reason
             .as_deref()
             .is_some_and(|r| r.contains("basic.get not supported"))
+}
+
+/// Whether a refusal says the node's metrics collector is off: `/api/consumers`
+/// answers a 400 "Stats in management UI are disabled on this node" (4.4).
+fn is_stats_refusal(error: &ApiError) -> bool {
+    error.status == 400
+        && error
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("Stats in management UI are disabled"))
+}
+
+/// The Connections tab's rows, by name so they hold still between refreshes
+/// (the API lists them in no set order).
+fn connection_rows(rows: Vec<ConnectionInfo>) -> RosterRows {
+    let mut rows: Vec<ClientConnection> = rows.into_iter().map(client_connection).collect();
+    rows.sort_by(|a, b| {
+        a.display_name()
+            .cmp(b.display_name())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    RosterRows::Connections(rows)
+}
+
+/// The Consumers tab's rows, by queue and then consumer tag.
+fn consumer_rows(rows: Vec<ConsumerInfo>) -> RosterRows {
+    let mut rows: Vec<QueueConsumer> = rows.into_iter().map(queue_consumer).collect();
+    rows.sort_by(|a, b| (&a.queue, &a.tag, &a.channel).cmp(&(&b.queue, &b.tag, &b.channel)));
+    RosterRows::Consumers(rows)
+}
+
+/// A `/api/vhosts/{vhost}/connections` row for the Connections tab.
+fn client_connection(c: ConnectionInfo) -> ClientConnection {
+    ClientConnection {
+        client_name: c.user_provided_name.filter(|n| !n.is_empty()),
+        user: c.user,
+        peer: c.peer_host.map(|host| peer_address(&host, c.peer_port)),
+        channels: c.channels,
+        state: c.state,
+        connected_at: c.connected_at.and_then(|ms| {
+            OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()
+        }),
+        recv_rate: c.recv_rate,
+        send_rate: c.send_rate,
+        name: c.name,
+    }
+}
+
+/// `host:port`, bracketing an IPv6 host; just the host without a port.
+fn peer_address(host: &str, port: Option<u16>) -> String {
+    match port {
+        Some(port) if host.contains(':') => format!("[{host}]:{port}"),
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    }
+}
+
+/// A `/api/consumers/{vhost}` row for the Consumers tab. The channel's name is
+/// `peer -> broker (n)`; the broker side is the same for every row, so it's
+/// shortened to `peer (n)`.
+fn queue_consumer(c: ConsumerInfo) -> QueueConsumer {
+    let details = c.channel_details;
+    let peer = details
+        .connection_name
+        .as_deref()
+        .map(|name| name.split(" -> ").next().unwrap_or(name).to_string());
+    let channel = match (peer, details.number) {
+        (Some(peer), Some(n)) => Some(format!("{peer} ({n})")),
+        _ => details.name,
+    };
+    QueueConsumer {
+        queue: c.queue.name,
+        tag: c.consumer_tag,
+        channel,
+        ack_required: c.ack_required,
+        prefetch: c.prefetch_count,
+        active: c.active,
+        activity_status: c.activity_status,
+    }
 }
 
 /// A message `/get` fetched from `queue`, as an event: the queue is the source,
@@ -1588,6 +1706,8 @@ mod tests {
             [NodeHealth {
                 name: "rabbit@19942ffdc832".into(),
                 running: Some(true),
+                // 653803 ms.
+                uptime: Some(653),
                 mem_used: Some(201_236_480),
                 mem_limit: Some(13_226_541_056),
                 mem_alarm: Some(false),
@@ -1652,8 +1772,8 @@ mod tests {
         let node = &stats.nodes[0];
         assert_eq!(node.running, Some(true));
         assert_eq!(
-            (node.mem_used, node.fd_used, node.disk_free),
-            (None, None, None)
+            (node.uptime, node.mem_used, node.fd_used, node.disk_free),
+            (None, None, None, None)
         );
         assert!(!stats.has_alarm(), "unknown alarms aren't alarms");
     }
@@ -1835,6 +1955,245 @@ mod tests {
             conn.mgmt.client().is_err(),
             "unusable until connect probes it"
         );
+    }
+
+    // -- rosters ------------------------------------------------------------
+
+    fn connections_of(json: &str) -> Vec<ClientConnection> {
+        match connection_rows(serde_json::from_str(json).expect("connections parse")) {
+            RosterRows::Connections(rows) => rows,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn consumers_of(json: &str) -> Vec<QueueConsumer> {
+        match consumer_rows(serde_json::from_str(json).expect("consumers parse")) {
+            RosterRows::Consumers(rows) => rows,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_rows_carry_the_client_name_peer_and_figures() {
+        for json in [fixture!("connections.v3"), fixture!("connections.v4")] {
+            let rows = connections_of(&json);
+            // By name, whatever order the broker sent (3.13 sent them reversed).
+            let names: Vec<&str> = rows.iter().map(ClientConnection::display_name).collect();
+            assert_eq!(names, ["spike-load-admin", "spike-load-mgmt"]);
+            let admin = &rows[0];
+            assert_eq!(admin.client_name.as_deref(), Some("spike-load-admin"));
+            assert_eq!(admin.user.as_deref(), Some("keyhole"));
+            // The broker's own name is the address pair, peer first.
+            let peer = admin.peer.as_deref().expect("peer");
+            assert!(admin.name.starts_with(&format!("{peer} -> ")), "{admin:?}");
+            assert_eq!(admin.channels, Some(3));
+            assert_eq!(admin.state.as_deref(), Some("running"));
+            assert!(admin.recv_rate.is_some() && admin.send_rate.is_some());
+            assert!(admin.connected_at.is_some());
+        }
+        let v4 = connections_of(&fixture!("connections.v4"));
+        let admin = &v4[0];
+        assert_eq!(admin.peer.as_deref(), Some("172.17.0.1:56648"));
+        assert_eq!(
+            (admin.recv_rate, admin.send_rate),
+            (Some(660.0), Some(1219.2))
+        );
+        // Milliseconds since the epoch.
+        assert_eq!(
+            admin.connected_at,
+            Some(OffsetDateTime::from_unix_timestamp_nanos(1_794_066_383_016_000_000).unwrap())
+        );
+        // A management user's own connection; none with metrics off.
+        let own = connections_of(&fixture!("connections.management.v4"));
+        assert_eq!(own.len(), 1);
+        assert_eq!(own[0].user.as_deref(), Some("spike-mgmt"));
+        assert!(connections_of(&fixture!("connections.no-metrics.v4")).is_empty());
+    }
+
+    #[test]
+    fn an_unnamed_connection_shows_the_brokers_name() {
+        let row = client_connection(
+            serde_json::from_str(
+                r#"{"name":"[::1]:5000 -> [::1]:5672","user_provided_name":"",
+                    "peer_host":"::1","peer_port":5000}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(row.client_name, None, "an empty name is no name");
+        assert_eq!(row.display_name(), "[::1]:5000 -> [::1]:5672");
+        assert_eq!(row.peer.as_deref(), Some("[::1]:5000"), "IPv6 is bracketed");
+        assert_eq!(row.connected_at, None);
+        assert_eq!(peer_address("10.0.0.1", None), "10.0.0.1");
+    }
+
+    #[test]
+    fn consumer_rows_shorten_the_channel_and_sort_by_queue() {
+        for json in [fixture!("consumers.v3"), fixture!("consumers.v4")] {
+            let rows = consumers_of(&json);
+            let queues: Vec<&str> = rows.iter().map(|c| c.queue.as_str()).collect();
+            assert_eq!(
+                queues,
+                [
+                    "spike.consumed",
+                    "spike.consumed",
+                    "spike.quorum.busy",
+                    "spike.quorum.busy"
+                ]
+            );
+            let manual = &rows[0];
+            assert_eq!(manual.tag, "spike-consumer-classic");
+            assert_eq!(manual.ack_required, Some(true));
+            assert_eq!(manual.prefetch, Some(10));
+            assert_eq!(manual.active, Some(true));
+            assert_eq!(manual.activity_status.as_deref(), Some("up"));
+            // `peer -> broker (1)` loses the broker side every row shares.
+            let channel = manual.channel.as_deref().unwrap();
+            assert!(
+                channel.ends_with(" (1)") && !channel.contains("->"),
+                "{channel}"
+            );
+            let auto = &rows[2];
+            assert_eq!(auto.tag, "spike-consumer-quorum");
+            assert_eq!((auto.ack_required, auto.prefetch), (Some(false), Some(0)));
+        }
+        let v4 = consumers_of(&fixture!("consumers.v4"));
+        assert_eq!(v4[0].channel.as_deref(), Some("172.17.0.1:56648 (1)"));
+        assert_eq!(v4[1].channel.as_deref(), Some("172.17.0.1:56656 (1)"));
+
+        // A consumer whose channel is gone keeps its row; without the
+        // connection's name the channel keeps its own.
+        let gone = queue_consumer(
+            serde_json::from_str(
+                r#"{"consumer_tag":"t","queue":{"name":"q"},"channel_details":[]}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!((gone.queue.as_str(), gone.channel), ("q", None));
+        let bare = queue_consumer(
+            serde_json::from_str(r#"{"consumer_tag":"t","channel_details":{"name":"a -> b (3)"}}"#)
+                .unwrap(),
+        );
+        assert_eq!(bare.channel.as_deref(), Some("a -> b (3)"));
+    }
+
+    #[tokio::test]
+    async fn a_monitoring_user_gets_every_connection() {
+        let (mut conn, server) = probed_as(
+            fixture!("whoami.monitoring.v3"),
+            "3.13.7",
+            false,
+            vec![(200, fixture!("connections.v3"))],
+        )
+        .await;
+        let roster = conn.roster(RosterKind::Connections).await.expect("roster");
+        let requests = server.join().unwrap();
+        assert!(!roster.own_only && !roster.stats_disabled);
+        assert!(matches!(&roster.rows, RosterRows::Connections(rows) if rows.len() == 2));
+        assert!(
+            requests[2].starts_with("GET /api/vhosts/%2F/connections?columns=name,"),
+            "{}",
+            requests[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_management_user_gets_its_own_consumers() {
+        let (mut conn, server) = probed_as(
+            fixture!("whoami.management.v4"),
+            "4.4.0",
+            false,
+            vec![(200, fixture!("consumers.v4"))],
+        )
+        .await;
+        let roster = conn.roster(RosterKind::Consumers).await.expect("roster");
+        let requests = server.join().unwrap();
+        assert!(roster.own_only, "no monitoring tag: only its own");
+        assert!(matches!(&roster.rows, RosterRows::Consumers(rows) if rows.len() == 4));
+        assert!(
+            requests[2].starts_with("GET /api/consumers/%2F?columns=consumer_tag,"),
+            "{}",
+            requests[2]
+        );
+    }
+
+    #[tokio::test]
+    async fn with_metrics_off_a_roster_says_so_without_asking() {
+        // The probe found the collector off. The broker would list no
+        // connections and refuse the consumers, so nothing is asked.
+        let (mut conn, server) = listing_conn(true, Vec::new()).await;
+        for kind in [RosterKind::Connections, RosterKind::Consumers] {
+            let roster = conn.roster(kind).await.expect("not a failure");
+            assert!(roster.stats_disabled && roster.is_empty(), "{roster:?}");
+        }
+        assert_eq!(server.join().unwrap().len(), 2, "the probe's requests only");
+        assert!(conn.mgmt.client().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_stats_disabled_refusal_reads_as_metrics_off() {
+        // The collector went off after the probe: `/api/consumers` says so
+        // with a 400.
+        let (mut conn, server) =
+            listing_conn(false, vec![(400, fixture!("error.400.stats-disabled.v4"))]).await;
+        let roster = conn
+            .roster(RosterKind::Consumers)
+            .await
+            .expect("not a failure");
+        server.join().unwrap();
+        assert!(roster.stats_disabled);
+        assert!(matches!(&roster.rows, RosterRows::Consumers(rows) if rows.is_empty()));
+        assert!(conn.mgmt.client().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_roster_before_a_good_probe_fails_fast_without_a_request() {
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let started = std::time::Instant::now();
+        let err = conn.roster(RosterKind::Connections).await.unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            err.to_string(),
+            "management API unavailable at http://rabbit.example.com:15672: the management \
+             API has not been probed yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_api_fails_later_rosters_fast_with_the_same_message() {
+        // The stub answers the probe, then stops listening.
+        let (mut conn, server) = listing_conn(false, Vec::new()).await;
+        server.join().unwrap();
+        let first = conn
+            .roster(RosterKind::Consumers)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            first.starts_with("management API unavailable at")
+                && first.contains("could not reach the management API"),
+            "{first}"
+        );
+        assert!(conn.mgmt.error().is_some(), "marked unreachable");
+        let again = conn
+            .roster(RosterKind::Connections)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert_eq!(again, first);
+    }
+
+    #[tokio::test]
+    async fn a_refused_roster_keeps_the_api_usable() {
+        let (mut conn, server) =
+            listing_conn(false, vec![(401, fixture!("error.401.not-management.v4"))]).await;
+        let err = conn
+            .roster(RosterKind::Connections)
+            .await
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(err.contains("lacks the `management` tag"), "{err}");
+        assert!(conn.mgmt.client().is_ok(), "a refusal is cheap to retry");
     }
 }
 
@@ -2726,5 +3085,96 @@ mod integration_tests {
         assert!(tap.channel_details.name.is_some());
 
         setup.close(200, "bye".into()).await.ok();
+    }
+
+    /// Ask for `kind` until `done` holds (the broker's stats behind the
+    /// lists land a moment after the connection or consumer appears).
+    async fn roster_until(
+        conn: &mut RabbitmqConnection,
+        kind: RosterKind,
+        done: impl Fn(&Roster) -> bool,
+    ) -> Roster {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let roster = conn.roster(kind).await.expect("roster");
+            if done(&roster) || tokio::time::Instant::now() > deadline {
+                return roster;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn rosters_list_this_connection_and_its_taps_consumer() {
+        // A profile name of its own, so this test's connections (named
+        // `keyhole-<profile>-<n>`) stand out from other tests'.
+        let mut profile = test_profile();
+        profile.name = unique("roster");
+        let prefix = format!("keyhole-{}-", profile.name);
+        let mut conn = connect_with(profile, "keyhole").await;
+        let exchange = unique("keyhole.it.roster");
+        declare_topic_exchange(&exchange).await;
+        // The tap opens a connection of its own and consumes a server-named
+        // queue (auto-ack).
+        let _tap = conn
+            .subscribe(SubSpec::Exchange {
+                exchange: exchange.clone(),
+                binding_key: "#".into(),
+            })
+            .await
+            .expect("exchange tap");
+
+        let ours = |rows: &[ClientConnection]| -> Vec<ClientConnection> {
+            rows.iter()
+                .filter(|r| {
+                    r.client_name
+                        .as_deref()
+                        .is_some_and(|n| n.starts_with(&prefix))
+                })
+                .cloned()
+                .collect()
+        };
+        let roster = roster_until(
+            &mut conn,
+            RosterKind::Connections,
+            |r| matches!(&r.rows, RosterRows::Connections(rows) if ours(rows).len() == 2),
+        )
+        .await;
+        // The test user is an administrator: every connection is listed.
+        assert!(!roster.own_only && !roster.stats_disabled);
+        let RosterRows::Connections(rows) = &roster.rows else {
+            panic!("{roster:?}")
+        };
+        let mine = ours(rows);
+        assert_eq!(mine.len(), 2, "this connection and the tap's: {rows:?}");
+        for row in &mine {
+            assert_eq!(row.display_name(), row.client_name.as_deref().unwrap());
+            assert_eq!(row.user.as_deref(), Some("keyhole"));
+            let peer = row.peer.as_deref().expect("a peer address");
+            assert!(row.name.starts_with(&format!("{peer} -> ")), "{row:?}");
+        }
+
+        let peers: Vec<String> = mine.iter().filter_map(|r| r.peer.clone()).collect();
+        let on_our_channel = |c: &QueueConsumer| {
+            c.channel
+                .as_deref()
+                .is_some_and(|ch| peers.iter().any(|p| ch.starts_with(&format!("{p} ("))))
+        };
+        let roster = roster_until(
+            &mut conn,
+            RosterKind::Consumers,
+            |r| matches!(&r.rows, RosterRows::Consumers(rows) if rows.iter().any(on_our_channel)),
+        )
+        .await;
+        let RosterRows::Consumers(rows) = &roster.rows else {
+            panic!("{roster:?}")
+        };
+        let tap = rows
+            .iter()
+            .find(|c| on_our_channel(c))
+            .unwrap_or_else(|| panic!("the tap's consumer is listed: {rows:?}"));
+        assert!(tap.queue.starts_with("amq.gen-"), "{tap:?}");
+        assert!(tap.tag.starts_with("keyhole-"), "{tap:?}");
+        assert_eq!(tap.ack_required, Some(false), "the tap auto-acks");
     }
 }

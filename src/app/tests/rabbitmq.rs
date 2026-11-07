@@ -1,4 +1,5 @@
 use super::*;
+use crate::broker::{ClientConnection, RosterRows};
 
 /// Tab from the keys pane onto the Tail anchor, type `spec` and press Enter.
 fn submit_on_tail_anchor(app: &mut App, spec: &str) {
@@ -754,9 +755,14 @@ async fn a_probed_management_api_adds_server_details_and_asks_for_stats() {
     let conn = app.active_conn().unwrap();
     assert_eq!(
         conn.panel_slots(),
-        vec![PanelTab::ServerDetails, PanelTab::Tail]
+        vec![
+            PanelTab::ServerDetails,
+            PanelTab::Connections,
+            PanelTab::Consumers,
+            PanelTab::Tail
+        ]
     );
-    assert_eq!(conn.panel_tab_count(), 2);
+    assert_eq!(conn.panel_tab_count(), 4);
     assert_eq!(conn.active_panel(), PanelTab::ServerDetails);
     assert!(conn.dashboard.in_flight);
 }
@@ -867,4 +873,284 @@ async fn a_failed_redis_stats_refresh_still_reports_every_time() {
     let conn = app.active_conn().unwrap();
     assert!(conn.dashboard.error.is_none());
     assert!(conn.dashboard.stats.is_some());
+}
+
+// -- rosters ----------------------------------------------------------------
+
+/// The roster kinds the commands asked for, in order.
+fn roster_requests(cmds: &[ConnCommand]) -> Vec<RosterKind> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            ConnCommand::RefreshRoster(kind) => Some(*kind),
+            _ => None,
+        })
+        .collect()
+}
+
+fn roster_reply(app: &mut App, kind: RosterKind, result: Result<Roster, String>) {
+    app.handle_event(AppEvent::RosterUpdated {
+        id: ConnId(1),
+        kind,
+        result,
+    });
+}
+
+/// A connections roster of `n` unnamed clients.
+fn connections_roster(n: usize, own_only: bool) -> Roster {
+    let rows = (0..n)
+        .map(|i| ClientConnection {
+            name: format!("10.0.0.{i}:5000 -> 10.0.0.99:5672"),
+            ..Default::default()
+        })
+        .collect();
+    Roster {
+        rows: RosterRows::Connections(rows),
+        own_only,
+        stats_disabled: false,
+    }
+}
+
+fn active_panel(app: &App) -> PanelTab {
+    app.active_conn().unwrap().active_panel()
+}
+
+#[tokio::test]
+async fn rabbitmq_slots_put_the_rosters_after_server_details_and_amqps_dont_change() {
+    // With the management API: Details, Connections, Consumers, the Tail
+    // anchor, then one tab per tail.
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_with_dashboard(&mut app);
+    submit_on_tail_anchor(&mut app, "exchange:ex");
+    let conn = app.active_conn().unwrap();
+    assert_eq!(
+        conn.panel_slots(),
+        [
+            PanelTab::ServerDetails,
+            PanelTab::Connections,
+            PanelTab::Consumers,
+            PanelTab::Tail,
+            PanelTab::Sub(0)
+        ]
+    );
+    assert_eq!(conn.panel_tab_count(), 5);
+    assert_eq!(
+        conn.active_panel(),
+        PanelTab::Sub(0),
+        "the new tap is focused"
+    );
+
+    // Without it: the anchor and the tails only.
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_capturing(&mut app);
+    submit_on_tail_anchor(&mut app, "exchange:ex");
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.panel_slots(), [PanelTab::Tail, PanelTab::Sub(0)]);
+    assert_eq!(conn.panel_tab_count(), 2);
+
+    // AMQP 1.0 never lists clients, even with stats.
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 1, "mq").await;
+    app.start_subscribe(SubSpec::Topic("t".into()));
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.panel_slots(), [PanelTab::Tail, PanelTab::Sub(0)]);
+    let conn = app.active_conn_mut().unwrap();
+    conn.caps.can_dashboard = true;
+    assert_eq!(
+        conn.panel_slots(),
+        [PanelTab::ServerDetails, PanelTab::Tail, PanelTab::Sub(0)]
+    );
+    assert_eq!(conn.panel_tab_count(), 3);
+}
+
+#[tokio::test]
+async fn a_roster_tab_asks_when_focused_then_on_the_stats_clock_and_others_ask_nothing() {
+    let (mut app, _rx) = test_app();
+    let mut cmds = connect_with_dashboard(&mut app);
+    stats_reply(&mut app, Ok(RabbitmqStats::default()));
+    // Server Details is selected: the clock asks for stats, not rosters.
+    reach_stats_tick(&mut app);
+    assert!(roster_requests(&sent(&mut cmds)).is_empty());
+
+    // Tab lands on the Tail anchor, which asks for nothing either.
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(active_panel(&app), PanelTab::Tail);
+    reach_stats_tick(&mut app);
+    assert!(roster_requests(&sent(&mut cmds)).is_empty());
+
+    // Shift-Tab steps back onto Consumers, which asks at once rather than
+    // stay blank until the next tick.
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(active_panel(&app), PanelTab::Consumers);
+    assert_eq!(roster_requests(&sent(&mut cmds)), [RosterKind::Consumers]);
+    assert!(app.active_conn().unwrap().rosters.consumers.in_flight);
+
+    // In flight: the clock skips its turn, so requests never stack.
+    reach_stats_tick(&mut app);
+    assert!(roster_requests(&sent(&mut cmds)).is_empty());
+    roster_reply(
+        &mut app,
+        RosterKind::Consumers,
+        Ok(Roster::empty(RosterKind::Consumers, false, false)),
+    );
+    assert!(!app.active_conn().unwrap().rosters.consumers.in_flight);
+    reach_stats_tick(&mut app);
+    assert_eq!(roster_requests(&sent(&mut cmds)), [RosterKind::Consumers]);
+    // A failure frees the next turn too.
+    roster_reply(&mut app, RosterKind::Consumers, Err("refused".into()));
+    reach_stats_tick(&mut app);
+    assert_eq!(roster_requests(&sent(&mut cmds)), [RosterKind::Consumers]);
+    roster_reply(
+        &mut app,
+        RosterKind::Consumers,
+        Ok(Roster::empty(RosterKind::Consumers, false, false)),
+    );
+
+    // Connections takes over; Consumers stops refreshing.
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(active_panel(&app), PanelTab::Connections);
+    assert_eq!(roster_requests(&sent(&mut cmds)), [RosterKind::Connections]);
+    roster_reply(
+        &mut app,
+        RosterKind::Connections,
+        Ok(connections_roster(1, false)),
+    );
+    reach_stats_tick(&mut app);
+    assert_eq!(roster_requests(&sent(&mut cmds)), [RosterKind::Connections]);
+    roster_reply(
+        &mut app,
+        RosterKind::Connections,
+        Ok(connections_roster(1, false)),
+    );
+
+    // Back on Server Details, nothing is listed any more.
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(active_panel(&app), PanelTab::ServerDetails);
+    reach_stats_tick(&mut app);
+    reach_stats_tick(&mut app);
+    assert!(roster_requests(&sent(&mut cmds)).is_empty());
+}
+
+#[tokio::test]
+async fn a_selected_roster_refreshes_only_on_the_browser() {
+    // Like MONITOR, the selected tab keeps refreshing while the keys pane
+    // has the keyboard, but not once the Browser is off screen.
+    let (mut app, _rx) = test_app();
+    let mut cmds = connect_with_dashboard(&mut app);
+    focus_panel(&mut app, PanelTab::Connections);
+    app.handle_key(ctrl_key(KeyCode::Up));
+    assert_eq!(app.active_conn().unwrap().focus, PaneFocus::Keys);
+    assert_eq!(active_panel(&app), PanelTab::Connections, "still selected");
+    sent(&mut cmds);
+    roster_reply(
+        &mut app,
+        RosterKind::Connections,
+        Ok(connections_roster(1, false)),
+    );
+    reach_stats_tick(&mut app);
+    assert_eq!(roster_requests(&sent(&mut cmds)), [RosterKind::Connections]);
+    roster_reply(
+        &mut app,
+        RosterKind::Connections,
+        Ok(connections_roster(1, false)),
+    );
+
+    app.screen = Screen::Home;
+    reach_stats_tick(&mut app);
+    assert!(roster_requests(&sent(&mut cmds)).is_empty());
+}
+
+#[tokio::test]
+async fn without_the_management_api_no_roster_is_ever_asked_for() {
+    let (mut app, _rx) = test_app();
+    let mut cmds = connect_capturing(&mut app);
+    for _ in 0..3 {
+        app.handle_key(key(KeyCode::Tab));
+        reach_stats_tick(&mut app);
+    }
+    assert!(roster_requests(&sent(&mut cmds)).is_empty());
+    assert!(app.active_conn().unwrap().roster_tab().is_none());
+}
+
+#[tokio::test]
+async fn a_repeated_roster_failure_reaches_the_footer_once() {
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_with_dashboard(&mut app);
+    focus_panel(&mut app, PanelTab::Connections);
+    app.status = None;
+    let dead = "management API unavailable at http://x:15672: could not reach the management API";
+    roster_reply(&mut app, RosterKind::Connections, Err(dead.into()));
+    let status = app.status.take().expect("the first failure is reported");
+    assert!(status.is_error);
+    assert_eq!(status.message, format!("[1] connections: {dead}"));
+    let panel = &app.active_conn().unwrap().rosters.connections;
+    assert_eq!(panel.error.as_deref(), Some(dead));
+    assert!(!panel.in_flight);
+
+    // The cached error comes back on every refresh: the footer stays quiet.
+    roster_reply(&mut app, RosterKind::Connections, Err(dead.into()));
+    assert!(app.status.is_none(), "the same failure isn't repeated");
+    // Each tab keeps its own.
+    roster_reply(&mut app, RosterKind::Consumers, Err(dead.into()));
+    let status = app.status.take().expect("reported for consumers");
+    assert_eq!(status.message, format!("[1] consumers: {dead}"));
+
+    // A success clears it, so a later failure is reported again.
+    roster_reply(
+        &mut app,
+        RosterKind::Connections,
+        Ok(connections_roster(2, false)),
+    );
+    let panel = &app.active_conn().unwrap().rosters.connections;
+    assert!(panel.error.is_none());
+    assert_eq!(panel.roster.as_ref().map(Roster::len), Some(2));
+    roster_reply(&mut app, RosterKind::Connections, Err(dead.into()));
+    assert!(app.status.is_some());
+
+    // A reply for a connection that's gone is dropped.
+    app.handle_event(AppEvent::RosterUpdated {
+        id: ConnId(9),
+        kind: RosterKind::Connections,
+        result: Err("late".into()),
+    });
+    assert!(app.status.take().unwrap().message.contains(dead));
+}
+
+#[tokio::test]
+async fn each_roster_scrolls_its_own_list_like_server_details() {
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_with_dashboard(&mut app);
+    focus_panel(&mut app, PanelTab::Connections);
+    roster_reply(
+        &mut app,
+        RosterKind::Connections,
+        Ok(connections_roster(30, false)),
+    );
+    let scrolls = |app: &App| {
+        let c = app.active_conn().unwrap();
+        (
+            c.dashboard.details_scroll,
+            c.rosters.connections.scroll,
+            c.rosters.consumers.scroll,
+        )
+    };
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(scrolls(&app), (0, 2, 0));
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(scrolls(&app), (0, 1, 0));
+    app.handle_key(key(KeyCode::End));
+    assert_eq!(scrolls(&app), (0, u16::MAX, 0));
+    app.handle_key(key(KeyCode::Home));
+    assert_eq!(scrolls(&app), (0, 0, 0));
+    // No feed controls on a roster tab.
+    app.handle_key(ch('x'));
+    assert_eq!(active_panel(&app), PanelTab::Connections);
+    assert_eq!(app.mode, InputMode::Normal);
+
+    focus_panel(&mut app, PanelTab::Consumers);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(scrolls(&app), (0, 0, 1));
+    focus_panel(&mut app, PanelTab::ServerDetails);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(scrolls(&app), (1, 0, 1));
 }

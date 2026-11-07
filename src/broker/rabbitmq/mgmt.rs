@@ -37,23 +37,21 @@ const PAGE_SIZE: usize = 500;
 
 /// The columns each endpoint is asked for. Unfiltered rows carry far more than
 /// keyhole shows (a node is ~12 KB).
-const QUEUE_COLUMNS: &str = "name,type,state,durable,auto_delete,exclusive,arguments,policy,\
-    effective_policy_definition,delivery_limit,messages,messages_ready,messages_unacknowledged,\
-    consumers,message_stats.publish_details.rate,message_stats.deliver_get_details.rate,\
-    message_stats.ack_details.rate,message_stats.redeliver_details.rate";
-const EXCHANGE_COLUMNS: &str = "name,type,durable,auto_delete,internal,arguments,policy,\
-    message_stats.publish_in_details.rate,message_stats.publish_out_details.rate";
+const QUEUE_COLUMNS: &str = "name,type,arguments,effective_policy_definition,delivery_limit,\
+    messages,messages_ready,messages_unacknowledged,consumers,message_stats.publish_details.rate,\
+    message_stats.deliver_get_details.rate,message_stats.ack_details.rate";
+const EXCHANGE_COLUMNS: &str = "name,type,internal,message_stats.publish_in_details.rate";
 /// The overview's columns for the stats band. `columns=` only trims the
 /// overview's top-level keys (a dotted path inside `message_stats` returns the
 /// whole group), but it still drops the listeners, contexts and exchange types.
-const OVERVIEW_COLUMNS: &str = "rabbitmq_version,erlang_version,cluster_name,node,disable_stats,\
+const OVERVIEW_COLUMNS: &str = "rabbitmq_version,erlang_version,cluster_name,disable_stats,\
     message_stats,queue_totals,object_totals";
 const NODE_COLUMNS: &str = "name,running,uptime,mem_used,mem_limit,mem_alarm,disk_free,\
     disk_free_limit,disk_free_alarm,fd_used,fd_total,partitions";
 const CONNECTION_COLUMNS: &str = "name,user_provided_name,user,peer_host,peer_port,channels,\
-    state,connected_at,protocol,recv_oct_details,send_oct_details";
+    state,connected_at,recv_oct_details,send_oct_details";
 const CONSUMER_COLUMNS: &str =
-    "consumer_tag,queue,channel_details,ack_required,prefetch_count,active,activity_status,exclusive";
+    "consumer_tag,queue,channel_details,ack_required,prefetch_count,active,activity_status";
 
 /// Percent-encode `s` as a single path segment (`/` → `%2F`, `#` → `%23`).
 fn segment(s: &str) -> String {
@@ -519,15 +517,14 @@ pub struct Whoami {
     pub tags: Vec<String>,
 }
 
-/// `/api/overview`. A `management`-only user gets no `node`, and per-user
-/// `object_totals` without `consumers`; with metrics off there are no
-/// `message_stats` or `queue_totals`.
+/// `/api/overview`. A `management`-only user gets per-user `object_totals`
+/// without `consumers`; with metrics off there are no `message_stats` or
+/// `queue_totals`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Overview {
     pub rabbitmq_version: Option<String>,
     pub erlang_version: Option<String>,
     pub cluster_name: Option<String>,
-    pub node: Option<String>,
     /// True when the node's metrics collector is off: counts and rates are
     /// missing everywhere.
     #[serde(default)]
@@ -549,14 +546,9 @@ pub struct MessageStats {
     pub deliver_get_rate: Option<f64>,
     #[serde(default, rename = "ack_details", deserialize_with = "rate")]
     pub ack_rate: Option<f64>,
-    #[serde(default, rename = "redeliver_details", deserialize_with = "rate")]
-    pub redeliver_rate: Option<f64>,
     /// Exchanges only: messages published into it.
     #[serde(default, rename = "publish_in_details", deserialize_with = "rate")]
     pub publish_in_rate: Option<f64>,
-    /// Exchanges only: messages it routed onward.
-    #[serde(default, rename = "publish_out_details", deserialize_with = "rate")]
-    pub publish_out_rate: Option<f64>,
 }
 
 /// `overview.queue_totals`.
@@ -571,9 +563,7 @@ pub struct QueueTotals {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ObjectTotals {
     pub queues: Option<u64>,
-    pub exchanges: Option<u64>,
     pub connections: Option<u64>,
-    pub channels: Option<u64>,
     pub consumers: Option<u64>,
 }
 
@@ -582,7 +572,7 @@ pub struct ObjectTotals {
 pub struct NodeInfo {
     pub name: String,
     pub running: Option<bool>,
-    /// Milliseconds.
+    /// Milliseconds since the node started.
     pub uptime: Option<u64>,
     pub mem_used: Option<u64>,
     pub mem_limit: Option<u64>,
@@ -605,18 +595,8 @@ pub struct QueueInfo {
     pub name: String,
     #[serde(default, rename = "type", deserialize_with = "or_default")]
     pub queue_type: QueueType,
-    #[serde(default, deserialize_with = "lenient")]
-    pub state: Option<String>,
-    #[serde(default, deserialize_with = "or_default")]
-    pub durable: bool,
-    #[serde(default, deserialize_with = "or_default")]
-    pub auto_delete: bool,
-    #[serde(default, deserialize_with = "or_default")]
-    pub exclusive: bool,
     #[serde(default, deserialize_with = "or_default")]
     pub arguments: Map<String, Value>,
-    #[serde(default, deserialize_with = "lenient")]
-    pub policy: Option<String>,
     #[serde(default, deserialize_with = "or_default")]
     pub effective_policy_definition: Map<String, Value>,
     /// 4.x only; 3.x has it in `arguments` or the policy, if anywhere.
@@ -650,17 +630,9 @@ pub struct ExchangeInfo {
     /// `direct`, `fanout`, `topic`, `headers`, or a plugin type (`x-…`).
     #[serde(default, rename = "type", deserialize_with = "or_default")]
     pub exchange_type: String,
-    #[serde(default, deserialize_with = "or_default")]
-    pub durable: bool,
-    #[serde(default, deserialize_with = "or_default")]
-    pub auto_delete: bool,
     /// Internal exchanges refuse client publishes.
     #[serde(default, deserialize_with = "or_default")]
     pub internal: bool,
-    #[serde(default, deserialize_with = "or_default")]
-    pub arguments: Map<String, Value>,
-    #[serde(default, deserialize_with = "lenient")]
-    pub policy: Option<String>,
     #[serde(default, deserialize_with = "or_default")]
     pub message_stats: MessageStats,
 }
@@ -681,8 +653,6 @@ pub struct GetMessage {
     pub exchange: String,
     #[serde(default)]
     pub routing_key: String,
-    /// Messages left in the queue after this one.
-    pub message_count: Option<u64>,
     /// `[]` rather than an object when the message has none.
     #[serde(default, deserialize_with = "object_or_empty")]
     pub properties: MessageProperties,
@@ -738,7 +708,6 @@ pub struct ConnectionInfo {
     pub state: Option<String>,
     /// Milliseconds since the epoch.
     pub connected_at: Option<u64>,
-    pub protocol: Option<String>,
     /// Bytes per second.
     #[serde(default, rename = "recv_oct_details", deserialize_with = "rate")]
     pub recv_rate: Option<f64>,
@@ -760,7 +729,6 @@ pub struct ConsumerInfo {
     pub prefetch_count: Option<u64>,
     pub active: Option<bool>,
     pub activity_status: Option<String>,
-    pub exclusive: Option<bool>,
 }
 
 /// The queue a consumer reads.
@@ -777,7 +745,6 @@ pub struct ChannelDetails {
     pub name: Option<String>,
     pub number: Option<u64>,
     pub connection_name: Option<String>,
-    pub user: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -950,15 +917,14 @@ mod tests {
         assert_eq!(v3.rabbitmq_version.as_deref(), Some("3.13.7"));
         assert_eq!(v3.erlang_version.as_deref(), Some("26.2.5.16"));
         assert_eq!(v3.cluster_name.as_deref(), Some("rabbit@19942ffdc832"));
-        assert!(v3.node.is_some() && !v3.disable_stats);
+        assert!(!v3.disable_stats);
         assert_eq!(v3.message_stats.publish_rate, Some(9.6));
         assert_eq!(v3.message_stats.deliver_get_rate, Some(14.4));
         assert_eq!(v3.message_stats.ack_rate, Some(4.8));
         assert_eq!(v3.queue_totals.messages, Some(1998));
         assert_eq!(v3.queue_totals.messages_unacknowledged, Some(21));
         assert_eq!(v3.object_totals.queues, Some(18));
-        assert_eq!(v3.object_totals.exchanges, Some(19));
-        assert_eq!(v3.object_totals.channels, Some(6));
+        assert_eq!(v3.object_totals.connections, Some(2));
 
         let v4: Overview = serde_json::from_str(fixture!("overview.v4")).unwrap();
         assert_eq!(v4.rabbitmq_version.as_deref(), Some("4.4.0"));
@@ -968,14 +934,13 @@ mod tests {
     }
 
     #[test]
-    fn overview_for_a_management_user_has_no_node_or_consumer_total() {
+    fn overview_for_a_management_user_has_no_consumer_total() {
         for json in [
             fixture!("overview.management.v3"),
             fixture!("overview.management.v4"),
         ] {
             let ov: Overview = serde_json::from_str(json).unwrap();
             assert!(ov.rabbitmq_version.is_some());
-            assert_eq!(ov.node, None);
             assert_eq!(ov.object_totals.consumers, None);
             assert!(ov.object_totals.connections.is_some());
         }
@@ -1029,13 +994,9 @@ mod tests {
             assert_eq!(consumed.consumers, Some(2));
             assert_eq!(consumed.messages_unacknowledged, Some(20));
             assert_eq!(consumed.message_stats.publish_rate, Some(consumed_rate));
-            assert_eq!(consumed.message_stats.redeliver_rate, Some(0.0));
-            assert!(consumed.durable && !consumed.exclusive && !consumed.auto_delete);
-            assert_eq!(consumed.state.as_deref(), Some("running"));
             let limited = queue(&page, "spike.quorum.limit");
             assert_eq!(limited.arguments.get("x-delivery-limit"), Some(&json!(3)));
             let policy = queue(&page, "spike.quorum.policy");
-            assert_eq!(policy.policy.as_deref(), Some("spike-dl"));
             assert_eq!(
                 policy.effective_policy_definition.get("delivery-limit"),
                 Some(&json!(5))
@@ -1133,8 +1094,6 @@ mod tests {
         );
         let odd = queue(&queues, "odd");
         assert_eq!(odd.queue_type, QueueType::Classic);
-        assert_eq!((&odd.state, &odd.policy), (&None, &None));
-        assert!(!odd.durable && !odd.auto_delete && !odd.exclusive);
         assert!(odd.arguments.is_empty() && odd.effective_policy_definition.is_empty());
         assert_eq!(odd.delivery_limit, None);
         let counts = [
@@ -1161,8 +1120,7 @@ mod tests {
             panic!("{:?}", exchanges.items)
         };
         assert_eq!(odd.exchange_type, "");
-        assert!(!odd.durable && !odd.auto_delete && !odd.internal);
-        assert!(odd.arguments.is_empty() && odd.policy.is_none());
+        assert!(!odd.internal);
         assert_eq!(odd.message_stats.publish_in_rate, None);
         assert_eq!(plain.exchange_type, "topic");
         assert!(plain.internal);
@@ -1177,16 +1135,12 @@ mod tests {
             let page: Page<ExchangeInfo> = page(json);
             let find = |name: &str| page.items.iter().find(|e| e.name == name).unwrap();
             assert_eq!(find("").exchange_type, "direct");
-            let fanout = find("amq.fanout");
-            assert!(fanout.durable && !fanout.auto_delete);
-            assert!(fanout.arguments.is_empty() && fanout.policy.is_none());
             assert_eq!(find("amq.fanout").exchange_type, "fanout");
             assert_eq!(find("amq.headers").exchange_type, "headers");
             assert!(find("amq.rabbitmq.trace").internal);
             let topic = find("spike.topic");
             assert_eq!(topic.exchange_type, "topic");
             assert_eq!(topic.message_stats.publish_in_rate, Some(topic_in));
-            assert_eq!(topic.message_stats.publish_out_rate, Some(topic_in * 2.0));
             // An exchange that never saw traffic has no `message_stats` at all.
             assert_eq!(find("amq.direct").message_stats.publish_in_rate, None);
         }
@@ -1212,7 +1166,6 @@ mod tests {
             assert_eq!(admin.channels, Some(3));
             assert_eq!(admin.state.as_deref(), Some("running"));
             assert!(admin.connected_at.is_some());
-            assert_eq!(admin.protocol.as_deref(), Some("AMQP 0-9-1"));
             assert!(admin.recv_rate.is_some() && admin.send_rate.is_some());
         }
         // A management-only user sees just its own connection.
@@ -1247,12 +1200,10 @@ mod tests {
             assert_eq!(manual.prefetch_count, Some(10));
             assert_eq!(manual.active, Some(true));
             assert_eq!(manual.activity_status.as_deref(), Some("up"));
-            assert_eq!(manual.exclusive, Some(false));
             let channel = &manual.channel_details;
             assert_eq!(channel.number, Some(1));
             assert!(channel.name.as_deref().unwrap().ends_with(" (1)"));
             assert!(channel.connection_name.is_some());
-            assert!(channel.user.is_some());
             let auto = consumers
                 .iter()
                 .find(|c| c.consumer_tag == "spike-consumer-quorum")
@@ -1277,7 +1228,6 @@ mod tests {
             assert!(full.redelivered);
             assert_eq!(full.exchange, "");
             assert_eq!(full.routing_key, "spike.classic");
-            assert_eq!(full.message_count, Some(2));
             let body = full.body().unwrap();
             assert_eq!(body.len() as u64, full.payload_bytes.unwrap());
             assert!(String::from_utf8(body).unwrap().contains("\"order_id\":42"));

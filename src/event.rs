@@ -12,7 +12,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::broker::actor::ConnHandle;
 use crate::broker::{
-    BrokerEvent, BrokerStats, BrowsePage, ConnId, DestinationList, SubSpec, ValueView,
+    BrokerEvent, BrokerStats, BrowsePage, ConnId, DestinationList, Roster, RosterKind, SubSpec,
+    ValueView,
 };
 use crate::recording::RecordingStatus;
 
@@ -73,6 +74,14 @@ pub enum AppEvent {
     StatsUpdated {
         id: ConnId,
         result: Result<BrokerStats, String>,
+    },
+    /// A refreshed connections or consumers roster (RabbitMQ), or why the
+    /// refresh failed. Every `RefreshRoster` gets exactly one, so the tab can
+    /// tell when its previous refresh is done.
+    RosterUpdated {
+        id: ConnId,
+        kind: RosterKind,
+        result: Result<Roster, String>,
     },
     /// A non-fatal error from a connection operation.
     ConnError {

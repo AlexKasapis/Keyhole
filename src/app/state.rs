@@ -12,7 +12,7 @@ use crate::broker::actor::{ConnCommand, ConnHandle};
 pub use crate::broker::DestKind;
 use crate::broker::{
     BrokerEvent, BrokerStats, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId,
-    DestinationInfo, EntryMeta, QueueType, SubSpec, Ttl, ValueType, ValueView,
+    DestinationInfo, EntryMeta, QueueType, Roster, RosterKind, SubSpec, Ttl, ValueType, ValueView,
 };
 use crate::config::{ConnectionConfig, PeekMode};
 
@@ -180,6 +180,10 @@ pub enum PanelTab {
     /// network with the connected-client list; RabbitMQ publish/deliver
     /// rates). The leftmost tab; passive (no input, no feed).
     ServerDetails,
+    /// RabbitMQ's client connections; refreshed only while focused.
+    Connections,
+    /// RabbitMQ's consumers; refreshed only while focused.
+    Consumers,
     /// Read-only command console: type a command, Enter to run.
     Console,
     /// Server-wide MONITOR feed; live only while this tab is focused.
@@ -192,6 +196,17 @@ pub enum PanelTab {
     Tail,
     /// A live pub/sub or stream tail at `subs[idx]`.
     Sub(usize),
+}
+
+impl PanelTab {
+    /// The roster a Connections or Consumers tab shows.
+    pub fn roster_kind(self) -> Option<RosterKind> {
+        match self {
+            PanelTab::Connections => Some(RosterKind::Connections),
+            PanelTab::Consumers => Some(RosterKind::Consumers),
+            _ => None,
+        }
+    }
 }
 
 /// How a status-bar notification behaves over time.
@@ -1095,6 +1110,43 @@ fn push_capped(buf: &mut VecDeque<u64>, value: u64) {
     buf.push_back(value);
 }
 
+/// One roster tab's state (Connections or Consumers): the last roster, why
+/// the last refresh failed, the in-flight gate and the list's scroll.
+#[derive(Debug, Default)]
+pub struct RosterPanel {
+    pub roster: Option<Roster>,
+    /// Why the last refresh failed; cleared by the next one that succeeds.
+    pub error: Option<String>,
+    /// A `RefreshRoster` was sent and its reply hasn't arrived, so the next
+    /// one waits (the connection's actor is serial).
+    pub in_flight: bool,
+    /// Scroll offset (rows from the top) of the list.
+    pub scroll: u16,
+}
+
+/// The Connections and Consumers tabs' state (RabbitMQ).
+#[derive(Debug, Default)]
+pub struct Rosters {
+    pub connections: RosterPanel,
+    pub consumers: RosterPanel,
+}
+
+impl Rosters {
+    pub fn get(&self, kind: RosterKind) -> &RosterPanel {
+        match kind {
+            RosterKind::Connections => &self.connections,
+            RosterKind::Consumers => &self.consumers,
+        }
+    }
+
+    pub fn get_mut(&mut self, kind: RosterKind) -> &mut RosterPanel {
+        match kind {
+            RosterKind::Connections => &mut self.connections,
+            RosterKind::Consumers => &mut self.consumers,
+        }
+    }
+}
+
 /// An open connection plus its per-connection browse / inspect / dashboard
 /// state, each grouped into a cohesive sub-struct.
 pub struct Connection {
@@ -1108,6 +1160,8 @@ pub struct Connection {
     pub inspector: ValueInspector,
     /// Server-statistics dashboard band — populated for Redis.
     pub dashboard: StatsPanel,
+    /// The Connections and Consumers tabs — RabbitMQ with its management API.
+    pub rosters: Rosters,
     /// Destination list (left pane) — AMQP 1.0's curated list or RabbitMQ's
     /// listed queues and exchanges.
     pub destinations: DestinationBrowser,
@@ -1141,6 +1195,7 @@ impl Connection {
             browser: KeyBrowser::new(),
             inspector: ValueInspector::default(),
             dashboard: StatsPanel::default(),
+            rosters: Rosters::default(),
             destinations: DestinationBrowser::default(),
             peek: PeekInspector::default(),
             subs: Vec::new(),
@@ -1248,6 +1303,18 @@ impl Connection {
         // A dropped command (a full inbox) gets no reply, so it mustn't block
         // the next refresh.
         self.dashboard.in_flight = self.handle.send(ConnCommand::RefreshStats);
+    }
+
+    /// Ask the broker for a fresh `kind` roster, unless one is already on its
+    /// way: the reply ([`crate::event::AppEvent::RosterUpdated`]) clears the
+    /// gate, so requests never queue up on the serial actor.
+    pub fn request_roster(&mut self, kind: RosterKind) {
+        let panel = self.rosters.get_mut(kind);
+        if panel.in_flight {
+            return;
+        }
+        // A dropped command gets no reply, so it mustn't block the next one.
+        panel.in_flight = self.handle.send(ConnCommand::RefreshRoster(kind));
     }
 
     /// Advance the Browser's auto-refresh clock by one tick, and say whether a
@@ -1554,12 +1621,15 @@ impl Connection {
         // AMQP / RabbitMQ have no Redis anchors (no console/monitor/keyspace).
         // Their bottom panel is a single Tail anchor (an input to start a
         // topic/queue tail or an exchange tap) followed by one tab per live
-        // tail, behind Server Details when the broker reports stats (RabbitMQ
-        // with a working management API).
+        // tail. RabbitMQ with a working management API puts Server Details,
+        // Connections and Consumers in front of it.
         if !self.caps.uses_key_scan() {
             let mut slots = Vec::new();
             if self.caps.can_dashboard {
                 slots.push(PanelTab::ServerDetails);
+            }
+            if self.caps.lists_clients() {
+                slots.extend([PanelTab::Connections, PanelTab::Consumers]);
             }
             slots.push(PanelTab::Tail);
             slots.extend((0..self.subs.len()).map(PanelTab::Sub));
@@ -1587,12 +1657,15 @@ impl Connection {
     }
 
     /// Number of tabs in the bottom panel. AMQP / RabbitMQ: a single Tail anchor
-    /// (after Server Details, with stats) plus one per live tail. Redis: the
-    /// six fixed anchors plus one per pub/sub or stream tail (MONITOR/keyspace
-    /// tails have no tab of their own).
+    /// (after Server Details, Connections and Consumers, with the management
+    /// API) plus one per live tail. Redis: the six fixed anchors plus one per
+    /// pub/sub or stream tail (MONITOR/keyspace tails have no tab of their own).
     pub fn panel_tab_count(&self) -> usize {
         if !self.caps.uses_key_scan() {
-            return usize::from(self.caps.can_dashboard) + 1 + self.subs.len();
+            return usize::from(self.caps.can_dashboard)
+                + 2 * usize::from(self.caps.lists_clients())
+                + 1
+                + self.subs.len();
         }
         6 + self
             .subs
@@ -1610,6 +1683,11 @@ impl Connection {
     pub fn active_panel(&self) -> PanelTab {
         let slots = self.panel_slots();
         slots[self.panel_tab.min(slots.len() - 1)]
+    }
+
+    /// The roster the focused tab shows, if it's Connections or Consumers.
+    pub fn roster_tab(&self) -> Option<RosterKind> {
+        self.active_panel().roster_kind()
     }
 
     /// The MONITOR tail, if one is live (only while its tab is focused).
@@ -1633,7 +1711,12 @@ impl Connection {
             PanelTab::Monitor => self.monitor_sub(),
             PanelTab::Keyspace => self.keyspace_sub(),
             PanelTab::Sub(i) => self.subs.get(i),
-            PanelTab::ServerDetails | PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
+            PanelTab::ServerDetails
+            | PanelTab::Connections
+            | PanelTab::Consumers
+            | PanelTab::Console
+            | PanelTab::PubSub
+            | PanelTab::Tail => None,
         }
     }
 
@@ -1650,7 +1733,12 @@ impl Connection {
                 .iter_mut()
                 .find(|s| matches!(s.spec, SubSpec::Keyspace { .. })),
             PanelTab::Sub(i) => self.subs.get_mut(i),
-            PanelTab::ServerDetails | PanelTab::Console | PanelTab::PubSub | PanelTab::Tail => None,
+            PanelTab::ServerDetails
+            | PanelTab::Connections
+            | PanelTab::Consumers
+            | PanelTab::Console
+            | PanelTab::PubSub
+            | PanelTab::Tail => None,
         }
     }
 

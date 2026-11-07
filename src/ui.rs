@@ -232,10 +232,12 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                         ("Ctrl-L", "clear"),
                         ("Tab", "nav"),
                     ]),
-                    // The Server Details tab is a passive overview: ↑↓ scroll its
-                    // client list (basic nav, not shown) — there is no feed to
-                    // play/pause, record or close.
-                    Some(PanelTab::ServerDetails) => owned(&[("Tab", "nav"), ("?", "help")]),
+                    // Server Details, Connections and Consumers are passive
+                    // lists: ↑↓ scroll them (basic nav, not shown) — there is
+                    // no feed to play/pause, record or close.
+                    Some(PanelTab::ServerDetails | PanelTab::Connections | PanelTab::Consumers) => {
+                        owned(&[("Tab", "nav"), ("?", "help")])
+                    }
                     // A live-feed tab (Monitor / Keyspace / a pub-sub or stream
                     // tail): it follows newest (not scrollable). p/r play-pause /
                     // record it; only a runtime tail (`Sub`) can be closed with x.
@@ -368,9 +370,9 @@ mod tests {
     };
     use crate::broker::actor::mock;
     use crate::broker::{
-        BrokerEvent, BrokerStats, ClientInfo, ConnId, DestinationList, EntryMeta, NodeHealth,
-        Payload, PayloadEncoding, RabbitmqStats, ServerStats, StreamEntry, SubSpec, Ttl, ValueType,
-        ValueView,
+        BrokerEvent, BrokerStats, ClientConnection, ClientInfo, ConnId, DestinationList, EntryMeta,
+        NodeHealth, Payload, PayloadEncoding, QueueConsumer, RabbitmqStats, Roster, RosterKind,
+        RosterRows, ServerStats, StreamEntry, SubSpec, Ttl, ValueType, ValueView,
     };
     use crate::config::Config;
     use crate::event::AppEvent;
@@ -2305,6 +2307,7 @@ mod tests {
             nodes: vec![NodeHealth {
                 name: "rabbit@19942ffdc832".into(),
                 running: Some(true),
+                uptime: Some(653),
                 mem_used: Some(201_236_480),
                 mem_limit: Some(13_226_541_056),
                 mem_alarm: Some(false),
@@ -2489,6 +2492,277 @@ mod tests {
             result: Ok(BrokerStats::Rabbitmq(alarmed)),
         });
         assert!(screen_text(&mut app).contains("● alarm"));
+    }
+
+    // -- rosters ------------------------------------------------------------
+
+    /// `secs` before the pinned test clock.
+    fn ago(secs: i64) -> Option<OffsetDateTime> {
+        Some(time::macros::datetime!(2026 - 06 - 19 12:34:56 UTC) - time::Duration::seconds(secs))
+    }
+
+    /// A broker's connections: keyhole's own (named), an unnamed publisher, and
+    /// a blocked client whose rates the broker didn't report.
+    fn sample_connections(own_only: bool) -> Roster {
+        let conn = |name: &str, client: Option<&str>, user: &str, channels, state: &str| {
+            ClientConnection {
+                name: name.into(),
+                client_name: client.map(str::to_string),
+                user: Some(user.into()),
+                peer: name.split(" -> ").next().map(str::to_string),
+                channels: Some(channels),
+                state: Some(state.into()),
+                ..Default::default()
+            }
+        };
+        let rows = vec![
+            ClientConnection {
+                connected_at: ago(185),
+                recv_rate: Some(182.4),
+                send_rate: Some(2_048.0),
+                ..conn(
+                    "172.18.0.1:40112 -> 172.18.0.4:5672",
+                    Some("keyhole-dev-rabbitmq-0"),
+                    "keyhole",
+                    1,
+                    "running",
+                )
+            },
+            ClientConnection {
+                connected_at: ago(7_400),
+                recv_rate: Some(1_843.2),
+                send_rate: Some(-0.4),
+                ..conn(
+                    "172.18.0.1:40098 -> 172.18.0.4:5672",
+                    None,
+                    "keyhole",
+                    1,
+                    "running",
+                )
+            },
+            ClientConnection {
+                connected_at: ago(190_000),
+                ..conn(
+                    "10.0.4.17:51234 -> 172.18.0.4:5672",
+                    Some("orders-api"),
+                    "orders",
+                    4,
+                    "blocked",
+                )
+            },
+        ];
+        Roster {
+            rows: RosterRows::Connections(rows),
+            own_only,
+            stats_disabled: false,
+        }
+    }
+
+    /// Consumers: a manual-ack worker, keyhole's own tap (auto-ack, on a
+    /// server-named queue) and a single-active consumer's standby.
+    fn sample_consumers() -> Roster {
+        let rows = vec![
+            QueueConsumer {
+                queue: "keyhole.demo.orders".into(),
+                tag: "orders-worker-1".into(),
+                channel: Some("10.0.4.17:51234 (1)".into()),
+                ack_required: Some(true),
+                prefetch: Some(10),
+                active: Some(true),
+                activity_status: Some("up".into()),
+            },
+            QueueConsumer {
+                queue: "amq.gen-JzTY20BRgKO-HjmUJj0wLg".into(),
+                tag: "keyhole-3".into(),
+                channel: Some("172.18.0.1:40130 (1)".into()),
+                ack_required: Some(false),
+                prefetch: Some(0),
+                active: Some(true),
+                activity_status: Some("up".into()),
+            },
+            QueueConsumer {
+                queue: "payments".into(),
+                tag: "payments-standby".into(),
+                channel: Some("10.0.4.17:51234 (2)".into()),
+                ack_required: Some(true),
+                prefetch: Some(1),
+                active: Some(false),
+                activity_status: Some("waiting".into()),
+            },
+        ];
+        Roster {
+            rows: RosterRows::Consumers(rows),
+            own_only: false,
+            stats_disabled: false,
+        }
+    }
+
+    /// [`rabbitmq_dashboard`] with the keyboard on the `tab` roster tab, which
+    /// shows `roster` (`None`: nothing has arrived yet).
+    async fn rabbitmq_roster(tab: PanelTab, roster: Option<Roster>) -> (App, Receiver<AppEvent>) {
+        let (mut app, rx) = rabbitmq_dashboard(sample_rabbitmq_stats()).await;
+        let conn = &mut app.connections[0];
+        conn.panel_tab = conn
+            .panel_slots()
+            .iter()
+            .position(|t| *t == tab)
+            .expect("a roster tab");
+        conn.focus = PaneFocus::Bottom;
+        let kind = tab.roster_kind().expect("a roster tab");
+        conn.rosters.get_mut(kind).roster = roster;
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_connections() {
+        // The Connections tab after Server Details: the client's own name, or
+        // the broker's address pair when it gave none; a state other than
+        // running stands out; missing rates read `—`.
+        let (mut app, _rx) =
+            rabbitmq_roster(PanelTab::Connections, Some(sample_connections(false))).await;
+        insta::assert_snapshot!(
+            "browser_rabbitmq_connections",
+            render_lines(&mut app, 160, 40)
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_consumers() {
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Consumers, Some(sample_consumers())).await;
+        insta::assert_snapshot!(
+            "browser_rabbitmq_consumers",
+            render_lines(&mut app, 160, 40)
+        );
+    }
+
+    #[tokio::test]
+    async fn roster_tabs_show_their_figures() {
+        let (mut app, _rx) =
+            rabbitmq_roster(PanelTab::Connections, Some(sample_connections(false))).await;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(text.contains("Connections (3)"), "{text}");
+        assert!(text.contains("keyhole-dev-rabbitmq-0"));
+        assert!(
+            text.contains("172.18.0.1:40098 -> 172.18.0.4:5672"),
+            "unnamed"
+        );
+        assert!(
+            text.contains("182 B/s") && text.contains("2.0 KiB/s"),
+            "{text}"
+        );
+        assert!(text.contains("0 B/s"), "a negative rate reads as zero");
+        for age in ["3m", "2h", "2d"] {
+            assert!(text.contains(&format!(" {age} │")), "{age} in {text}");
+        }
+        assert!(!text.contains("Your connections"));
+        // Like Server Details, only Tab and help in the footer.
+        assert!(text.contains("Tab nav · ? help"), "{text}");
+        assert!(!text.contains("play/pause"));
+
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Consumers, Some(sample_consumers())).await;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(text.contains("Consumers (3)"), "{text}");
+        assert!(text.contains("manual") && text.contains("auto"));
+        assert!(text.contains("waiting"), "the standby says why it's idle");
+        assert!(text.contains("10.0.4.17:51234 (2)"));
+    }
+
+    #[tokio::test]
+    async fn a_management_users_roster_is_labelled_as_its_own() {
+        let (mut app, _rx) =
+            rabbitmq_roster(PanelTab::Connections, Some(sample_connections(true))).await;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(text.contains("Your connections"), "the tab says so: {text}");
+        assert!(
+            text.contains("only your own: listing everyone's connections needs the monitoring tag"),
+            "{text}"
+        );
+        let mut own = sample_consumers();
+        own.own_only = true;
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Consumers, Some(own)).await;
+        assert!(render_lines(&mut app, 160, 40).contains("Your consumers"));
+    }
+
+    #[tokio::test]
+    async fn roster_tabs_explain_an_empty_or_missing_list() {
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Connections, None).await;
+        assert!(screen_text(&mut app).contains("Listing connections…"));
+
+        let none = Roster::empty(RosterKind::Consumers, false, false);
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Consumers, Some(none)).await;
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("Consumers (0)") && text.contains("no consumers"),
+            "{text}"
+        );
+
+        // With metrics off the broker lists nothing, and an empty list would
+        // mislead.
+        let off = Roster::empty(RosterKind::Connections, false, true);
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Connections, Some(off)).await;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(
+            text.contains("No connections: the broker's metrics collector is disabled"),
+            "{text}"
+        );
+        assert!(!text.contains("Connections ("));
+
+        // A failed refresh shows why, not the stale rows.
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Consumers, Some(sample_consumers())).await;
+        app.connections[0].rosters.consumers.error =
+            Some("management API unavailable at http://127.0.0.1:15672".into());
+        let text = render_lines(&mut app, 160, 40);
+        assert!(
+            text.contains("Can't list consumers: management API unavailable"),
+            "{text}"
+        );
+        assert!(text.contains("r in the list retries"));
+        assert!(!text.contains("orders-worker-1"), "no stale rows");
+    }
+
+    #[tokio::test]
+    async fn a_roster_scrolls_and_an_over_scroll_rests_at_the_end() {
+        let rows = (0..40)
+            .map(|i| ClientConnection {
+                name: format!("client-{i:02}"),
+                ..Default::default()
+            })
+            .collect();
+        let roster = Roster {
+            rows: RosterRows::Connections(rows),
+            own_only: false,
+            stats_disabled: false,
+        };
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Connections, Some(roster)).await;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(text.contains("client-00") && !text.contains("client-39"));
+
+        app.connections[0].rosters.connections.scroll = 5;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(!text.contains("client-04") && text.contains("client-05"));
+
+        app.connections[0].rosters.connections.scroll = u16::MAX;
+        let text = render_lines(&mut app, 160, 40);
+        assert!(text.contains("client-39"), "the last row shows: {text}");
+        assert!(!text.contains("client-00"));
+    }
+
+    #[tokio::test]
+    async fn roster_tabs_fit_a_narrow_terminal() {
+        let (mut app, _rx) =
+            rabbitmq_roster(PanelTab::Connections, Some(sample_connections(false))).await;
+        let text = render_lines(&mut app, 90, 24);
+        assert!(text.contains("Name") && text.contains("Peer") && text.contains("Age"));
+        assert!(
+            text.contains("keyhole-d… 172.18.0.1:40112"),
+            "the name gives way: {text}"
+        );
+        let (mut app, _rx) = rabbitmq_roster(PanelTab::Consumers, Some(sample_consumers())).await;
+        let text = render_lines(&mut app, 90, 24);
+        assert!(
+            text.contains("Prefetch") && text.contains("Active"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

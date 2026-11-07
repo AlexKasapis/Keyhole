@@ -20,8 +20,9 @@ use crate::app::{
     SubState, Subscription, ViewRow,
 };
 use crate::broker::{
-    BrokerEvent, BrokerStats, BrokerType, ClientInfo, ExchangeType, NodeHealth, Payload, QueueType,
-    RabbitmqStats, ServerStats, Ttl, ValueView, DESTINATION_LIST_CAP, STREAM_PEEK_HINT,
+    BrokerEvent, BrokerStats, BrokerType, ClientConnection, ClientInfo, ExchangeType, NodeHealth,
+    Payload, QueueConsumer, QueueType, RabbitmqStats, RosterKind, RosterRows, ServerStats, Ttl,
+    ValueView, DESTINATION_LIST_CAP, STREAM_PEEK_HINT,
 };
 use crate::config::{AnimationSpeed, ConnectionConfig, PeekMode};
 use crate::theme::Theme;
@@ -287,7 +288,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         amqp_destination_pane(frame, conn, focus, theme, table_area, vhost.as_deref());
         amqp_peek_pane(frame, conn, peek_mode, theme, value_area);
         if let Some(panel_area) = panel_area {
-            panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
+            panel_band(frame, conn, mode, &subscribe_buf, now, theme, panel_area);
         }
         return;
     }
@@ -297,7 +298,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     keys_value_pane(frame, conn, focus, theme, body_area);
 
     if let Some(panel_area) = panel_area {
-        panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
+        panel_band(frame, conn, mode, &subscribe_buf, now, theme, panel_area);
     }
 }
 
@@ -1458,6 +1459,7 @@ fn panel_band(
     conn: &Connection,
     mode: InputMode,
     subscribe_buf: &str,
+    now: OffsetDateTime,
     theme: &Theme,
     area: Rect,
 ) {
@@ -1487,6 +1489,17 @@ fn panel_band(
     let active = conn.active_panel();
     match active {
         PanelTab::ServerDetails => server_details_content(frame, conn, theme, content_area),
+        PanelTab::Connections => roster_content(
+            frame,
+            conn,
+            RosterKind::Connections,
+            now,
+            theme,
+            content_area,
+        ),
+        PanelTab::Consumers => {
+            roster_content(frame, conn, RosterKind::Consumers, now, theme, content_area)
+        }
         PanelTab::Console => console_content(frame, conn, mode, theme, content_area),
         PanelTab::PubSub => anchor_input(
             frame,
@@ -1560,6 +1573,9 @@ fn tab_spans(
     let mut spans = Vec::new();
     match slot {
         PanelTab::ServerDetails => spans.push(Span::styled("Details", base)),
+        PanelTab::Connections | PanelTab::Consumers => {
+            spans.push(Span::styled(roster_tab_label(slot, conn), base))
+        }
         PanelTab::Console => spans.push(Span::styled("Console", base)),
         PanelTab::Monitor => {
             spans.push(Span::styled("Monitor", base));
@@ -2154,8 +2170,8 @@ fn rabbitmq_totals_line(stats: &RabbitmqStats, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// RabbitMQ's node health line: per node, its memory, file descriptors, free
-/// disk and alarms (nodes split by a dim bar). Figures the broker didn't
+/// RabbitMQ's node health line: per node, its alarms, uptime, memory, file
+/// descriptors and free disk (nodes split by a dim bar). Figures the broker didn't
 /// report are left out. `/api/nodes` needs the `monitoring` tag, so without it
 /// the line says so.
 fn rabbitmq_nodes_line(stats: &RabbitmqStats, theme: &Theme) -> Line<'static> {
@@ -2203,6 +2219,11 @@ fn node_health_spans(node: &NodeHealth, theme: &Theme) -> Vec<Span<'static>> {
             Style::default()
         }
     };
+    if let Some(up) = node.uptime {
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("up ", theme.dim));
+        spans.push(Span::raw(human_duration(up)));
+    }
     if let Some(used) = node.mem_used {
         let value = match node.mem_limit {
             Some(limit) => format!("{} / {}", human_bytes(used), human_bytes(limit)),
@@ -2691,6 +2712,313 @@ fn client_line(client: &ClientInfo, width: usize, theme: &Theme) -> Line<'static
         Span::raw(" "),
         Span::styled(truncate(cmd, CLIENT_CMD_COL), theme.accent),
     ])
+}
+
+/// A roster tab's title. A user without the `monitoring` tag only sees its own
+/// connections and consumers, which the title says once a roster has told.
+fn roster_tab_label(slot: &PanelTab, conn: &Connection) -> &'static str {
+    let Some(kind) = slot.roster_kind() else {
+        return "";
+    };
+    let own_only = conn
+        .rosters
+        .get(kind)
+        .roster
+        .as_ref()
+        .is_some_and(|r| r.own_only);
+    match (kind, own_only) {
+        (RosterKind::Connections, false) => "Connections",
+        (RosterKind::Connections, true) => "Your connections",
+        (RosterKind::Consumers, false) => "Consumers",
+        (RosterKind::Consumers, true) => "Your consumers",
+    }
+}
+
+/// The Connections or Consumers tab (RabbitMQ): a title with the row count,
+/// a column header, and the rows, scrolled by the tab's offset (clamped here
+/// against the list height, like the Server Details client list). In place of
+/// the rows: why the last refresh failed, that the first is on its way, or
+/// that the broker's metrics collector is off (it then lists nothing).
+fn roster_content(
+    frame: &mut Frame,
+    conn: &Connection,
+    kind: RosterKind,
+    now: OffsetDateTime,
+    theme: &Theme,
+    area: Rect,
+) {
+    let panel = conn.rosters.get(kind);
+    let noun = kind.noun();
+    if let Some(error) = &panel.error {
+        let lines = vec![
+            Line::styled(format!("Can't list {noun}: {error}"), theme.warning),
+            Line::styled("r in the list retries the management API", theme.dim),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
+    let Some(roster) = panel.roster.as_ref() else {
+        frame.render_widget(
+            Paragraph::new(Line::styled(format!("Listing {noun}…"), theme.dim)),
+            area,
+        );
+        return;
+    };
+    if roster.stats_disabled {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                format!("No {noun}: the broker's metrics collector is disabled, so it lists none."),
+                theme.dim,
+            ))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    // The same one-column inset as Server Details.
+    let area = Rect {
+        x: area.x.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        ..area
+    };
+    let [title_area, columns_area, list_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    let heading = match kind {
+        RosterKind::Connections => "Connections ",
+        RosterKind::Consumers => "Consumers ",
+    };
+    let mut title = vec![
+        Span::styled(heading, theme.heading),
+        Span::styled(format!("({})", roster.len()), theme.dim),
+    ];
+    if roster.own_only {
+        title.push(Span::styled(
+            format!(" · only your own: listing everyone's {noun} needs the monitoring tag"),
+            theme.dim,
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(title)), title_area);
+    if roster.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(format!("no {noun}"), theme.dim)),
+            columns_area,
+        );
+        return;
+    }
+
+    let width = columns_area.width as usize;
+    let (header, rows): (Line, Vec<Line>) = match &roster.rows {
+        RosterRows::Connections(rows) => {
+            let cols = ConnectionCols::new(width);
+            (
+                cols.header(theme),
+                rows.iter().map(|c| cols.line(c, now, theme)).collect(),
+            )
+        }
+        RosterRows::Consumers(rows) => {
+            let cols = ConsumerCols::new(width);
+            (
+                cols.header(theme),
+                rows.iter().map(|c| cols.line(c, theme)).collect(),
+            )
+        }
+    };
+    frame.render_widget(Paragraph::new(header), columns_area);
+    // Window the list to the visible rows; an over-scroll rests at the bottom.
+    let height = list_area.height as usize;
+    let off = (panel.scroll as usize).min(rows.len().saturating_sub(height));
+    let visible: Vec<Line> = rows.into_iter().skip(off).take(height.max(1)).collect();
+    frame.render_widget(Paragraph::new(visible), list_area);
+}
+
+/// `text` cut and padded to `width` columns, left-aligned.
+fn cell(text: &str, width: usize) -> String {
+    pad_end(&truncate(text, width), width)
+}
+
+/// `text` cut to `width` columns, right-aligned.
+fn cell_right(text: &str, width: usize) -> String {
+    let text = truncate(text, width);
+    let pad = width.saturating_sub(UnicodeWidthStr::width(text.as_str()));
+    format!("{}{text}", " ".repeat(pad))
+}
+
+/// An optional text field, or `—` when it's missing or empty.
+fn or_dash(value: Option<&str>) -> &str {
+    value.filter(|v| !v.is_empty()).unwrap_or("—")
+}
+
+/// A byte rate for the Connections tab: `660 B/s`, `1.2 KiB/s`; `—` when the
+/// broker didn't report it, and `0 B/s` for a smoothed rate below zero.
+fn byte_rate(rate: Option<f64>) -> String {
+    rate.map_or_else(
+        || "—".to_string(),
+        |r| format!("{}/s", human_bytes(r.max(0.0).round() as u64)),
+    )
+}
+
+/// The Connections tab's column widths: the name takes what the fixed
+/// columns leave.
+struct ConnectionCols {
+    name: usize,
+}
+
+impl ConnectionCols {
+    const PEER: usize = 21;
+    const USER: usize = 10;
+    const CHANNELS: usize = 4;
+    const STATE: usize = 8;
+    const RATE: usize = 11;
+    const AGE: usize = 4;
+    /// The fixed columns plus the gaps between all eight.
+    const FIXED: usize =
+        Self::PEER + Self::USER + Self::CHANNELS + Self::STATE + 2 * Self::RATE + Self::AGE + 7;
+
+    fn new(width: usize) -> Self {
+        Self {
+            name: width.saturating_sub(Self::FIXED).max(10),
+        }
+    }
+
+    fn header(&self, theme: &Theme) -> Line<'static> {
+        let style = theme.header;
+        Line::from(vec![
+            Span::styled(cell("Name", self.name), style),
+            Span::raw(" "),
+            Span::styled(cell("Peer", Self::PEER), style),
+            Span::raw(" "),
+            Span::styled(cell("User", Self::USER), style),
+            Span::raw(" "),
+            Span::styled(cell_right("Chan", Self::CHANNELS), style),
+            Span::raw(" "),
+            Span::styled(cell("State", Self::STATE), style),
+            Span::raw(" "),
+            Span::styled(cell_right("Recv", Self::RATE), style),
+            Span::raw(" "),
+            Span::styled(cell_right("Send", Self::RATE), style),
+            Span::raw(" "),
+            Span::styled(cell_right("Age", Self::AGE), style),
+        ])
+    }
+
+    /// One connection: its name (the client's own, else the broker's address
+    /// pair), peer, user, channel count, state (a warning unless running),
+    /// byte rates and age.
+    fn line(&self, c: &ClientConnection, now: OffsetDateTime, theme: &Theme) -> Line<'static> {
+        let state = or_dash(c.state.as_deref());
+        let state_style = if matches!(state, "running" | "—") {
+            theme.dim
+        } else {
+            theme.warning
+        };
+        let age = c.connected_at.map_or_else(
+            || "—".to_string(),
+            |at| short_duration((now - at).whole_seconds().max(0) as u64),
+        );
+        Line::from(vec![
+            Span::raw(cell(c.display_name(), self.name)),
+            Span::raw(" "),
+            Span::styled(cell(or_dash(c.peer.as_deref()), Self::PEER), theme.dim),
+            Span::raw(" "),
+            Span::raw(cell(or_dash(c.user.as_deref()), Self::USER)),
+            Span::raw(" "),
+            Span::raw(cell_right(&count_label(c.channels), Self::CHANNELS)),
+            Span::raw(" "),
+            Span::styled(cell(state, Self::STATE), state_style),
+            Span::raw(" "),
+            Span::raw(cell_right(&byte_rate(c.recv_rate), Self::RATE)),
+            Span::raw(" "),
+            Span::raw(cell_right(&byte_rate(c.send_rate), Self::RATE)),
+            Span::raw(" "),
+            Span::styled(cell_right(&age, Self::AGE), theme.dim),
+        ])
+    }
+}
+
+/// The Consumers tab's column widths: the queue and the consumer tag share
+/// what the fixed columns leave.
+struct ConsumerCols {
+    queue: usize,
+    tag: usize,
+}
+
+impl ConsumerCols {
+    const CHANNEL: usize = 24;
+    const ACK: usize = 6;
+    const PREFETCH: usize = 8;
+    const ACTIVE: usize = 13;
+    /// The fixed columns plus the gaps between all six.
+    const FIXED: usize = Self::CHANNEL + Self::ACK + Self::PREFETCH + Self::ACTIVE + 5;
+
+    fn new(width: usize) -> Self {
+        let flex = width.saturating_sub(Self::FIXED).max(16);
+        Self {
+            queue: flex / 2,
+            tag: flex - flex / 2,
+        }
+    }
+
+    fn header(&self, theme: &Theme) -> Line<'static> {
+        let style = theme.header;
+        Line::from(vec![
+            Span::styled(cell("Queue", self.queue), style),
+            Span::raw(" "),
+            Span::styled(cell("Consumer tag", self.tag), style),
+            Span::raw(" "),
+            Span::styled(cell("Channel", Self::CHANNEL), style),
+            Span::raw(" "),
+            Span::styled(cell("Ack", Self::ACK), style),
+            Span::raw(" "),
+            Span::styled(cell_right("Prefetch", Self::PREFETCH), style),
+            Span::raw(" "),
+            Span::styled(cell("Active", Self::ACTIVE), style),
+        ])
+    }
+
+    /// One consumer: its queue, tag, channel, ack mode (`manual` or `auto`),
+    /// prefetch limit (`0` is unlimited) and whether it's receiving (a warning
+    /// when not).
+    fn line(&self, c: &QueueConsumer, theme: &Theme) -> Line<'static> {
+        let ack = match c.ack_required {
+            Some(true) => "manual",
+            Some(false) => "auto",
+            None => "—",
+        };
+        // The activity status says more than the flag when it isn't plain
+        // `up`: a single-active consumer's standby reads `waiting`.
+        let active = match (c.active, c.activity_status.as_deref()) {
+            (_, Some(status)) if status != "up" => status,
+            (Some(true), _) => "yes",
+            (Some(false), _) => "no",
+            (None, status) => or_dash(status),
+        };
+        let active_style = if c.active == Some(false) {
+            theme.warning
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::raw(cell(or_dash(Some(&c.queue)), self.queue)),
+            Span::raw(" "),
+            Span::styled(cell(or_dash(Some(&c.tag)), self.tag), theme.accent),
+            Span::raw(" "),
+            Span::styled(
+                cell(or_dash(c.channel.as_deref()), Self::CHANNEL),
+                theme.dim,
+            ),
+            Span::raw(" "),
+            Span::raw(cell(ack, Self::ACK)),
+            Span::raw(" "),
+            Span::raw(cell_right(&count_label(c.prefetch), Self::PREFETCH)),
+            Span::raw(" "),
+            Span::styled(cell(active, Self::ACTIVE), active_style),
+        ])
+    }
 }
 
 /// A compact, single-unit duration for the client list: `45s`, `12m`, `3h`,

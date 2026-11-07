@@ -1,0 +1,44 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 160, 40)"
+---
+┌ Server  ● connected ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ rabbit · 127.0.0.1:5672 · vhost shop                                                                                                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ Destinations ────────────────────────────────────────────────────────────────┐┌ orders ──────────────────────────────────────────────────────────────────────┐
+│  Name                    Kind        Msgs  Ready/Unacked  Consumers      Rate││Type       classic queue                                                      │
+│▶ orders                  queue       1980        1960/20          2     9.6/s││Messages   1980 (1960 ready · 20 unacked)                                     │
+│  payments                quorum         3            3/0          0         —││Consumers  2                                                                  │
+│  audit                   stream         0            0/0          0         —││Publish    9.6/s                                                              │
+│  amq.direct              direct                                             —││                                                                              │
+│  amq.fanout              fanout                                             —││Press Enter to peek its messages. RabbitMQ puts each one back on the queue,   │
+│  amq.headers             headers                                            —││flagged redelivered.                                                          │
+│  amq.rabbitmq.trace      topic                                              —││                                                                              │
+│  keyhole.demo            topic                                         19.6/s││Tailing a queue would consume its messages. To watch them, tap an exchange    │
+│                                                                              ││that routes to it.                                                            │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+┌ Details │ Connections │ Consumers │ Tail ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ Consumers (3)                                                                                                                                                │
+│ Queue                                              Consumer tag                                       Channel                  Ack    Prefetch Active        │
+│ keyhole.demo.orders                                orders-worker-1                                    10.0.4.17:51234 (1)      manual       10 yes           │
+│ amq.gen-JzTY20BRgKO-HjmUJj0wLg                     keyhole-3                                          172.18.0.1:40130 (1)     auto          0 yes           │
+│ payments                                           payments-standby                                   10.0.4.17:51234 (2)      manual        1 waiting       │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ Tab nav · ? help

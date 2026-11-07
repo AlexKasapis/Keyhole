@@ -164,9 +164,10 @@ impl App {
 
     /// Reconcile the bottom panel with the focused tab: start/stop the
     /// focus-scoped MONITOR and keyspace feeds (live only while their tab is
-    /// focused), set the input mode the focused tab implies, and give the
-    /// Pub/Sub and Tail anchors a fresh prompt. No-op for brokers without a
-    /// panel (non-Redis) or off the Browser screen.
+    /// focused), fetch a focused roster tab's list (RabbitMQ), set the input
+    /// mode the focused tab implies, and give the Pub/Sub and Tail anchors a
+    /// fresh prompt. No-op for brokers without a panel or off the Browser
+    /// screen.
     pub(super) fn sync_panel_focus(&mut self) {
         if self.screen != Screen::Browser || !self.active_can_tail() {
             return;
@@ -199,6 +200,14 @@ impl App {
             }
             (false, Some((id, _))) => self.stop_feed(id),
             _ => {}
+        }
+
+        // A roster refreshes on the stats clock only while its tab is focused,
+        // so ask now rather than leave the tab blank until the next tick.
+        if let Some(kind) = active.roster_kind() {
+            if let Some(conn) = self.active_conn_mut() {
+                conn.request_roster(kind);
+            }
         }
 
         self.sync_panel_mode();

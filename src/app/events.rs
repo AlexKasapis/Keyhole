@@ -57,6 +57,7 @@ impl App {
             }
             AppEvent::DestinationsListed { id, result } => self.on_destinations_listed(id, result),
             AppEvent::StatsUpdated { id, result } => self.on_stats(id, result),
+            AppEvent::RosterUpdated { id, kind, result } => self.on_roster(id, kind, result),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
             AppEvent::SubscriptionStarted { id, sub_id } => self.on_sub_started(id, sub_id),
@@ -108,6 +109,12 @@ impl App {
                 // just surface an "unsupported" error each tick.
                 if conn.caps.can_dashboard {
                     conn.request_stats();
+                }
+                // A roster refreshes only while its tab is on screen, like
+                // MONITOR, which keeps a broker with many clients from
+                // listing them all every couple of seconds.
+                if let Some(kind) = conn.roster_tab().filter(|_| on_browser) {
+                    conn.request_roster(kind);
                 }
                 // Liveness check; a failure surfaces as Disconnected.
                 conn.handle.send(ConnCommand::Ping);
@@ -401,6 +408,35 @@ impl App {
             conn.dashboard.error = Some(error.clone());
         }
         self.on_conn_error(id, "stats".to_string(), error);
+    }
+
+    /// A roster refresh returned: show the new list, or why it failed. Like
+    /// RabbitMQ's stats, a dead API answers every refresh with the same
+    /// cached error, so the footer only hears about a failure when it changes.
+    pub(super) fn on_roster(
+        &mut self,
+        id: ConnId,
+        kind: RosterKind,
+        result: Result<Roster, String>,
+    ) {
+        let Some(conn) = self.conn_by_id_mut(id) else {
+            return;
+        };
+        let panel = conn.rosters.get_mut(kind);
+        panel.in_flight = false;
+        let error = match result {
+            Ok(roster) => {
+                panel.error = None;
+                panel.roster = Some(roster);
+                return;
+            }
+            Err(error) => error,
+        };
+        if panel.error.as_deref() == Some(error.as_str()) {
+            return;
+        }
+        panel.error = Some(error.clone());
+        self.on_conn_error(id, kind.noun().to_string(), error);
     }
 
     pub(super) fn on_conn_error(&mut self, id: ConnId, context: String, error: String) {
