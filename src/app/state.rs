@@ -2173,6 +2173,9 @@ mod tests {
             username: Some("svc".to_string()),
             password: Some("env:RMQ_PW".to_string()),
             tls: true,
+            management_url: None,
+            management_username: None,
+            management_password: None,
         });
         let form = ConnForm::edit(3, &profile);
         assert_eq!(form.editing, Some(3), "remembers the profile index");

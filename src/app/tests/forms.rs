@@ -330,6 +330,44 @@ async fn editing_an_amqp_profile_keeps_destinations_and_management_fields() {
 }
 
 #[tokio::test]
+async fn editing_a_rabbitmq_profile_keeps_the_management_fields() {
+    // The form has no management-API fields, so an edit carries them over.
+    let path = unique_config_path();
+    let config = Config {
+        connections: vec![ConnectionConfig::Rabbitmq(RabbitmqProfile {
+            name: "rmq".into(),
+            host: "127.0.0.1".into(),
+            port: 5672,
+            vhost: "/".into(),
+            username: Some("app".into()),
+            password: None,
+            tls: false,
+            management_url: Some("https://mq.example.com".into()),
+            management_username: Some("monitor".into()),
+            management_password: Some("env:MGMT_PW".into()),
+        })],
+        ..Default::default()
+    };
+    let (mut app, _rx) = build_app(config, path.clone(), None);
+    app.screen = Screen::Home;
+    app.profile_state.select(Some(0));
+    app.handle_key(ch('e')); // open the edit form
+    app.form.as_mut().unwrap().fields[1] = "10.0.0.9".into(); // change the host
+    app.submit_form();
+
+    let ConnectionConfig::Rabbitmq(p) = &app.profiles[0] else {
+        panic!("expected a rabbitmq profile");
+    };
+    assert_eq!(p.host, "10.0.0.9", "the host edit is applied");
+    assert_eq!(p.management_url.as_deref(), Some("https://mq.example.com"));
+    assert_eq!(p.management_username.as_deref(), Some("monitor"));
+    assert_eq!(p.management_password.as_deref(), Some("env:MGMT_PW"));
+    let saved = std::fs::read_to_string(&path).expect("config written");
+    assert!(saved.contains("management_url"), "persisted: {saved}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
 async fn editing_a_live_profile_reconnects_with_the_new_settings() {
     let path = unique_config_path();
     let (mut app, _rx) = build_app(config_with(&["prod"]), path.clone(), None);

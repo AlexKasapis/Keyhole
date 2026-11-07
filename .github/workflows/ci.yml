@@ -48,6 +48,7 @@ jobs:
           RABBITMQ_DEFAULT_PASS: keyhole
         ports:
           - 5673:5672
+          - 15673:15672 # management HTTP API
         # Gate on the keyhole user authenticating, not just `ping`: the node
         # answers ping before the default user is provisioned, so the job could
         # otherwise start the tests while a connect still hits ACCESS_REFUSED.
@@ -96,6 +97,7 @@ jobs:
           KEYHOLE_TEST_REDIS_PORT: "6379"
           KEYHOLE_TEST_AMQP_PORT: "5672"
           KEYHOLE_TEST_RABBITMQ_PORT: "5673"
+          KEYHOLE_TEST_RABBITMQ_MGMT_PORT: "15673"
         run: cargo test --locked --features integration -- --include-ignored
 
   # Guard the release plumbing (installer script + workflows) on every push,
@@ -221,6 +223,7 @@ jobs:
           RABBITMQ_DEFAULT_PASS: keyhole
         ports:
           - 5673:5672
+          - 15673:15672 # management HTTP API
         options: >-
           --health-cmd "rabbitmqctl -q authenticate_user keyhole keyhole"
           --health-interval 5s
@@ -259,6 +262,7 @@ jobs:
           KEYHOLE_TEST_REDIS_PORT: "6379"
           KEYHOLE_TEST_AMQP_PORT: "5672"
           KEYHOLE_TEST_RABBITMQ_PORT: "5673"
+          KEYHOLE_TEST_RABBITMQ_MGMT_PORT: "15673"
         run: cargo llvm-cov --no-report --locked --all-features -- --include-ignored
 
       - name: Report coverage + enforce floor

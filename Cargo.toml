@@ -28,6 +28,8 @@ exclude = [
     ".editorconfig",
     "CLAUDE.md",
     "CONTRIBUTING.md",
+    # Recorded broker replies for unit tests; only `#[cfg(test)]` code reads them.
+    "src/broker/rabbitmq/testdata/",
 ]
 
 # `cargo binstall keyhole` fetches the prebuilt GitHub Release tarball instead of

@@ -249,12 +249,79 @@ pub struct RabbitmqProfile {
     pub password: Option<String>,
     #[serde(default)]
     pub tls: bool,
+    /// Optional RabbitMQ management API base URL, e.g. `http://127.0.0.1:15672`.
+    /// AMQP 0.9.1 cannot list queues or exchanges or report stats, so keyhole
+    /// reads those over the management plugin's HTTP API — a separate channel
+    /// from the AMQP wire. Absent = derived from `host` and `tls` (see
+    /// [`Self::management_base_url`]); set it when the API is elsewhere, e.g. a
+    /// managed broker serving it on `https://<host>` (port 443).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_url: Option<String>,
+    /// Username for the management API (HTTP Basic). Absent = the AMQP
+    /// `username`, since RabbitMQ has one user database for both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_username: Option<String>,
+    /// Secret spec for the management API password: `env:VAR`,
+    /// `keyring[:account]`, or omitted (same rules as `password`). Absent = the
+    /// AMQP password. `prompt` is not supported here — use `env:`/`keyring:`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_password: Option<String>,
 }
+
+/// The management API's default ports: plain HTTP, and HTTPS when `tls` is on.
+const RABBITMQ_MANAGEMENT_PORT: u16 = 15672;
+const RABBITMQ_MANAGEMENT_TLS_PORT: u16 = 15671;
 
 impl RabbitmqProfile {
     /// Parse the profile's password field into a [`SecretSpec`].
     pub fn password_spec(&self) -> SecretSpec {
         SecretSpec::parse(self.password.as_deref().unwrap_or(""))
+    }
+
+    /// Parse the management-API password field into a [`SecretSpec`].
+    pub fn management_password_spec(&self) -> SecretSpec {
+        SecretSpec::parse(self.management_password.as_deref().unwrap_or(""))
+    }
+
+    /// The `(secret spec, keyring account)` pair for the management API's own
+    /// password, or `None` when `management_password` is unset or blank (the
+    /// API then reuses the AMQP password). The keyring account is the management
+    /// username, else the profile name — the same rule as AMQP's management
+    /// secret.
+    pub fn management_secret_account(&self) -> Option<(SecretSpec, String)> {
+        if self.management_password_spec() == SecretSpec::None {
+            return None;
+        }
+        let account = self
+            .management_username
+            .clone()
+            .unwrap_or_else(|| self.name.clone());
+        Some((self.management_password_spec(), account))
+    }
+
+    /// The management API's base URL, without a trailing slash:
+    /// `management_url` when set, else `http://<host>:15672`
+    /// (`https://<host>:15671` when `tls` is on).
+    pub fn management_base_url(&self) -> String {
+        if let Some(url) = self
+            .management_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|u| !u.is_empty())
+        {
+            return url.trim_end_matches('/').to_string();
+        }
+        let (scheme, port) = if self.tls {
+            ("https", RABBITMQ_MANAGEMENT_TLS_PORT)
+        } else {
+            ("http", RABBITMQ_MANAGEMENT_PORT)
+        };
+        // Bracket an IPv6 literal so the `host:port` boundary parses.
+        if self.host.contains(':') && !self.host.starts_with('[') {
+            format!("{scheme}://[{}]:{port}", self.host)
+        } else {
+            format!("{scheme}://{}:{port}", self.host)
+        }
     }
 }
 
@@ -710,6 +777,111 @@ mod tests {
         assert_eq!(p.password_spec(), SecretSpec::None);
         // The default vhost is omitted from the endpoint summary.
         assert_eq!(cfg.connections[0].endpoint(), "127.0.0.1:5672");
+    }
+
+    #[test]
+    fn rabbitmq_management_url_is_derived_unless_overridden() {
+        let url = |host: &str, tls: bool, management_url: Option<&str>| {
+            RabbitmqProfile {
+                name: "r".into(),
+                host: host.into(),
+                port: 5672,
+                vhost: "/".into(),
+                username: None,
+                password: None,
+                tls,
+                management_url: management_url.map(str::to_string),
+                management_username: None,
+                management_password: None,
+            }
+            .management_base_url()
+        };
+        for (host, tls, management_url, expected) in [
+            (
+                "rabbit.example.com",
+                false,
+                None,
+                "http://rabbit.example.com:15672",
+            ),
+            (
+                "rabbit.example.com",
+                true,
+                None,
+                "https://rabbit.example.com:15671",
+            ),
+            // The override wins, minus a trailing slash.
+            (
+                "rabbit.example.com",
+                false,
+                Some("https://mq.example.com/"),
+                "https://mq.example.com",
+            ),
+            // A blank override counts as unset.
+            (
+                "rabbit.example.com",
+                false,
+                Some("  "),
+                "http://rabbit.example.com:15672",
+            ),
+            // An IPv6 literal is bracketed; an already-bracketed one is kept.
+            ("::1", false, None, "http://[::1]:15672"),
+            ("[fe80::1]", true, None, "https://[fe80::1]:15671"),
+        ] {
+            assert_eq!(
+                url(host, tls, management_url),
+                expected,
+                "host {host}, tls {tls}, management_url {management_url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_rabbitmq_management_fields_and_omits_them_when_unset() {
+        let text = r#"
+            [[connection]]
+            type = "rabbitmq"
+            name = "rabbit"
+            management_url = "https://mq.example.com"
+            management_username = "monitor"
+            management_password = "env:MGMT_PW"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        let ConnectionConfig::Rabbitmq(p) = &cfg.connections[0] else {
+            panic!("expected a rabbitmq profile");
+        };
+        assert_eq!(p.management_url.as_deref(), Some("https://mq.example.com"));
+        assert_eq!(p.management_username.as_deref(), Some("monitor"));
+        assert_eq!(
+            p.management_password_spec(),
+            SecretSpec::Env("MGMT_PW".into())
+        );
+        // The keyring account is the management username, else the profile name.
+        assert_eq!(
+            p.management_secret_account(),
+            Some((SecretSpec::Env("MGMT_PW".into()), "monitor".into()))
+        );
+        let mut no_user = p.clone();
+        no_user.management_username = None;
+        no_user.management_password = Some("keyring".into());
+        assert_eq!(
+            no_user.management_secret_account(),
+            Some((SecretSpec::Keyring(None), "rabbit".into()))
+        );
+
+        // Unset: no management secret (the AMQP password is reused), and the
+        // fields stay out of the saved file.
+        let minimal: Config =
+            toml::from_str("[[connection]]\ntype = \"rabbitmq\"\nname = \"local\"\n").unwrap();
+        let ConnectionConfig::Rabbitmq(m) = &minimal.connections[0] else {
+            panic!("expected a rabbitmq profile");
+        };
+        assert_eq!(m.management_url, None);
+        assert_eq!(m.management_password_spec(), SecretSpec::None);
+        assert_eq!(m.management_secret_account(), None);
+        let mut blank = m.clone();
+        blank.management_password = Some("  ".into());
+        assert_eq!(blank.management_secret_account(), None, "blank = unset");
+        assert!(!toml::to_string(&minimal).unwrap().contains("management"));
     }
 
     #[test]

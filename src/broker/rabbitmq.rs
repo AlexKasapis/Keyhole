@@ -18,6 +18,22 @@
 //! Each tail owns a dedicated connection + channel + consumer (mirroring the
 //! Redis dedicated-socket model) so the returned stream is `'static` and the
 //! actor's main connection stays free for liveness checks.
+//!
+//! Listing queues and exchanges, peeking and stats need the HTTP management API
+//! ([`mgmt`]), which `connect` probes after the AMQP login. A failed probe leaves
+//! the connection usable for tails.
+
+// The app consumes the client from the browser phases on (listing, peek, stats,
+// rosters); until then only the probe runs outside tests. `expect` fails the
+// build once everything is used, so this can't outlive its reason.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the browser doesn't call the management client yet"
+    )
+)]
+mod mgmt;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -32,8 +48,14 @@ use lapin::options::{
 use lapin::types::FieldTable;
 use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
 
+use self::mgmt::{Management, MgmtClient};
 use super::{BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, SubSpec};
 use crate::config::RabbitmqProfile;
+
+/// The username and password lapin logs in with when the AMQP URL has none (the
+/// AMQP URI spec's default). The management login defaults the same way, so both
+/// channels authenticate as the same user.
+const DEFAULT_CREDENTIAL: &str = "guest";
 
 /// A live (or not-yet-connected) RabbitMQ (AMQP 0.9.1) connection.
 pub struct RabbitmqConnection {
@@ -41,16 +63,26 @@ pub struct RabbitmqConnection {
     password: Option<String>,
     /// The main connection, kept open for liveness checks.
     conn: Option<Connection>,
+    /// The HTTP management API and what its last probe found (tags, version,
+    /// or the `mgmt_error` that disables it).
+    mgmt: Management,
 }
 
 impl RabbitmqConnection {
-    /// Build a connection from a profile and its resolved password. Call
-    /// [`BrokerConnection::connect`] to actually establish it.
-    pub fn new(profile: RabbitmqProfile, password: Option<String>) -> Self {
+    /// Build a connection from a profile, its resolved AMQP password, and the
+    /// resolved management API password (`management_password`, else the AMQP
+    /// password). Call [`BrokerConnection::connect`] to actually establish it.
+    pub fn new(
+        profile: RabbitmqProfile,
+        password: Option<String>,
+        management_password: Option<String>,
+    ) -> Self {
+        let mgmt = Management::new(management_client(&profile, management_password));
         Self {
             profile,
             password,
             conn: None,
+            mgmt,
         }
     }
 
@@ -92,6 +124,9 @@ impl BrokerConnection for RabbitmqConnection {
             // flattening it into the message here.
             .context("connecting to RabbitMQ")?;
         self.conn = Some(conn);
+        // Find a dead or misconfigured management API once, up front; a failure
+        // is recorded and the connection stays usable for tails.
+        self.mgmt.run_probe().await;
         Ok(Capabilities::rabbitmq())
     }
 
@@ -138,6 +173,23 @@ impl BrokerConnection for RabbitmqConnection {
             _ => None,
         }
     }
+}
+
+/// The management client for `profile`: its base URL and vhost, logging in as
+/// `management_username` (else the AMQP `username`) with `password`. A missing
+/// username or password defaults to lapin's `guest`, so the management login is
+/// the same user the AMQP login was.
+fn management_client(profile: &RabbitmqProfile, password: Option<String>) -> MgmtClient {
+    let set = |s: &Option<String>| s.clone().filter(|s| !s.is_empty());
+    let username = set(&profile.management_username)
+        .or_else(|| set(&profile.username))
+        .unwrap_or_else(|| DEFAULT_CREDENTIAL.to_string());
+    MgmtClient::new(
+        profile.management_base_url(),
+        profile.vhost.clone(),
+        username,
+        password.unwrap_or_else(|| DEFAULT_CREDENTIAL.to_string()),
+    )
 }
 
 /// Owns a tap's dedicated connection/channel/consumer so the stream stays alive.
@@ -306,19 +358,22 @@ mod tests {
             username: Some("user".into()),
             password: None,
             tls,
+            management_url: None,
+            management_username: None,
+            management_password: None,
         }
     }
 
     #[test]
     fn url_includes_scheme_encoded_credentials_and_default_vhost() {
-        let conn = RabbitmqConnection::new(profile(false), Some("p@ss/word".into()));
+        let conn = RabbitmqConnection::new(profile(false), Some("p@ss/word".into()), None);
         // The default vhost "/" must be percent-encoded to %2F (not a bare slash,
         // which would select the empty vhost).
         assert_eq!(
             conn.url(),
             "amqp://user:p%40ss%2Fword@rabbit.example.com:5672/%2F"
         );
-        let tls = RabbitmqConnection::new(profile(true), Some("x".into()));
+        let tls = RabbitmqConnection::new(profile(true), Some("x".into()), None);
         assert!(tls.url().starts_with("amqps://"));
         assert!(tls.url().ends_with(":5671/%2F"));
     }
@@ -328,7 +383,7 @@ mod tests {
         let mut p = profile(false);
         p.username = None;
         p.vhost = "my/host".into();
-        let conn = RabbitmqConnection::new(p, None);
+        let conn = RabbitmqConnection::new(p, None, None);
         assert_eq!(conn.url(), "amqp://rabbit.example.com:5672/my%2Fhost");
     }
 
@@ -354,7 +409,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_binding_key_tap_warns_about_non_topic_exchanges() {
-        let mut conn = RabbitmqConnection::new(profile(false), None);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None);
         // The catch-all `#` default → advisory that direct/headers exchanges
         // need an explicit key (else the tail is silently empty).
         let notice = conn
@@ -374,6 +429,65 @@ mod tests {
             .await;
         assert!(none.is_none());
     }
+
+    /// The `Authorization` header the management probe sends for `profile`,
+    /// whose API is pointed at a stub that answers the probe.
+    async fn management_login(
+        mut profile: RabbitmqProfile,
+        management_password: Option<&str>,
+    ) -> String {
+        use crate::broker::http::stub::{header, stub_server};
+        let (base_url, server) = stub_server(vec![
+            (200, r#"{"name":"u","tags":["management"]}"#.into()),
+            (200, r#"{"rabbitmq_version":"4.4.0"}"#.into()),
+        ]);
+        profile.management_url = Some(base_url);
+        let mut conn = RabbitmqConnection::new(
+            profile,
+            Some("amqp-pw".into()),
+            management_password.map(str::to_string),
+        );
+        conn.mgmt.run_probe().await;
+        assert!(conn.mgmt.probe().is_some(), "{:?}", conn.mgmt.error());
+        let requests = server.join().unwrap();
+        header(&requests[0], "authorization").unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn management_logs_in_as_the_amqp_user_unless_overridden() {
+        use crate::broker::http::basic_auth;
+        // The AMQP username, with the password `start_connect` resolved for the
+        // management API.
+        assert_eq!(
+            management_login(profile(false), Some("pw")).await,
+            basic_auth("user", Some("pw"))
+        );
+        // `management_username` overrides the AMQP username.
+        let mut p = profile(false);
+        p.management_username = Some("monitor".into());
+        assert_eq!(
+            management_login(p, Some("pw")).await,
+            basic_auth("monitor", Some("pw"))
+        );
+        // No credentials at all: lapin's `guest`/`guest`, like the AMQP login.
+        let mut anon = profile(false);
+        anon.username = None;
+        assert_eq!(
+            management_login(anon, None).await,
+            basic_auth("guest", Some("guest"))
+        );
+    }
+
+    #[test]
+    fn management_client_targets_the_profile_url_and_starts_unprobed() {
+        let conn = RabbitmqConnection::new(profile(true), None, None);
+        assert_eq!(conn.mgmt.base_url(), "https://rabbit.example.com:15671");
+        assert!(conn.mgmt.probe().is_none());
+        assert!(
+            conn.mgmt.client().is_err(),
+            "unusable until connect probes it"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "integration"))]
@@ -383,7 +497,9 @@ mod integration_tests {
     //! creds `keyhole:keyhole` on vhost `/`. A non-`guest` user is required
     //! because RabbitMQ restricts `guest` to loopback, and the dockerized broker
     //! sees the host connection arriving from the bridge network. Each test uses
-    //! a uniquely-named exchange so the suite is parallel-safe.
+    //! a uniquely-named exchange so the suite is parallel-safe. The management
+    //! API is on `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_MGMT_PORT` (default 15673).
+    use super::mgmt::AckMode;
     use super::*;
     use crate::broker::SubSpec;
     use lapin::options::{
@@ -399,6 +515,13 @@ mod integration_tests {
             .ok()
             .and_then(|p| p.parse().ok())
             .unwrap_or(5673)
+    }
+
+    fn mgmt_port() -> u16 {
+        std::env::var("KEYHOLE_TEST_RABBITMQ_MGMT_PORT")
+            .ok()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(15673)
     }
 
     fn url() -> String {
@@ -421,11 +544,25 @@ mod integration_tests {
             username: Some("keyhole".into()),
             password: None,
             tls: false,
+            // The compose file maps the API off its default port.
+            management_url: Some(format!("http://127.0.0.1:{}", mgmt_port())),
+            management_username: None,
+            management_password: None,
         }
     }
 
     async fn connected() -> RabbitmqConnection {
-        let mut conn = RabbitmqConnection::new(test_profile(), Some("keyhole".to_string()));
+        connect_with(test_profile(), "keyhole").await
+    }
+
+    /// Connect `profile` with the test password for AMQP and `mgmt_password`
+    /// for the management API.
+    async fn connect_with(profile: RabbitmqProfile, mgmt_password: &str) -> RabbitmqConnection {
+        let mut conn = RabbitmqConnection::new(
+            profile,
+            Some("keyhole".to_string()),
+            Some(mgmt_password.to_string()),
+        );
         let caps = conn.connect().await.expect("connect to test RabbitMQ");
         assert_eq!(caps.r#type, crate::broker::BrokerType::Rabbitmq);
         conn
@@ -622,5 +759,196 @@ mod integration_tests {
             chain.contains("NOT_FOUND") || chain.to_lowercase().contains("no exchange"),
             "the AMQP reply code must survive in the error chain: {chain}"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_probes_the_management_api() {
+        let conn = connected().await;
+        let probe = conn
+            .mgmt
+            .probe()
+            .unwrap_or_else(|| panic!("probe failed: {:?}", conn.mgmt.error()));
+        assert_eq!(probe.user, "keyhole");
+        assert!(
+            probe.tags.iter().any(|t| t == "administrator"),
+            "{:?}",
+            probe.tags
+        );
+        assert!(probe.can_monitor());
+        let major = probe.major_version().expect("a version like 3.13.7");
+        assert!(major >= 3, "{:?}", probe.version);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_management_api_leaves_tails_working() {
+        // Bind then drop, so the port is (almost certainly) closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut profile = test_profile();
+        profile.management_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+        drop(listener);
+
+        let mut conn = connect_with(profile, "keyhole").await;
+        let error = conn.mgmt.error().expect("mgmt_error is recorded");
+        assert!(
+            error.contains("could not reach the management API"),
+            "{error}"
+        );
+        assert!(conn.mgmt.client().is_err(), "later calls fail fast");
+
+        // The AMQP side is unaffected: liveness and an exchange tap still work.
+        conn.ping().await.expect("ping");
+        let exchange = unique("keyhole.it.topic");
+        declare_topic_exchange(&exchange).await;
+        let mut stream = conn
+            .subscribe(SubSpec::Exchange {
+                exchange: exchange.clone(),
+                binding_key: "#".into(),
+            })
+            .await
+            .expect("exchange tap");
+        publish(&exchange, "k", "still tailing").await;
+        let ev = timeout(Duration::from_secs(8), stream.next())
+            .await
+            .expect("tap timed out")
+            .expect("stream ended");
+        assert_eq!(ev.payload, Payload::Utf8("still tailing".into()));
+    }
+
+    #[tokio::test]
+    async fn a_wrong_management_password_is_explained() {
+        let conn = connect_with(test_profile(), "not-the-password").await;
+        let error = conn.mgmt.error().expect("mgmt_error is recorded");
+        assert!(error.contains("rejected the credentials"), "{error}");
+        assert!(error.contains("management_password"), "{error}");
+    }
+
+    /// Poll `fetch` on the blocking pool until `done` holds (the stats behind
+    /// connection and consumer lists land a moment after the event).
+    async fn eventually<T: Send + 'static>(
+        fetch: impl Fn() -> anyhow::Result<T> + Send + Sync + Clone + 'static,
+        done: impl Fn(&T) -> bool,
+    ) -> T {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let f = fetch.clone();
+            let value = tokio::task::spawn_blocking(f)
+                .await
+                .unwrap()
+                .expect("request");
+            if done(&value) || tokio::time::Instant::now() > deadline {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn management_client_lists_and_reads_a_real_queue() {
+        let mut conn = connected().await;
+        let client = conn.mgmt.client().expect("probe succeeded").clone();
+
+        // A queue whose name needs encoding (`#`, `/`, space, non-ASCII). It
+        // expires a minute after its last use, so a failed run cleans up.
+        let queue = unique("keyhole.it.q #1/ü");
+        let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
+            .await
+            .unwrap();
+        let channel = setup.create_channel().await.unwrap();
+        let mut args = FieldTable::default();
+        args.insert("x-expires".into(), lapin::types::AMQPValue::LongInt(60_000));
+        channel
+            .queue_declare(queue.as_str().into(), QueueDeclareOptions::default(), args)
+            .await
+            .unwrap();
+        publish("", &queue, "peek me").await;
+
+        let c = client.clone();
+        let listing = tokio::task::spawn_blocking(move || c.queues())
+            .await
+            .unwrap()
+            .expect("lists queues");
+        let row = listing
+            .items
+            .iter()
+            .find(|q| q.name == queue)
+            .expect("the new queue is listed");
+        assert_eq!(row.queue_type, mgmt::QueueType::Classic);
+
+        // A requeueing get reads the message and puts it back, flagged.
+        for redelivered in [false, true] {
+            let (c, q) = (client.clone(), queue.clone());
+            let msgs =
+                tokio::task::spawn_blocking(move || c.get(&q, 1, AckMode::AckRequeueTrue, None))
+                    .await
+                    .unwrap()
+                    .expect("gets the message");
+            assert_eq!(msgs.len(), 1);
+            assert_eq!(msgs[0].body().unwrap(), b"peek me");
+            assert_eq!(msgs[0].redelivered, redelivered);
+            assert_eq!(msgs[0].routing_key, queue);
+        }
+
+        // A missing queue's 404 doesn't poison the next request (the 3.13
+        // keep-alive quirk).
+        let c = client.clone();
+        let err = tokio::task::spawn_blocking(move || {
+            c.get("keyhole.it.missing", 1, AckMode::AckRequeueTrue, None)
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("queue not found"), "{err:#}");
+        let c = client.clone();
+        tokio::task::spawn_blocking(move || c.exchanges())
+            .await
+            .unwrap()
+            .expect("the next request still works");
+
+        // This connection, and the consumer behind an open tap, are listed.
+        let _tap = conn
+            .subscribe(SubSpec::Exchange {
+                exchange: "amq.topic".into(),
+                binding_key: "#".into(),
+            })
+            .await
+            .expect("exchange tap");
+        let c = client.clone();
+        let connections = eventually(
+            move || c.connections(),
+            |rows: &Vec<mgmt::ConnectionInfo>| {
+                rows.iter().any(|r| {
+                    r.user_provided_name
+                        .as_deref()
+                        .is_some_and(|n| n.starts_with("keyhole-test-"))
+                })
+            },
+        )
+        .await;
+        let ours = connections
+            .iter()
+            .find(|r| {
+                r.user_provided_name
+                    .as_deref()
+                    .is_some_and(|n| n.starts_with("keyhole-test-"))
+            })
+            .expect("our connection is listed");
+        assert_eq!(ours.user.as_deref(), Some("keyhole"));
+        assert!(ours.peer_port.is_some() && ours.channels.is_some());
+        let c = client.clone();
+        let consumers = eventually(
+            move || c.consumers(),
+            |rows: &Vec<mgmt::ConsumerInfo>| {
+                rows.iter().any(|r| r.queue.name.starts_with("amq.gen-"))
+            },
+        )
+        .await;
+        let tap = consumers
+            .iter()
+            .find(|r| r.queue.name.starts_with("amq.gen-"))
+            .expect("the tap's consumer is listed");
+        assert_eq!(tap.ack_required, Some(false), "the tap auto-acks");
+        assert!(tap.channel_details.name.is_some());
+
+        setup.close(200, "bye".into()).await.ok();
     }
 }

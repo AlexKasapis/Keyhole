@@ -40,6 +40,12 @@ impl App {
         let recordings_dir = self.recordings_dir.clone();
         let name = profile.name().to_string();
         let addr = profile.address();
+        // RabbitMQ also logs in to its management API; other brokers have no
+        // management secret to resolve at connect.
+        let management_secret = match &profile {
+            ConnectionConfig::Rabbitmq(p) => Some(p.management_secret_account()),
+            _ => None,
+        };
         self.health = ConnHealth::Connecting;
         self.set_status(format!("Connecting to {name}…"), false);
 
@@ -62,7 +68,25 @@ impl App {
                     }
                 },
             };
-            let conn = match connection_for(profile, password, preview) {
+            let management_password = match management_secret {
+                Some(secret) => {
+                    match resolve_management_password(secret, password.as_deref()).await {
+                        Ok(pw) => pw,
+                        Err(e) => {
+                            let _ = events
+                                .send(AppEvent::ConnError {
+                                    id,
+                                    context: "auth".to_string(),
+                                    error: format!("management_password: {e}"),
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let conn = match connection_for(profile, password, management_password, preview) {
                 Ok(conn) => conn,
                 Err(e) => {
                     let _ = events
@@ -198,6 +222,20 @@ impl App {
                         v.to_string()
                     }
                 };
+                // The form doesn't edit the management-API fields (their
+                // defaults cover the common case), so carry them over from the
+                // existing profile on edit, as the AMQP branch does.
+                let (management_url, management_username, management_password) = editing
+                    .and_then(|idx| self.profiles.get(idx))
+                    .and_then(|p| match p {
+                        ConnectionConfig::Rabbitmq(r) => Some((
+                            r.management_url.clone(),
+                            r.management_username.clone(),
+                            r.management_password.clone(),
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
                 ConnectionConfig::Rabbitmq(RabbitmqProfile {
                     name,
                     host,
@@ -206,6 +244,9 @@ impl App {
                     username,
                     password: saved_spec,
                     tls,
+                    management_url,
+                    management_username,
+                    management_password,
                 })
             }
         };
@@ -690,5 +731,18 @@ impl App {
         if let Some(id) = self.active_id() {
             self.start_scan(id, true);
         }
+    }
+}
+
+/// The RabbitMQ management API's password: its own `management_password` when
+/// the profile sets one (`secret` is `Some`), else the AMQP `password` already
+/// resolved for this connect — RabbitMQ has one user database for both.
+pub(super) async fn resolve_management_password(
+    secret: Option<(config::SecretSpec, String)>,
+    password: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    match secret {
+        Some((spec, account)) => config::resolve_secret_async(spec, account).await,
+        None => Ok(password.map(str::to_string)),
     }
 }

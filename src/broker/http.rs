@@ -117,6 +117,16 @@ pub(crate) mod stub {
         (base_url, handle)
     }
 
+    /// A header's value in a raw request (the name matched case-insensitively).
+    pub(crate) fn header<'a>(raw: &'a str, name: &str) -> Option<&'a str> {
+        raw.split("\r\n\r\n")
+            .next()?
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.trim())
+    }
+
     /// Read one request (head, then exactly as many body bytes as it declares),
     /// answer it, and return its raw text.
     fn answer(mut sock: TcpStream, status: u16, body: &str) -> String {

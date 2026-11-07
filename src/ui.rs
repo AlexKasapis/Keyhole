@@ -1987,6 +1987,9 @@ mod tests {
                     username: None,
                     password: None,
                     tls: false,
+                    management_url: None,
+                    management_username: None,
+                    management_password: None,
                 }),
             ],
             ..Default::default()

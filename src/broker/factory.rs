@@ -11,20 +11,25 @@ use crate::broker::BrokerConnection;
 use crate::config::ConnectionConfig;
 
 /// Build the broker connection for `profile`, with its `password` already
-/// resolved. `preview_bytes` bounds how much of a value the Redis inspector
-/// fetches; brokers without a value inspector ignore it.
+/// resolved. `management_password` is the resolved password for RabbitMQ's
+/// management API (other brokers ignore it). `preview_bytes` bounds how much of
+/// a value the Redis inspector fetches; brokers without a value inspector
+/// ignore it.
 ///
 /// The returned connection is not yet open — the caller drives
 /// [`BrokerConnection::connect`].
 pub fn connection_for(
     profile: ConnectionConfig,
     password: Option<String>,
+    management_password: Option<String>,
     preview_bytes: usize,
 ) -> anyhow::Result<Box<dyn BrokerConnection>> {
     let conn: Box<dyn BrokerConnection> = match profile {
         ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview_bytes)),
         ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
-        ConnectionConfig::Rabbitmq(p) => Box::new(RabbitmqConnection::new(p, password)),
+        ConnectionConfig::Rabbitmq(p) => {
+            Box::new(RabbitmqConnection::new(p, password, management_password))
+        }
     };
     Ok(conn)
 }
@@ -50,7 +55,7 @@ mod tests {
 
     #[test]
     fn builds_a_redis_connection() {
-        assert!(connection_for(redis_profile(), None, 4096).is_ok());
+        assert!(connection_for(redis_profile(), None, None, 4096).is_ok());
     }
 
     #[test]
@@ -68,7 +73,7 @@ mod tests {
             management_username: None,
             management_password: None,
         });
-        assert!(connection_for(profile, None, 4096).is_ok());
+        assert!(connection_for(profile, None, None, 4096).is_ok());
     }
 
     #[test]
@@ -82,7 +87,10 @@ mod tests {
             username: None,
             password: None,
             tls: false,
+            management_url: None,
+            management_username: None,
+            management_password: None,
         });
-        assert!(connection_for(profile, None, 4096).is_ok());
+        assert!(connection_for(profile, None, None, 4096).is_ok());
     }
 }

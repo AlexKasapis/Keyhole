@@ -210,3 +210,34 @@ async fn connect_selected_focuses_existing_connection() {
     assert_eq!(app.active, Some(0));
     assert_eq!(app.screen, Screen::Browser);
 }
+
+#[tokio::test]
+async fn the_management_password_is_its_own_secret_else_the_amqp_password() {
+    use super::super::connection::resolve_management_password;
+    use crate::config::SecretSpec;
+
+    // No `management_password`: the AMQP password is reused.
+    let reused = resolve_management_password(None, Some("amqp-pw")).await;
+    assert_eq!(reused.unwrap().as_deref(), Some("amqp-pw"));
+    assert_eq!(resolve_management_password(None, None).await.unwrap(), None);
+
+    // Its own secret wins over the AMQP password.
+    std::env::set_var("KEYHOLE_TEST_MGMT_PW", "mgmt-pw");
+    let own = resolve_management_password(
+        Some((SecretSpec::Env("KEYHOLE_TEST_MGMT_PW".into()), "rmq".into())),
+        Some("amqp-pw"),
+    )
+    .await;
+    assert_eq!(own.unwrap().as_deref(), Some("mgmt-pw"));
+
+    // A secret that can't be resolved is an error, not a silent fallback.
+    let missing = resolve_management_password(
+        Some((
+            SecretSpec::Env("KEYHOLE_TEST_MGMT_PW_UNSET".into()),
+            "rmq".into(),
+        )),
+        Some("amqp-pw"),
+    )
+    .await;
+    assert!(missing.is_err());
+}
