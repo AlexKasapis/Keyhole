@@ -263,6 +263,11 @@ mod integration_tests {
     //! `keyhole/keyhole`.
     use super::*;
 
+    /// Held by the tests that use the demo exchange, so they take turns: one
+    /// binds a quorum queue to it and deletes it, and RabbitMQ 3.13 crashes a
+    /// channel publishing to the exchange meanwhile (`INTERNAL_ERROR`).
+    static DEMO_EXCHANGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn test_port() -> u16 {
         std::env::var("KEYHOLE_TEST_RABBITMQ_PORT")
             .ok()
@@ -326,8 +331,25 @@ mod integration_tests {
         ok
     }
 
+    /// Take the oldest messages off `queue` until it's at least `room` short
+    /// of the cap. A full queue drops its oldest message for each new one
+    /// (`x-max-length` overflows from the head), so its depth can't show a
+    /// publish arriving, and these would have been dropped anyway.
+    async fn make_room(channel: &Channel, queue: &str, room: u32) {
+        use lapin::options::BasicGetOptions;
+        let cap = fixtures::RABBITMQ_QUEUE_MAX_LENGTH.unsigned_abs();
+        let excess = (depth(channel, queue).await + room).saturating_sub(cap);
+        for _ in 0..excess {
+            channel
+                .basic_get(queue.into(), BasicGetOptions { no_ack: true })
+                .await
+                .unwrap_or_else(|e| panic!("making room in `{queue}`: {e:#}"));
+        }
+    }
+
     #[tokio::test]
     async fn declares_the_exchange_and_queues_and_publishes() {
+        let _turn = DEMO_EXCHANGE.lock().await;
         // A second run re-declares everything without a conflict.
         let (first, _) = open(&test_profile(), Some("keyhole"))
             .await
@@ -338,6 +360,9 @@ mod integration_tests {
             .expect("connect + declare exchange and queues");
         for queue in &fixtures::RABBITMQ_QUEUES {
             assert!(is_capped(&conn, queue).await, "{} is capped", queue.name);
+            // A long-lived dev broker's queues fill up: leave room for our
+            // three publishes, and a few from a running `keyhole dev`.
+            make_room(&channel, queue.name, 10).await;
         }
         let before: Vec<u32> = futures_util::future::join_all(
             fixtures::RABBITMQ_QUEUES
@@ -366,6 +391,7 @@ mod integration_tests {
     }
     #[tokio::test]
     async fn a_demo_queue_declared_with_other_settings_is_replaced() {
+        let _turn = DEMO_EXCHANGE.lock().await;
         // As a `keyhole dev` from before the cap left it: durable and
         // uncapped. (A test queue, so a running `keyhole dev` is unaffected.)
         let name = format!("keyhole.it.demo.{}", std::process::id());
