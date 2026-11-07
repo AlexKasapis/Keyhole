@@ -60,6 +60,8 @@ pub enum ConnCommand {
     ListDestinations {
         reprobe: bool,
     },
+    /// Refresh the server statistics (Redis `INFO`, RabbitMQ's overview and
+    /// nodes). The reply, success or failure, is an [`AppEvent::StatsUpdated`].
     RefreshStats,
     Ping,
     /// Open a tail for `spec`; start recording immediately if `record`.
@@ -507,10 +509,10 @@ async fn process(
                 .send(AppEvent::DestinationsListed { id, result })
                 .await
         }
-        ConnCommand::RefreshStats => match conn.stats().await {
-            Ok(stats) => events.send(AppEvent::StatsUpdated { id, stats }).await,
-            Err(e) => emit_error(events, id, "stats", e).await,
-        },
+        ConnCommand::RefreshStats => {
+            let result = conn.stats().await.map_err(|e| e.to_string());
+            events.send(AppEvent::StatsUpdated { id, result }).await
+        }
         ConnCommand::Ping => match conn.ping().await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -583,9 +585,9 @@ pub(crate) mod mock {
 
     use super::{spawn_connection, ConnCommand, ConnHandle, SpawnParams};
     use crate::broker::{
-        BrokerConnection, BrokerEvent, BrokerEventStream, BrowsePage, BrowseReq, Capabilities,
-        ConnId, DestKind, DestinationInfo, DestinationList, ExchangeType, InspectReq, PeekReq,
-        QueueType, ServerStats, SubSpec, ValueView,
+        BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, BrowsePage, BrowseReq,
+        Capabilities, ConnId, DestKind, DestinationInfo, DestinationList, ExchangeType, InspectReq,
+        PeekReq, QueueType, ServerStats, SubSpec, ValueView,
     };
     use crate::event::AppEvent;
 
@@ -610,7 +612,9 @@ pub(crate) mod mock {
         pub browse: Option<BrowsePage>,
         pub browse_err: Option<String>,
         pub inspect: ValueView,
-        pub stats: ServerStats,
+        pub stats: BrokerStats,
+        /// When set, `stats` fails with this message instead of returning `stats`.
+        pub stats_err: Option<String>,
         /// Messages a queue peek returns.
         pub peek: Vec<BrokerEvent>,
         /// When set, `peek` fails with this message instead of returning `peek`.
@@ -635,7 +639,8 @@ pub(crate) mod mock {
                 browse: None,
                 browse_err: None,
                 inspect: ValueView::Missing,
-                stats: ServerStats::default(),
+                stats: BrokerStats::Redis(ServerStats::default()),
+                stats_err: None,
                 peek: Vec::new(),
                 peek_err: None,
                 sub: None,
@@ -697,7 +702,10 @@ pub(crate) mod mock {
             Ok(self.peek.clone())
         }
 
-        async fn stats(&mut self) -> anyhow::Result<ServerStats> {
+        async fn stats(&mut self) -> anyhow::Result<BrokerStats> {
+            if let Some(e) = &self.stats_err {
+                anyhow::bail!("{e}");
+            }
             Ok(self.stats.clone())
         }
 
@@ -904,8 +912,8 @@ mod tests {
     use super::mock::{MockBroker, SubBehavior};
     use super::*;
     use crate::broker::{
-        BrokerEvent, BrowsePage, BrowseReq, EntryMeta, InspectReq, Payload, PayloadEncoding,
-        ServerStats, SubSpec, Ttl, ValueType, ValueView,
+        BrokerEvent, BrokerStats, BrowsePage, BrowseReq, EntryMeta, InspectReq, Payload,
+        PayloadEncoding, ServerStats, SubSpec, Ttl, ValueType, ValueView,
     };
     use crate::recording::RecordingStatus;
     use std::path::PathBuf;
@@ -1163,17 +1171,36 @@ mod tests {
     #[tokio::test]
     async fn stats_emits_stats_updated() {
         let mut mock = MockBroker::new();
-        mock.stats = ServerStats {
+        mock.stats = BrokerStats::Redis(ServerStats {
             redis_version: Some("9.9".into()),
             ..Default::default()
-        };
+        });
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("stats")).await;
         handle.send(ConnCommand::RefreshStats);
         match next(&mut rx).await {
-            Some(AppEvent::StatsUpdated { stats, .. }) => {
+            Some(AppEvent::StatsUpdated {
+                result: Ok(stats), ..
+            }) => {
+                let stats = stats.redis().expect("Redis stats");
                 assert_eq!(stats.redis_version.as_deref(), Some("9.9"));
             }
             other => panic!("expected StatsUpdated, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_stats_refresh_still_replies_with_stats_updated() {
+        // The stats clock waits for this reply before it asks again, so a
+        // failure must come back as one too, not as a generic error.
+        let mut mock = MockBroker::new();
+        mock.stats_err = Some("INFO refused".into());
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("stats-err")).await;
+        handle.send(ConnCommand::RefreshStats);
+        match next(&mut rx).await {
+            Some(AppEvent::StatsUpdated { result: Err(e), .. }) => {
+                assert_eq!(e, "INFO refused");
+            }
+            other => panic!("expected a failed StatsUpdated, got {other:?}"),
         }
     }
 

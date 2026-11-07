@@ -265,7 +265,7 @@ impl BrokerConnection for RedisConnection {
         Ok(view)
     }
 
-    async fn stats(&mut self) -> anyhow::Result<super::ServerStats> {
+    async fn stats(&mut self) -> anyhow::Result<super::BrokerStats> {
         let mut conn = self.manager()?;
         let text: String = redis::cmd("INFO").query_async(&mut conn).await?;
         let mut stats = info::parse_info(&text);
@@ -280,7 +280,7 @@ impl BrokerConnection for RedisConnection {
         if let Ok(list) = list {
             stats.clients = info::parse_client_list(&list);
         }
-        Ok(stats)
+        Ok(super::BrokerStats::Redis(stats))
     }
 
     async fn subscribe(&mut self, spec: SubSpec) -> anyhow::Result<BrokerEventStream> {
@@ -692,6 +692,7 @@ mod integration_tests {
 
         let mut conn = connected().await;
         let stats = conn.stats().await.unwrap();
+        let stats = stats.redis().expect("Redis stats");
         assert!(stats.redis_version.is_some());
         assert!(stats.uptime_seconds.is_some());
         assert!(!stats.db_keys.is_empty());

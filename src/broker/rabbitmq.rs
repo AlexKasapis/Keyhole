@@ -21,22 +21,22 @@
 //!
 //! Listing queues and exchanges, peeking and stats need the HTTP management API
 //! ([`mgmt`]), which `connect` probes after the AMQP login. A failed probe leaves
-//! the connection usable for tails.
+//! the connection usable for tails, without the stats band.
 //!
 //! A **queue peek** ([`RabbitmqConnection::peek`]) is the one read that touches
 //! a real queue: the management API's `/get` takes the messages off the queue
 //! and, in browse mode, puts them straight back (`ack_requeue_true`) flagged
 //! `redelivered`. It only runs when the user opens a queue.
 
-// The browser lists queues and exchanges and peeks queues through the client;
-// stats and the connection/consumer rosters use the rest of it in later
-// phases. `expect` fails the build once everything is used, so this can't
-// outlive its reason.
+// The browser lists queues and exchanges and peeks queues through the client,
+// and the stats band reads the overview and nodes; the connection/consumer
+// rosters use the rest of it in a later phase. `expect` fails the build once
+// everything is used, so this can't outlive its reason.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "stats and the connection/consumer rosters don't call the management client yet"
+        reason = "the connection/consumer rosters don't call the management client yet"
     )
 )]
 mod mgmt;
@@ -59,11 +59,12 @@ use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
 
 use self::mgmt::{
     AckMode, ApiError, ExchangeInfo, GetMessage, Management, MessageProperties, MgmtClient,
-    QueueInfo,
+    NodeInfo, Overview, QueueInfo,
 };
 use super::{
-    BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, DestKind, DestinationInfo,
-    DestinationList, ExchangeType, Payload, PeekReq, QueueType, SubSpec, STREAM_PEEK_HINT,
+    BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, Capabilities, DestKind,
+    DestinationInfo, DestinationList, ExchangeType, NodeHealth, Payload, PeekReq, QueueType,
+    RabbitmqStats, SubSpec, STREAM_PEEK_HINT,
 };
 use crate::config::{PeekMode, RabbitmqProfile};
 
@@ -116,6 +117,17 @@ impl RabbitmqConnection {
         format!("management API unavailable at {}", self.mgmt.base_url())
     }
 
+    /// What the connection offers, given the management probe's outcome: the
+    /// stats band needs the API, so it's on only when the probe succeeded.
+    /// It stays as connect found it for the session; a later re-probe doesn't
+    /// change it (reconnect instead).
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            can_dashboard: self.mgmt.probe().is_some(),
+            ..Capabilities::rabbitmq()
+        }
+    }
+
     /// Build an `amqp[s]://[user[:pass]@]host:port/vhost` URL with
     /// percent-encoded credentials and vhost. `tls` selects `amqps://` (the
     /// :5671 TLS listener).
@@ -157,7 +169,7 @@ impl BrokerConnection for RabbitmqConnection {
         // Find a dead or misconfigured management API once, up front; a failure
         // is recorded and the connection stays usable for tails.
         self.mgmt.run_probe().await;
-        Ok(Capabilities::rabbitmq())
+        Ok(self.capabilities())
     }
 
     async fn ping(&mut self) -> anyhow::Result<()> {
@@ -224,6 +236,51 @@ impl BrokerConnection for RabbitmqConnection {
             .filter_map(|d| Some((d.name.clone(), d.exchange_type.clone()?)))
             .collect();
         Ok(list)
+    }
+
+    /// The overview's versions, rates and totals, plus each node's health when
+    /// the user may read `/api/nodes` (the `monitoring` or `administrator`
+    /// tag). Runs on the stats clock, so it never re-probes: a failed probe or
+    /// an API marked unreachable answers at once with the cached error.
+    async fn stats(&mut self) -> anyhow::Result<BrokerStats> {
+        let unavailable = self.unavailable();
+        // A failed probe answers here without touching the network. The error
+        // is flattened into its message, which the stats reply carries.
+        let client = self
+            .mgmt
+            .client()
+            .map_err(|e| anyhow::anyhow!("{:#}", e.context(unavailable.clone())))?
+            .clone();
+        let monitor = self.mgmt.probe().is_some_and(mgmt::Probe::can_monitor);
+        let fetched = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            let overview = client.overview()?;
+            let nodes = if monitor {
+                match client.nodes() {
+                    Ok(nodes) => Some(nodes),
+                    // Refused (the user's tags changed since the probe): show
+                    // the overview without node health.
+                    Err(e) if e.downcast_ref::<ApiError>().is_some() => None,
+                    Err(e) => return Err(e),
+                }
+            } else {
+                None
+            };
+            Ok((overview, nodes))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("the stats task failed: {e}"))?;
+        match fetched {
+            Ok((overview, nodes)) => Ok(BrokerStats::Rabbitmq(rabbitmq_stats(
+                overview, nodes, monitor,
+            ))),
+            Err(e) => {
+                // No reply at all: later refreshes fail fast until a re-probe.
+                if e.downcast_ref::<ApiError>().is_none() {
+                    self.mgmt.mark_unreachable(&e);
+                }
+                Err(anyhow::anyhow!("{:#}", e.context(unavailable)))
+            }
+        }
     }
 
     /// Peek a queue through the management API's `/get`: browse mode puts the
@@ -303,6 +360,56 @@ impl BrokerConnection for RabbitmqConnection {
                     .to_string(),
             ),
         }
+    }
+}
+
+/// The stats band's figures from the management API's overview and, for a
+/// `monitoring` user (`cluster_wide`), its nodes. Without that tag the overview
+/// counts only the vhosts the user can access and only its own connections
+/// (checked on 3.13 and 4.4), so the connection count is left out rather than
+/// shown as a server total.
+fn rabbitmq_stats(
+    overview: Overview,
+    nodes: Option<Vec<NodeInfo>>,
+    cluster_wide: bool,
+) -> RabbitmqStats {
+    let totals = overview.object_totals;
+    RabbitmqStats {
+        rabbitmq_version: overview.rabbitmq_version,
+        erlang_version: overview.erlang_version,
+        cluster_name: overview.cluster_name,
+        stats_disabled: overview.disable_stats,
+        cluster_wide,
+        publish_rate: overview.message_stats.publish_rate,
+        deliver_rate: overview.message_stats.deliver_get_rate,
+        ack_rate: overview.message_stats.ack_rate,
+        messages: overview.queue_totals.messages,
+        messages_ready: overview.queue_totals.messages_ready,
+        messages_unacked: overview.queue_totals.messages_unacknowledged,
+        queues: totals.queues,
+        connections: totals.connections.filter(|_| cluster_wide),
+        consumers: totals.consumers,
+        nodes: nodes
+            .unwrap_or_default()
+            .into_iter()
+            .map(node_health)
+            .collect(),
+    }
+}
+
+fn node_health(n: NodeInfo) -> NodeHealth {
+    NodeHealth {
+        name: n.name,
+        running: n.running,
+        mem_used: n.mem_used,
+        mem_limit: n.mem_limit,
+        mem_alarm: n.mem_alarm,
+        fd_used: n.fd_used,
+        fd_total: n.fd_total,
+        disk_free: n.disk_free,
+        disk_free_limit: n.disk_free_limit,
+        disk_free_alarm: n.disk_free_alarm,
+        partitions: n.partitions,
     }
 }
 
@@ -848,9 +955,25 @@ mod tests {
         stats_disabled: bool,
         replies: Vec<(u16, String)>,
     ) -> (RabbitmqConnection, std::thread::JoinHandle<Vec<String>>) {
+        probed_as(
+            fixture!("whoami.administrator.v4"),
+            version,
+            stats_disabled,
+            replies,
+        )
+        .await
+    }
+
+    /// [`probed_conn`] for the user `whoami` describes.
+    async fn probed_as(
+        whoami: String,
+        version: &str,
+        stats_disabled: bool,
+        replies: Vec<(u16, String)>,
+    ) -> (RabbitmqConnection, std::thread::JoinHandle<Vec<String>>) {
         use crate::broker::http::stub::stub_server;
         let mut all = vec![
-            (200, fixture!("whoami.administrator.v4")),
+            (200, whoami),
             (
                 200,
                 format!(r#"{{"rabbitmq_version":"{version}","disable_stats":{stats_disabled}}}"#),
@@ -1431,6 +1554,242 @@ mod tests {
         );
     }
 
+    // -- stats -----------------------------------------------------------------
+
+    /// The stats built from an overview and (for a `monitoring` user) nodes
+    /// fixture.
+    fn stats_from(overview: &str, nodes: Option<&str>, cluster_wide: bool) -> RabbitmqStats {
+        let overview: Overview = serde_json::from_str(overview).expect("overview parses");
+        let nodes = nodes.map(|n| serde_json::from_str(n).expect("nodes parse"));
+        rabbitmq_stats(overview, nodes, cluster_wide)
+    }
+
+    #[test]
+    fn stats_carry_versions_rates_totals_and_node_health() {
+        let v3 = stats_from(&fixture!("overview.v3"), Some(&fixture!("nodes.v3")), true);
+        assert_eq!(v3.rabbitmq_version.as_deref(), Some("3.13.7"));
+        assert_eq!(v3.erlang_version.as_deref(), Some("26.2.5.16"));
+        assert_eq!(v3.cluster_name.as_deref(), Some("rabbit@19942ffdc832"));
+        assert!(v3.cluster_wide && !v3.stats_disabled);
+        assert_eq!(
+            (v3.publish_rate, v3.deliver_rate, v3.ack_rate),
+            (Some(9.6), Some(14.4), Some(4.8))
+        );
+        assert_eq!(
+            (v3.messages, v3.messages_ready, v3.messages_unacked),
+            (Some(1998), Some(1977), Some(21))
+        );
+        assert_eq!(
+            (v3.queues, v3.connections, v3.consumers),
+            (Some(18), Some(2), Some(4))
+        );
+        assert_eq!(
+            v3.nodes,
+            [NodeHealth {
+                name: "rabbit@19942ffdc832".into(),
+                running: Some(true),
+                mem_used: Some(201_236_480),
+                mem_limit: Some(13_226_541_056),
+                mem_alarm: Some(false),
+                fd_used: Some(52),
+                fd_total: Some(1_048_576),
+                disk_free: Some(134_650_884_096),
+                disk_free_limit: Some(50_000_000),
+                disk_free_alarm: Some(false),
+                partitions: Vec::new(),
+            }]
+        );
+        assert!(!v3.has_alarm());
+
+        let v4 = stats_from(&fixture!("overview.v4"), Some(&fixture!("nodes.v4")), true);
+        assert_eq!(v4.rabbitmq_version.as_deref(), Some("4.4.0"));
+        assert_eq!(v4.publish_rate, Some(9.8));
+        assert_eq!(v4.consumers, Some(4));
+        assert_eq!(v4.nodes.len(), 1);
+        assert_eq!(v4.nodes[0].fd_used, Some(48));
+    }
+
+    #[test]
+    fn a_management_user_gets_no_node_health_and_no_connection_total() {
+        for (json, queues) in [
+            (fixture!("overview.management.v3"), 18),
+            (fixture!("overview.management.v4"), 17),
+        ] {
+            let stats = stats_from(&json, None, false);
+            assert!(!stats.cluster_wide);
+            assert!(stats.rabbitmq_version.is_some());
+            assert!(stats.nodes.is_empty(), "/api/nodes needs monitoring");
+            // The overview counts only this user's own connections, which
+            // isn't a server total, and has no consumer count at all.
+            assert_eq!((stats.connections, stats.consumers), (None, None));
+            // The user's vhosts' totals and rates are still there.
+            assert_eq!(stats.queues, Some(queues));
+            assert!(stats.messages.is_some() && stats.publish_rate.is_some());
+        }
+    }
+
+    #[test]
+    fn with_metrics_disabled_stats_keep_versions_and_counts_only() {
+        let stats = stats_from(
+            &fixture!("overview.no-metrics.v4"),
+            Some(&fixture!("nodes.no-metrics.v4")),
+            true,
+        );
+        assert!(stats.stats_disabled);
+        assert_eq!(stats.rabbitmq_version.as_deref(), Some("4.4.0"));
+        assert_eq!(
+            (stats.publish_rate, stats.deliver_rate, stats.ack_rate),
+            (None, None, None)
+        );
+        assert_eq!(
+            (stats.messages, stats.messages_ready, stats.messages_unacked),
+            (None, None, None)
+        );
+        assert_eq!(
+            (stats.queues, stats.connections, stats.consumers),
+            (Some(17), Some(1), None)
+        );
+        let node = &stats.nodes[0];
+        assert_eq!(node.running, Some(true));
+        assert_eq!(
+            (node.mem_used, node.fd_used, node.disk_free),
+            (None, None, None)
+        );
+        assert!(!stats.has_alarm(), "unknown alarms aren't alarms");
+    }
+
+    #[tokio::test]
+    async fn stats_read_the_overview_then_the_nodes_for_a_monitoring_user() {
+        use crate::broker::http::stub::header;
+        let (mut conn, server) = probed_as(
+            fixture!("whoami.monitoring.v3"),
+            "3.13.7",
+            false,
+            vec![(200, fixture!("overview.v3")), (200, fixture!("nodes.v3"))],
+        )
+        .await;
+        let stats = conn.stats().await.expect("stats");
+        let requests = server.join().unwrap();
+        let stats = stats.rabbitmq().expect("RabbitMQ stats");
+        assert_eq!(stats.rabbitmq_version.as_deref(), Some("3.13.7"));
+        assert!(stats.cluster_wide);
+        assert_eq!(stats.nodes.len(), 1);
+        // Both trimmed with `columns=`, after the probe's two requests.
+        let lines: Vec<&str> = requests[2..]
+            .iter()
+            .map(|r| r.lines().next().unwrap())
+            .collect();
+        assert!(
+            lines[0].starts_with("GET /api/overview?columns=rabbitmq_version,"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("GET /api/nodes?columns=name,"),
+            "{lines:?}"
+        );
+        assert_eq!(lines.len(), 2);
+        assert!(header(&requests[2], "authorization").is_some());
+    }
+
+    #[tokio::test]
+    async fn stats_skip_the_nodes_without_the_monitoring_tag() {
+        // The stub answers the probe and one overview: a `/api/nodes` request
+        // would find it gone and fail the refresh.
+        let (mut conn, server) = probed_as(
+            fixture!("whoami.management.v4"),
+            "4.4.0",
+            false,
+            vec![(200, fixture!("overview.management.v4"))],
+        )
+        .await;
+        let stats = conn.stats().await.expect("stats");
+        assert_eq!(server.join().unwrap().len(), 3, "probe + overview only");
+        let stats = stats.rabbitmq().unwrap();
+        assert!(!stats.cluster_wide && stats.nodes.is_empty());
+        assert_eq!(stats.connections, None);
+    }
+
+    #[tokio::test]
+    async fn refused_nodes_leave_the_overview() {
+        // The user lost its monitoring tag after the probe.
+        let (mut conn, server) = listing_conn(
+            false,
+            vec![
+                (200, fixture!("overview.v4")),
+                (401, fixture!("error.401.not-monitoring.v4")),
+            ],
+        )
+        .await;
+        let stats = conn.stats().await.expect("the overview still counts");
+        server.join().unwrap();
+        let stats = stats.rabbitmq().unwrap();
+        assert_eq!(stats.rabbitmq_version.as_deref(), Some("4.4.0"));
+        assert!(stats.nodes.is_empty());
+        assert!(conn.mgmt.client().is_ok());
+    }
+
+    #[tokio::test]
+    async fn stats_before_a_good_probe_fail_fast_without_a_request() {
+        // No stub at all: a request would have nowhere to go but the default
+        // (unreachable) URL, and would take the timeouts to fail.
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let started = std::time::Instant::now();
+        let err = conn.stats().await.unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        // The whole chain is in the message: the stats reply carries only that.
+        assert_eq!(
+            err.to_string(),
+            "management API unavailable at http://rabbit.example.com:15672: the management \
+             API has not been probed yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_api_fails_later_stats_fast_with_the_same_message() {
+        // The stub answers the probe, then stops listening.
+        let (mut conn, server) = listing_conn(false, Vec::new()).await;
+        server.join().unwrap();
+        let first = conn.stats().await.unwrap_err().to_string();
+        assert!(
+            first.starts_with("management API unavailable at"),
+            "{first}"
+        );
+        assert!(
+            first.contains("could not reach the management API"),
+            "{first}"
+        );
+        assert!(conn.mgmt.error().is_some(), "marked unreachable");
+        // The next refresh doesn't touch the network, and says the same, so
+        // the footer isn't told twice.
+        let again = conn.stats().await.unwrap_err().to_string();
+        assert_eq!(again, first);
+    }
+
+    #[tokio::test]
+    async fn a_refused_overview_keeps_the_api_usable() {
+        let (mut conn, server) =
+            listing_conn(false, vec![(401, fixture!("error.401.bad-credentials.v4"))]).await;
+        let err = conn.stats().await.unwrap_err().to_string();
+        server.join().unwrap();
+        assert!(err.contains("rejected the credentials"), "{err}");
+        assert!(conn.mgmt.client().is_ok(), "a refusal is cheap to retry");
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_needs_a_successful_probe() {
+        let unprobed = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let caps = unprobed.capabilities();
+        assert_eq!(caps.r#type, crate::broker::BrokerType::Rabbitmq);
+        assert!(!caps.can_dashboard);
+
+        let (probed, server) = listing_conn(false, Vec::new()).await;
+        server.join().unwrap();
+        let caps = probed.capabilities();
+        assert!(caps.can_dashboard, "the probe succeeded");
+        // Publishing is a later phase.
+        assert!(!caps.can_publish && !caps.can_console);
+    }
+
     #[test]
     fn management_client_targets_the_profile_url_and_starts_unprobed() {
         let conn = RabbitmqConnection::new(profile(true), None, None, PREVIEW);
@@ -1768,6 +2127,54 @@ mod integration_tests {
             .expect("tap timed out")
             .expect("stream ended");
         assert_eq!(ev.payload, Payload::Utf8("still tailing".into()));
+    }
+
+    #[tokio::test]
+    async fn connect_offers_the_dashboard_only_when_the_api_answers() {
+        let mut conn = RabbitmqConnection::new(
+            test_profile(),
+            Some("keyhole".into()),
+            Some("keyhole".into()),
+            PREVIEW,
+        );
+        let caps = conn.connect().await.expect("connect");
+        assert!(caps.can_dashboard, "{:?}", conn.mgmt.error());
+
+        // Bind then drop, so the port is (almost certainly) closed.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut profile = test_profile();
+        profile.management_url = Some(format!("http://{}", listener.local_addr().unwrap()));
+        drop(listener);
+        let mut conn = RabbitmqConnection::new(
+            profile,
+            Some("keyhole".into()),
+            Some("keyhole".into()),
+            PREVIEW,
+        );
+        let caps = conn.connect().await.expect("AMQP still connects");
+        assert!(!caps.can_dashboard, "no stats band without the API");
+    }
+
+    #[tokio::test]
+    async fn stats_report_the_version_totals_and_node_health() {
+        // The `keyhole` user is an administrator, so the nodes are read too.
+        let mut conn = connected().await;
+        let stats = conn.stats().await.expect("stats");
+        let stats = stats.rabbitmq().expect("RabbitMQ stats");
+        let version = stats.rabbitmq_version.as_deref().expect("a version");
+        assert!(version.starts_with(['3', '4']), "{version}");
+        assert!(stats.erlang_version.is_some() && stats.cluster_name.is_some());
+        assert!(stats.cluster_wide);
+        assert!(stats.queues.is_some() && stats.connections.is_some());
+        let node = stats.nodes.first().expect("node health");
+        assert!(node.name.starts_with("rabbit@"), "{}", node.name);
+        assert_eq!(node.running, Some(true));
+        if !stats.stats_disabled {
+            assert!(stats.publish_rate.is_some() && stats.messages.is_some());
+            assert!(node.mem_used.is_some() && node.mem_limit.is_some());
+            assert!(node.fd_used.is_some() && node.disk_free.is_some());
+            assert_eq!(node.mem_alarm, Some(false));
+        }
     }
 
     #[tokio::test]

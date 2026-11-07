@@ -411,10 +411,10 @@ async fn stats_updated_sets_stats() {
     let id = connect(&mut app, 1, "prod").await;
     app.handle_event(AppEvent::StatsUpdated {
         id,
-        stats: ServerStats {
+        result: Ok(BrokerStats::Redis(ServerStats {
             redis_version: Some("7.4".into()),
             ..Default::default()
-        },
+        })),
     });
     assert_eq!(
         app.active_conn()
@@ -422,6 +422,7 @@ async fn stats_updated_sets_stats() {
             .dashboard
             .stats
             .as_ref()
+            .and_then(BrokerStats::redis)
             .unwrap()
             .redis_version
             .as_deref(),

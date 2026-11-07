@@ -56,7 +56,7 @@ impl App {
                 self.on_destinations_discovered(id, result)
             }
             AppEvent::DestinationsListed { id, result } => self.on_destinations_listed(id, result),
-            AppEvent::StatsUpdated { id, stats } => self.on_stats(id, stats),
+            AppEvent::StatsUpdated { id, result } => self.on_stats(id, result),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
             AppEvent::SubscriptionStarted { id, sub_id } => self.on_sub_started(id, sub_id),
@@ -107,7 +107,7 @@ impl App {
                 // Only brokers with a dashboard answer RefreshStats; others would
                 // just surface an "unsupported" error each tick.
                 if conn.caps.can_dashboard {
-                    conn.handle.send(ConnCommand::RefreshStats);
+                    conn.request_stats();
                 }
                 // Liveness check; a failure surfaces as Disconnected.
                 conn.handle.send(ConnCommand::Ping);
@@ -374,12 +374,33 @@ impl App {
         }
     }
 
-    pub(super) fn on_stats(&mut self, id: ConnId, stats: ServerStats) {
-        if let Some(conn) = self.conn_by_id_mut(id) {
-            // Store the reply and extend the ops/keys history that the Server
-            // Details graphs draw from.
-            conn.dashboard.record(stats);
+    pub(super) fn on_stats(&mut self, id: ConnId, result: Result<BrokerStats, String>) {
+        let Some(conn) = self.conn_by_id_mut(id) else {
+            return;
+        };
+        conn.dashboard.in_flight = false;
+        let error = match result {
+            Ok(stats) => {
+                // Store the reply and extend the history that the Server
+                // Details graphs draw from.
+                conn.dashboard.error = None;
+                conn.dashboard.record(stats);
+                return;
+            }
+            Err(error) => error,
+        };
+        // RabbitMQ asks its management API every couple of seconds, and a dead
+        // API answers each time with the same cached error, so the footer only
+        // hears about a failure when it changes, and the Server Details tab
+        // shows it in place of figures gone stale. Redis reports every failure
+        // on the footer and keeps its last figures.
+        if conn.caps.r#type != BrokerType::Redis {
+            if conn.dashboard.error.as_deref() == Some(error.as_str()) {
+                return;
+            }
+            conn.dashboard.error = Some(error.clone());
         }
+        self.on_conn_error(id, "stats".to_string(), error);
     }
 
     pub(super) fn on_conn_error(&mut self, id: ConnId, context: String, error: String) {

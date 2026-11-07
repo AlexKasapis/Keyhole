@@ -8,11 +8,11 @@ use std::time::{Duration, Instant};
 use ratatui::widgets::TableState;
 use time::OffsetDateTime;
 
-use crate::broker::actor::ConnHandle;
+use crate::broker::actor::{ConnCommand, ConnHandle};
 pub use crate::broker::DestKind;
 use crate::broker::{
-    BrokerEvent, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId, DestinationInfo,
-    EntryMeta, QueueType, ServerStats, SubSpec, Ttl, ValueType, ValueView,
+    BrokerEvent, BrokerStats, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId,
+    DestinationInfo, EntryMeta, QueueType, SubSpec, Ttl, ValueType, ValueView,
 };
 use crate::config::{ConnectionConfig, PeekMode};
 
@@ -176,8 +176,9 @@ pub enum RecordingsFocus {
 /// own — they live under their anchor and run only while it is focused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelTab {
-    /// Server overview: time-series graphs (ops/sec, keys) and the connected
-    /// client list. The leftmost tab; passive (no input, no feed).
+    /// Server overview: fact lines and time-series graphs (Redis ops/sec and
+    /// network with the connected-client list; RabbitMQ publish/deliver
+    /// rates). The leftmost tab; passive (no input, no feed).
     ServerDetails,
     /// Read-only command console: type a command, Enter to run.
     Console,
@@ -1026,46 +1027,63 @@ impl PeekInspector {
 
 /// Maximum samples retained in the Server Details time-series graphs. Stats
 /// refresh every `STATS_REFRESH_TICKS` ticks (~2s), so this holds roughly the
-/// last `STATS_HISTORY × 2s` ≈ 8 minutes of ops/network history; older samples
-/// are evicted from the front as new ones arrive.
+/// last `STATS_HISTORY × 2s` ≈ 8 minutes of history; older samples are evicted
+/// from the front as new ones arrive.
 pub const STATS_HISTORY: usize = 240;
 
 /// The server-statistics state for one connection: the latest stats and the
 /// tick counter that paces their refresh (both feeding the Browser's Server
-/// band), plus the rolling ops/network history and client-list scroll that drive
-/// the Server Details tab.
+/// band), plus the rolling history and client-list scroll that drive the
+/// Server Details tab.
 #[derive(Default)]
 pub struct StatsPanel {
-    pub stats: Option<ServerStats>,
+    pub stats: Option<BrokerStats>,
     pub stat_ticks: u32,
-    /// Instantaneous ops/sec at each refresh, oldest first, capped at
-    /// [`STATS_HISTORY`]. Feeds the Server Details "Ops/sec" graph.
-    pub ops_history: VecDeque<u64>,
-    /// Total network throughput in bytes/sec (read + write) at each refresh,
-    /// oldest first, capped at [`STATS_HISTORY`]. Feeds the Server Details
-    /// "Net" graph.
-    pub net_history: VecDeque<u64>,
+    /// A `RefreshStats` was sent and its reply hasn't arrived. The stats clock
+    /// skips its turn meanwhile, so a slow broker (RabbitMQ's management API
+    /// on the connection's serial actor) never has requests stacking up.
+    pub in_flight: bool,
+    /// Why the last RabbitMQ refresh failed; cleared by the next one that
+    /// succeeds. (A failed Redis refresh keeps its last figures and only
+    /// reports on the footer.)
+    pub error: Option<String>,
+    /// The upper Server Details graph's samples, oldest first, capped at
+    /// [`STATS_HISTORY`]: Redis ops/sec, RabbitMQ messages published/sec.
+    pub primary_history: VecDeque<u64>,
+    /// The lower graph's samples: Redis network throughput in bytes/sec (read
+    /// + write), RabbitMQ messages delivered/sec.
+    pub secondary_history: VecDeque<u64>,
     /// Scroll offset (rows from the top) of the Server Details client list.
     pub details_scroll: u16,
 }
 
 impl StatsPanel {
-    /// Fold a fresh stats reply into the panel: append its ops/sec and total
-    /// network throughput to the rolling history (evicting the oldest once
-    /// [`STATS_HISTORY`] is reached), then store the reply. A metric absent from
-    /// the reply records a `0` sample so the two series stay evenly spaced in
-    /// time.
-    pub fn record(&mut self, stats: ServerStats) {
-        let ops = stats.instantaneous_ops_per_sec.unwrap_or(0);
-        // INFO reports the rates in KB/s; track bytes/sec so the graph caption
-        // can reuse the byte formatter.
-        let in_bps = stats.instantaneous_input_kbps.unwrap_or(0.0) * 1024.0;
-        let out_bps = stats.instantaneous_output_kbps.unwrap_or(0.0) * 1024.0;
-        let net = (in_bps + out_bps).round() as u64;
-        push_capped(&mut self.ops_history, ops);
-        push_capped(&mut self.net_history, net);
+    /// Fold a fresh stats reply into the panel: append one sample to each
+    /// rolling history (evicting the oldest once [`STATS_HISTORY`] is
+    /// reached), then store the reply. A metric absent from the reply records
+    /// a `0` sample so the two series stay evenly spaced in time.
+    pub fn record(&mut self, stats: BrokerStats) {
+        let (primary, secondary) = match &stats {
+            BrokerStats::Redis(s) => {
+                let ops = s.instantaneous_ops_per_sec.unwrap_or(0);
+                // INFO reports the rates in KB/s; track bytes/sec so the graph
+                // caption can reuse the byte formatter.
+                let in_bps = s.instantaneous_input_kbps.unwrap_or(0.0) * 1024.0;
+                let out_bps = s.instantaneous_output_kbps.unwrap_or(0.0) * 1024.0;
+                (ops, (in_bps + out_bps).round() as u64)
+            }
+            BrokerStats::Rabbitmq(s) => (rate_sample(s.publish_rate), rate_sample(s.deliver_rate)),
+        };
+        push_capped(&mut self.primary_history, primary);
+        push_capped(&mut self.secondary_history, secondary);
         self.stats = Some(stats);
     }
+}
+
+/// A per-second rate as a graph sample: rounded, with a missing or negative
+/// rate (the broker's smoothing can dip below zero) as `0`.
+fn rate_sample(rate: Option<f64>) -> u64 {
+    rate.map_or(0, |r| r.max(0.0).round() as u64)
 }
 
 /// Append `value` to a [`STATS_HISTORY`]-capped ring buffer, evicting the oldest
@@ -1217,6 +1235,19 @@ impl Connection {
                 .unwrap_or_else(|| cursor.unwrap_or(0).min(items.len() - 1))
         });
         self.destinations.table.select(selected);
+    }
+
+    /// Ask the broker for fresh server statistics, unless a request is
+    /// already on its way: the reply ([`crate::event::AppEvent::StatsUpdated`])
+    /// clears the gate, so a slow broker skips a turn of the stats clock rather
+    /// than queueing requests on its serial actor.
+    pub fn request_stats(&mut self) {
+        if self.dashboard.in_flight {
+            return;
+        }
+        // A dropped command (a full inbox) gets no reply, so it mustn't block
+        // the next refresh.
+        self.dashboard.in_flight = self.handle.send(ConnCommand::RefreshStats);
     }
 
     /// Advance the Browser's auto-refresh clock by one tick, and say whether a
@@ -1520,12 +1551,17 @@ impl Connection {
     /// render under their anchor — so their focus-driven lifecycle never shifts
     /// the tab indices. [`Self::panel_tab`] indexes into this.
     pub fn panel_slots(&self) -> Vec<PanelTab> {
-        // AMQP / RabbitMQ have no Redis anchors (no stats/console/monitor/
-        // keyspace). Their bottom panel is a single Tail anchor (an input to
-        // start a topic/queue tail or an exchange tap) followed by one tab per
-        // live tail.
+        // AMQP / RabbitMQ have no Redis anchors (no console/monitor/keyspace).
+        // Their bottom panel is a single Tail anchor (an input to start a
+        // topic/queue tail or an exchange tap) followed by one tab per live
+        // tail, behind Server Details when the broker reports stats (RabbitMQ
+        // with a working management API).
         if !self.caps.uses_key_scan() {
-            let mut slots = vec![PanelTab::Tail];
+            let mut slots = Vec::new();
+            if self.caps.can_dashboard {
+                slots.push(PanelTab::ServerDetails);
+            }
+            slots.push(PanelTab::Tail);
             slots.extend((0..self.subs.len()).map(PanelTab::Sub));
             return slots;
         }
@@ -1551,11 +1587,12 @@ impl Connection {
     }
 
     /// Number of tabs in the bottom panel. AMQP / RabbitMQ: a single Tail anchor
-    /// plus one per live tail. Redis: the six fixed anchors plus one per pub/sub or stream
-    /// tail (MONITOR/keyspace tails have no tab of their own).
+    /// (after Server Details, with stats) plus one per live tail. Redis: the
+    /// six fixed anchors plus one per pub/sub or stream tail (MONITOR/keyspace
+    /// tails have no tab of their own).
     pub fn panel_tab_count(&self) -> usize {
         if !self.caps.uses_key_scan() {
-            return 1 + self.subs.len();
+            return usize::from(self.caps.can_dashboard) + 1 + self.subs.len();
         }
         6 + self
             .subs
@@ -1899,7 +1936,7 @@ impl Default for ConnForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::Payload;
+    use crate::broker::{Payload, RabbitmqStats, ServerStats};
 
     fn ev(tag: &str) -> BrokerEvent {
         BrokerEvent {
@@ -2375,50 +2412,86 @@ mod tests {
         let d = StatsPanel::default();
         assert!(d.stats.is_none());
         assert_eq!(d.stat_ticks, 0);
-        assert!(d.ops_history.is_empty() && d.net_history.is_empty());
+        assert!(!d.in_flight && d.error.is_none());
+        assert!(d.primary_history.is_empty() && d.secondary_history.is_empty());
         assert_eq!(d.details_scroll, 0);
     }
 
     #[test]
     fn stats_panel_record_tracks_ops_and_net_history() {
         let mut panel = StatsPanel::default();
-        let stats = |ops: u64, in_kbps: f64, out_kbps: f64| ServerStats {
-            instantaneous_ops_per_sec: Some(ops),
-            instantaneous_input_kbps: Some(in_kbps),
-            instantaneous_output_kbps: Some(out_kbps),
-            ..Default::default()
+        let stats = |ops: u64, in_kbps: f64, out_kbps: f64| {
+            BrokerStats::Redis(ServerStats {
+                instantaneous_ops_per_sec: Some(ops),
+                instantaneous_input_kbps: Some(in_kbps),
+                instantaneous_output_kbps: Some(out_kbps),
+                ..Default::default()
+            })
         };
         panel.record(stats(7, 1.0, 1.0));
         panel.record(stats(9, 2.0, 0.5));
         // Each sample appends the ops/sec and the summed read+write throughput in
         // bytes/sec (KB/s × 1024), oldest first.
-        assert_eq!(panel.ops_history, [7, 9]);
-        assert_eq!(panel.net_history, [2048, 2560]);
+        assert_eq!(panel.primary_history, [7, 9]);
+        assert_eq!(panel.secondary_history, [2048, 2560]);
         // The latest reply is retained for the band.
         assert_eq!(
-            panel.stats.as_ref().unwrap().instantaneous_ops_per_sec,
+            panel
+                .stats
+                .as_ref()
+                .and_then(BrokerStats::redis)
+                .unwrap()
+                .instantaneous_ops_per_sec,
             Some(9)
         );
 
         // A reply missing the metrics records a 0 so the series stay aligned.
-        panel.record(ServerStats::default());
-        assert_eq!(panel.ops_history, [7, 9, 0]);
-        assert_eq!(panel.net_history, [2048, 2560, 0]);
+        panel.record(BrokerStats::Redis(ServerStats::default()));
+        assert_eq!(panel.primary_history, [7, 9, 0]);
+        assert_eq!(panel.secondary_history, [2048, 2560, 0]);
+    }
+
+    #[test]
+    fn stats_panel_record_tracks_rabbitmq_publish_and_deliver_rates() {
+        let mut panel = StatsPanel::default();
+        let stats = |publish: Option<f64>, deliver: Option<f64>| {
+            BrokerStats::Rabbitmq(RabbitmqStats {
+                publish_rate: publish,
+                deliver_rate: deliver,
+                ack_rate: Some(99.0),
+                ..Default::default()
+            })
+        };
+        // Rates are rounded floats; the ack rate isn't graphed.
+        panel.record(stats(Some(9.6), Some(14.4)));
+        panel.record(stats(Some(0.4), Some(2.5)));
+        assert_eq!(panel.primary_history, [10, 0]);
+        assert_eq!(panel.secondary_history, [14, 3]);
+        // A smoothed rate below zero, and a missing one (metrics off), record 0.
+        panel.record(stats(Some(-0.2), None));
+        assert_eq!(panel.primary_history, [10, 0, 0]);
+        assert_eq!(panel.secondary_history, [14, 3, 0]);
+        // The latest reply is retained for the band and the fact lines.
+        let latest = panel.stats.as_ref().and_then(BrokerStats::rabbitmq);
+        assert_eq!(latest.unwrap().ack_rate, Some(99.0));
     }
 
     #[test]
     fn stats_panel_history_is_capped() {
         let mut panel = StatsPanel::default();
         for i in 0..(STATS_HISTORY as u64 + 10) {
-            panel.record(ServerStats {
+            panel.record(BrokerStats::Redis(ServerStats {
                 instantaneous_ops_per_sec: Some(i),
                 ..Default::default()
-            });
+            }));
         }
         // The ring buffer holds exactly the cap, dropping the oldest samples.
-        assert_eq!(panel.ops_history.len(), STATS_HISTORY);
-        assert_eq!(*panel.ops_history.front().unwrap(), 10);
-        assert_eq!(*panel.ops_history.back().unwrap(), STATS_HISTORY as u64 + 9);
+        assert_eq!(panel.primary_history.len(), STATS_HISTORY);
+        assert_eq!(*panel.primary_history.front().unwrap(), 10);
+        assert_eq!(
+            *panel.primary_history.back().unwrap(),
+            STATS_HISTORY as u64 + 9
+        );
     }
 
     /// Regression: a foreground (live) scan that spans more than one SCAN page

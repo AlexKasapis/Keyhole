@@ -5,9 +5,10 @@
 //!
 //! Browse / inspect / dashboard / console are **optional, capability-gated**
 //! operations. Their request and result types ([`BrowseReq`], [`ValueView`],
-//! [`ServerStats`], …) are Redis-shaped; a broker that doesn't offer them (e.g.
-//! AMQP) keeps the trait's default `bail!` implementations and reports `false`
-//! in its [`Capabilities`], so the UI never surfaces those screens for it.
+//! …) are mostly Redis-shaped; [`BrokerStats`] has a variant per broker that
+//! reports stats (Redis, RabbitMQ). A broker that doesn't offer an operation
+//! (e.g. AMQP) keeps the trait's default `bail!` implementation and reports
+//! `false` in its [`Capabilities`], so the UI never surfaces it.
 //! Realtime tailing ([`subscribe`](BrokerConnection::subscribe), yielding
 //! [`BrokerEvent`]s) is the one capability every broker shares, so the live view
 //! and the recorder work against any broker unchanged.
@@ -114,7 +115,9 @@ pub struct Capabilities {
     pub r#type: BrokerType,
     /// Key/destination browser (Browser screen).
     pub can_browse: bool,
-    /// Server statistics (shown as a stats band atop the Browser screen).
+    /// Server statistics: the Server band atop the Browser screen and the
+    /// Server Details tab, refreshed on the stats clock. RabbitMQ sets it only
+    /// when the management API answered the connect-time probe.
     pub can_dashboard: bool,
     /// Read-only command console (Console screen).
     pub can_console: bool,
@@ -161,7 +164,8 @@ impl Capabilities {
     /// [`crate::broker::rabbitmq`]). `can_browse` is true so it lands on the
     /// Browser screen, whose bottom panel hosts the Tail anchor. AMQP 0.9.1 can't
     /// list queues or exchanges, so the destination list comes from the
-    /// management API ([`BrokerConnection::list_destinations`]).
+    /// management API ([`BrokerConnection::list_destinations`]). So do its stats:
+    /// `connect` turns `can_dashboard` on when the API answered its probe.
     pub fn rabbitmq() -> Self {
         Self {
             r#type: BrokerType::Rabbitmq,
@@ -879,6 +883,115 @@ impl ServerStats {
     }
 }
 
+/// Server statistics in the shape of the broker that reported them: Redis's
+/// from `INFO`, RabbitMQ's from its management API. The Server band and the
+/// Server Details tab draw whichever variant arrives.
+#[derive(Debug, Clone)]
+pub enum BrokerStats {
+    Redis(ServerStats),
+    Rabbitmq(RabbitmqStats),
+}
+
+impl BrokerStats {
+    /// The Redis statistics, if these are Redis's.
+    pub fn redis(&self) -> Option<&ServerStats> {
+        match self {
+            BrokerStats::Redis(s) => Some(s),
+            BrokerStats::Rabbitmq(_) => None,
+        }
+    }
+
+    /// The RabbitMQ statistics, if these are RabbitMQ's.
+    pub fn rabbitmq(&self) -> Option<&RabbitmqStats> {
+        match self {
+            BrokerStats::Rabbitmq(s) => Some(s),
+            BrokerStats::Redis(_) => None,
+        }
+    }
+}
+
+/// RabbitMQ's overview (versions, rates and totals) plus its nodes' health,
+/// from the management API. Any figure can be missing: the broker omits
+/// rates, message totals and node figures when its metrics collector is off,
+/// and `/api/nodes` needs the `monitoring` tag.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RabbitmqStats {
+    pub rabbitmq_version: Option<String>,
+    pub erlang_version: Option<String>,
+    pub cluster_name: Option<String>,
+    /// The broker's metrics collector is off (`disable_stats`), which is why
+    /// the rates and message totals are missing.
+    pub stats_disabled: bool,
+    /// Whether the totals cover the whole cluster. Without the `monitoring`
+    /// tag the overview only counts the vhosts the user can access, and only
+    /// its own connections, so those aren't reported.
+    pub cluster_wide: bool,
+    /// Messages published per second. The broker's smoothed rates are floats
+    /// and can dip below zero.
+    pub publish_rate: Option<f64>,
+    /// Messages delivered to consumers or fetched with `get`, per second.
+    pub deliver_rate: Option<f64>,
+    /// Messages acknowledged per second.
+    pub ack_rate: Option<f64>,
+    /// Messages in all queues: ready plus unacknowledged.
+    pub messages: Option<u64>,
+    pub messages_ready: Option<u64>,
+    pub messages_unacked: Option<u64>,
+    pub queues: Option<u64>,
+    pub connections: Option<u64>,
+    pub consumers: Option<u64>,
+    /// One entry per cluster node. Empty without the `monitoring` tag.
+    pub nodes: Vec<NodeHealth>,
+}
+
+impl RabbitmqStats {
+    /// Whether any node raised an alarm or is down or partitioned.
+    pub fn has_alarm(&self) -> bool {
+        self.nodes.iter().any(|n| !n.alarms().is_empty())
+    }
+}
+
+/// One RabbitMQ node's resource use and alarms. The figures are missing when
+/// the metrics collector is off.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeHealth {
+    pub name: String,
+    pub running: Option<bool>,
+    pub mem_used: Option<u64>,
+    /// The memory high watermark: publishers block above it.
+    pub mem_limit: Option<u64>,
+    pub mem_alarm: Option<bool>,
+    pub fd_used: Option<u64>,
+    pub fd_total: Option<u64>,
+    pub disk_free: Option<u64>,
+    /// The free-disk low watermark: publishers block below it.
+    pub disk_free_limit: Option<u64>,
+    pub disk_free_alarm: Option<bool>,
+    /// Nodes this one is partitioned from.
+    pub partitions: Vec<String>,
+}
+
+impl NodeHealth {
+    /// What's wrong with the node, if anything: down, partitioned, or a
+    /// memory or disk alarm (which blocks publishers).
+    pub fn alarms(&self) -> Vec<&'static str> {
+        let mut alarms = Vec::new();
+        if self.running == Some(false) {
+            alarms.push("down");
+        }
+        if !self.partitions.is_empty() {
+            alarms.push("partitioned");
+        }
+        if self.mem_alarm == Some(true) {
+            alarms.push("memory alarm");
+        }
+        if self.disk_free_alarm == Some(true) {
+            alarms.push("disk alarm");
+        }
+        alarms
+    }
+}
+
 /// The interface every broker implements. The connection actor owns one of
 /// these as a `Box<dyn BrokerConnection>` and calls it in response to commands.
 #[async_trait]
@@ -900,8 +1013,9 @@ pub trait BrokerConnection: Send {
         anyhow::bail!("this broker does not support inspecting values")
     }
 
-    /// Fetch server statistics for the dashboard. Default: unsupported.
-    async fn stats(&mut self) -> anyhow::Result<ServerStats> {
+    /// Fetch server statistics for the dashboard. Default: unsupported (gated
+    /// off via [`Capabilities::can_dashboard`]).
+    async fn stats(&mut self) -> anyhow::Result<BrokerStats> {
         anyhow::bail!("this broker does not support a stats dashboard")
     }
 
@@ -1318,6 +1432,43 @@ mod tests {
         assert_eq!(ev.meta("id"), Some("1-0"));
         assert_eq!(ev.meta("pattern"), Some("p.*"));
         assert_eq!(ev.meta("missing"), None);
+    }
+
+    #[test]
+    fn node_alarms_name_what_is_wrong() {
+        let healthy = NodeHealth {
+            name: "rabbit@a".into(),
+            running: Some(true),
+            mem_alarm: Some(false),
+            disk_free_alarm: Some(false),
+            ..Default::default()
+        };
+        assert!(healthy.alarms().is_empty());
+        // Metrics off: nothing is known, so nothing is flagged.
+        assert!(NodeHealth::default().alarms().is_empty());
+        let troubled = NodeHealth {
+            running: Some(false),
+            partitions: vec!["rabbit@b".into()],
+            mem_alarm: Some(true),
+            disk_free_alarm: Some(true),
+            ..healthy.clone()
+        };
+        assert_eq!(
+            troubled.alarms(),
+            ["down", "partitioned", "memory alarm", "disk alarm"]
+        );
+
+        let mut stats = RabbitmqStats {
+            nodes: vec![healthy.clone()],
+            ..Default::default()
+        };
+        assert!(!stats.has_alarm());
+        stats.nodes.push(NodeHealth {
+            disk_free_alarm: Some(true),
+            ..healthy
+        });
+        assert!(stats.has_alarm(), "any node's alarm counts");
+        assert!(!RabbitmqStats::default().has_alarm());
     }
 
     #[test]

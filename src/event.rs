@@ -12,7 +12,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::broker::actor::ConnHandle;
 use crate::broker::{
-    BrokerEvent, BrowsePage, ConnId, DestinationList, ServerStats, SubSpec, ValueView,
+    BrokerEvent, BrokerStats, BrowsePage, ConnId, DestinationList, SubSpec, ValueView,
 };
 use crate::recording::RecordingStatus;
 
@@ -67,8 +67,13 @@ pub enum AppEvent {
         id: ConnId,
         result: Result<DestinationList, String>,
     },
-    /// Refreshed server statistics.
-    StatsUpdated { id: ConnId, stats: ServerStats },
+    /// Refreshed server statistics, or why the refresh failed. Every
+    /// `RefreshStats` gets exactly one, so the stats clock can tell when the
+    /// previous refresh is done.
+    StatsUpdated {
+        id: ConnId,
+        result: Result<BrokerStats, String>,
+    },
     /// A non-fatal error from a connection operation.
     ConnError {
         id: ConnId,

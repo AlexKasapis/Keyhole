@@ -368,8 +368,9 @@ mod tests {
     };
     use crate::broker::actor::mock;
     use crate::broker::{
-        BrokerEvent, ClientInfo, ConnId, DestinationList, EntryMeta, Payload, PayloadEncoding,
-        ServerStats, StreamEntry, SubSpec, Ttl, ValueType, ValueView,
+        BrokerEvent, BrokerStats, ClientInfo, ConnId, DestinationList, EntryMeta, NodeHealth,
+        Payload, PayloadEncoding, RabbitmqStats, ServerStats, StreamEntry, SubSpec, Ttl, ValueType,
+        ValueView,
     };
     use crate::config::Config;
     use crate::event::AppEvent;
@@ -1284,14 +1285,14 @@ mod tests {
         // "cache" is connected with server stats; "spare" stays offline.
         let handle = mock::handle(1, "cache").await;
         let mut conn = Connection::new(handle);
-        conn.dashboard.stats = Some(ServerStats {
+        conn.dashboard.stats = Some(BrokerStats::Redis(ServerStats {
             redis_version: Some("7.4.0".into()),
             connected_clients: Some(7),
             instantaneous_ops_per_sec: Some(120),
             used_memory: Some(1024 * 1024),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
-        });
+        }));
         app.connections.push(conn);
 
         // Render wide so the full INFO column fits (it truncates on narrow
@@ -1588,7 +1589,7 @@ mod tests {
         // too, so the moved figures are on screen).
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser;
-        app.connections[0].dashboard.stats = Some(ServerStats {
+        app.connections[0].dashboard.stats = Some(BrokerStats::Redis(ServerStats {
             redis_version: Some("7.4.0".into()),
             connected_clients: Some(7),
             used_memory: Some(1024),
@@ -1597,7 +1598,7 @@ mod tests {
             keyspace_misses: Some(1),
             db_keys: vec![(0, 9)],
             ..Default::default()
-        });
+        }));
         let text = screen_text(&mut app);
         // Band: title, connection name, address, and the db in view.
         assert!(text.contains("Server"), "the band has a title");
@@ -1620,11 +1621,11 @@ mod tests {
         // favour of the network graph).
         let (mut app, _rx) = app_with_connection().await;
         app.screen = Screen::Browser; // Server Details is the default bottom tab.
-        app.connections[0].dashboard.stats = Some(ServerStats {
+        app.connections[0].dashboard.stats = Some(BrokerStats::Redis(ServerStats {
             redis_version: Some("7.4.0".into()),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
-        });
+        }));
         let text = screen_text(&mut app);
         assert!(text.contains("49 keys"), "the summed total across DBs");
     }
@@ -2018,14 +2019,14 @@ mod tests {
         // "cache" is live with stats; the AMQP brokers stay offline.
         let handle = mock::handle(1, "cache").await;
         let mut conn = Connection::new(handle);
-        conn.dashboard.stats = Some(ServerStats {
+        conn.dashboard.stats = Some(BrokerStats::Redis(ServerStats {
             redis_version: Some("7.4.0".into()),
             connected_clients: Some(7),
             instantaneous_ops_per_sec: Some(120),
             used_memory: Some(1024 * 1024),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
-        });
+        }));
         app.connections.push(conn);
         insta::assert_snapshot!("connections_populated", render_lines(&mut app, 120, 12));
     }
@@ -2281,6 +2282,191 @@ mod tests {
         );
         assert!(text.contains("Press r to retry."), "{text}");
         assert!(text.contains("keyhole.demo"), "the rows stay: {text}");
+    }
+
+    /// RabbitMQ stats like the 3.13 fixtures': an administrator's view of a
+    /// one-node cluster with live rates.
+    fn sample_rabbitmq_stats() -> RabbitmqStats {
+        RabbitmqStats {
+            rabbitmq_version: Some("3.13.7".into()),
+            erlang_version: Some("26.2.5.16".into()),
+            cluster_name: Some("rabbit@19942ffdc832".into()),
+            stats_disabled: false,
+            cluster_wide: true,
+            publish_rate: Some(9.6),
+            deliver_rate: Some(14.4),
+            ack_rate: Some(4.8),
+            messages: Some(1998),
+            messages_ready: Some(1977),
+            messages_unacked: Some(21),
+            queues: Some(18),
+            connections: Some(2),
+            consumers: Some(4),
+            nodes: vec![NodeHealth {
+                name: "rabbit@19942ffdc832".into(),
+                running: Some(true),
+                mem_used: Some(201_236_480),
+                mem_limit: Some(13_226_541_056),
+                mem_alarm: Some(false),
+                fd_used: Some(52),
+                fd_total: Some(1_048_576),
+                disk_free: Some(134_650_884_096),
+                disk_free_limit: Some(50_000_000),
+                disk_free_alarm: Some(false),
+                partitions: Vec::new(),
+            }],
+        }
+    }
+
+    /// [`rabbitmq_browser`] whose management API answered the probe (so it
+    /// has the Server band and the Server Details tab), after a few stats
+    /// refreshes ending in `stats`.
+    async fn rabbitmq_dashboard(stats: RabbitmqStats) -> (App, Receiver<AppEvent>) {
+        let (mut app, rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        let conn = &mut app.connections[0];
+        conn.caps.can_dashboard = true;
+        for (publish, deliver) in [(4.0, 6.0), (7.2, 9.0), (12.0, 15.4), (8.0, 11.0)] {
+            conn.dashboard.record(BrokerStats::Rabbitmq(RabbitmqStats {
+                publish_rate: Some(publish),
+                deliver_rate: Some(deliver),
+                ..Default::default()
+            }));
+        }
+        conn.dashboard.record(BrokerStats::Rabbitmq(stats));
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_server_details() {
+        // The Server band names the vhost (not a Redis db), and Server Details
+        // (the first tab) carries the versions, totals and node health over
+        // the publish and deliver graphs, across the full width.
+        let (mut app, _rx) = rabbitmq_dashboard(sample_rabbitmq_stats()).await;
+        insta::assert_snapshot!(
+            "browser_rabbitmq_server_details",
+            render_lines(&mut app, 160, 40)
+        );
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_band_names_the_vhost_and_warns_on_an_alarm() {
+        let (mut app, _rx) = rabbitmq_dashboard(sample_rabbitmq_stats()).await;
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("rabbit · 127.0.0.1:5672 · vhost shop"),
+            "{text}"
+        );
+        assert!(!text.contains("db0"), "RabbitMQ has no db");
+        assert!(text.contains("connected"));
+        assert!(text.contains("no alarms"));
+
+        let mut alarmed = sample_rabbitmq_stats();
+        alarmed.nodes[0].mem_alarm = Some(true);
+        let (mut app, _rx) = rabbitmq_dashboard(alarmed).await;
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("● alarm"),
+            "the dot turns to a warning: {text}"
+        );
+        assert!(text.contains("memory alarm"), "the node line says which");
+        let band = app.connections[0].dashboard.stats.clone();
+        assert!(band
+            .as_ref()
+            .and_then(BrokerStats::rabbitmq)
+            .unwrap()
+            .has_alarm());
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_band_dot_is_a_warning_colour_on_an_alarm() {
+        let mut alarmed = sample_rabbitmq_stats();
+        alarmed.nodes[0].disk_free_alarm = Some(true);
+        let (mut app, _rx) = rabbitmq_dashboard(alarmed).await;
+        app.health = ConnHealth::Connected;
+        // Steady in the warning colour, at any instant (no breathing).
+        let warning = app.theme.warning;
+        assert_eq!(dot_at(&mut app, 0).fg, warning.fg);
+        assert_eq!(dot_at(&mut app, 1).fg, warning.fg);
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_server_details_for_a_management_user() {
+        // No `monitoring` tag: no node health, and the totals are the user's
+        // vhosts' (its own connections aren't a server total).
+        let stats = RabbitmqStats {
+            cluster_wide: false,
+            connections: None,
+            consumers: None,
+            nodes: Vec::new(),
+            ..sample_rabbitmq_stats()
+        };
+        let (mut app, _rx) = rabbitmq_dashboard(stats).await;
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("your vhosts: 1998 msgs · 1977 ready · 21 unacked · 18 queues"),
+            "{text}"
+        );
+        assert!(!text.contains("connections"));
+        assert!(text.contains("node health needs the monitoring tag"));
+        assert!(text.contains("Publish/s 9.6"), "rates still come through");
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_server_details_with_metrics_disabled() {
+        // The overview keeps its versions and counts; rates, message totals and
+        // node figures are gone, and the tab says why.
+        let stats = RabbitmqStats {
+            stats_disabled: true,
+            publish_rate: None,
+            deliver_rate: None,
+            ack_rate: None,
+            messages: None,
+            messages_ready: None,
+            messages_unacked: None,
+            consumers: None,
+            nodes: vec![NodeHealth {
+                name: "rabbit@f19b542c61db".into(),
+                running: Some(true),
+                ..Default::default()
+            }],
+            ..sample_rabbitmq_stats()
+        };
+        let (mut app, _rx) = rabbitmq_dashboard(stats).await;
+        let text = screen_text(&mut app);
+        assert!(text.contains("metrics collector off"), "{text}");
+        assert!(text.contains("18 queues · 2 connections"), "{text}");
+        assert!(!text.contains("msgs"));
+        assert!(text.contains("rabbit@f19b542c61db · running"), "{text}");
+        assert!(text.contains("No message rates"), "{text}");
+        assert!(!text.contains("Publish/s"));
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_server_details_show_a_failed_refresh() {
+        let (mut app, _rx) = rabbitmq_dashboard(sample_rabbitmq_stats()).await;
+        app.connections[0].dashboard.error =
+            Some("management API unavailable at http://127.0.0.1:15672".into());
+        let text = screen_text(&mut app);
+        assert!(
+            text.contains("Server details unavailable: management API unavailable"),
+            "{text}"
+        );
+        assert!(text.contains("r in the list retries"));
+        assert!(!text.contains("Publish/s"), "no stale figures");
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_graph_captions_show_a_dash_for_a_missing_rate() {
+        let stats = RabbitmqStats {
+            publish_rate: None,
+            deliver_rate: Some(-0.2),
+            ack_rate: None,
+            ..sample_rabbitmq_stats()
+        };
+        let (mut app, _rx) = rabbitmq_dashboard(stats).await;
+        let text = screen_text(&mut app);
+        assert!(text.contains("Publish/s — · peak 12"), "{text}");
+        assert!(text.contains("Deliver/s 0.0 · ack — · peak 15"), "{text}");
     }
 
     #[tokio::test]
@@ -2859,7 +3045,7 @@ mod tests {
         // Keep the bottom panel on the Console (this snapshot covers the Server
         // band up top, not the new leftmost Server Details tab).
         app.connections[0].panel_tab = 1;
-        app.connections[0].dashboard.stats = Some(ServerStats {
+        app.connections[0].dashboard.stats = Some(BrokerStats::Redis(ServerStats {
             redis_version: Some("7.4.0".into()),
             uptime_seconds: Some(3661),
             connected_clients: Some(7),
@@ -2871,7 +3057,7 @@ mod tests {
             keyspace_misses: Some(100),
             db_keys: vec![(0, 42), (1, 7)],
             ..Default::default()
-        });
+        }));
         insta::assert_snapshot!("browser_with_stats", render_lines(&mut app, 90, 20));
     }
 
@@ -3002,12 +3188,15 @@ mod tests {
         // A short ops/network history so the sparklines have a visible shape
         // (network samples are bytes/sec).
         for ops in [2u64, 5, 9, 14, 22, 18, 27, 31] {
-            app.connections[0].dashboard.ops_history.push_back(ops);
+            app.connections[0].dashboard.primary_history.push_back(ops);
         }
         for net in [1024u64, 2048, 4096, 8192, 6000, 12000, 9000, 16384] {
-            app.connections[0].dashboard.net_history.push_back(net);
+            app.connections[0]
+                .dashboard
+                .secondary_history
+                .push_back(net);
         }
-        app.connections[0].dashboard.stats = Some(stats);
+        app.connections[0].dashboard.stats = Some(BrokerStats::Redis(stats));
         // Server Details is the leftmost tab (index 0), selected by default. A
         // taller frame gives the panel room for the metrics/facts/health lines,
         // the two graphs, and the client table (title + column header + rows).

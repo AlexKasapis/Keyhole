@@ -43,6 +43,11 @@ const QUEUE_COLUMNS: &str = "name,type,state,durable,auto_delete,exclusive,argum
     message_stats.ack_details.rate,message_stats.redeliver_details.rate";
 const EXCHANGE_COLUMNS: &str = "name,type,durable,auto_delete,internal,arguments,policy,\
     message_stats.publish_in_details.rate,message_stats.publish_out_details.rate";
+/// The overview's columns for the stats band. `columns=` only trims the
+/// overview's top-level keys (a dotted path inside `message_stats` returns the
+/// whole group), but it still drops the listeners, contexts and exchange types.
+const OVERVIEW_COLUMNS: &str = "rabbitmq_version,erlang_version,cluster_name,node,disable_stats,\
+    message_stats,queue_totals,object_totals";
 const NODE_COLUMNS: &str = "name,running,uptime,mem_used,mem_limit,mem_alarm,disk_free,\
     disk_free_limit,disk_free_alarm,fd_used,fd_total,partitions";
 const CONNECTION_COLUMNS: &str = "name,user_provided_name,user,peer_host,peer_port,channels,\
@@ -125,9 +130,13 @@ impl MgmtClient {
         )
     }
 
-    /// `GET /api/overview`: cluster-wide versions, totals and rates.
+    /// `GET /api/overview`, trimmed to the versions, totals and rates. The
+    /// totals are cluster-wide only for a `monitoring` user.
     pub fn overview(&self) -> anyhow::Result<Overview> {
-        self.get_json("/api/overview", Scope::Cluster)
+        self.get_json(
+            &format!("/api/overview?columns={OVERVIEW_COLUMNS}"),
+            Scope::Cluster,
+        )
     }
 
     /// `GET /api/nodes`, trimmed to the health figures. Needs the `monitoring`
@@ -1498,7 +1507,7 @@ mod tests {
         assert_eq!(
             lines,
             vec![
-                "GET /api/overview".to_string(),
+                format!("GET /api/overview?columns={OVERVIEW_COLUMNS}"),
                 format!(
                     "GET /api/exchanges/my%20vhost%2Fx?columns={EXCHANGE_COLUMNS}&page=1&page_size=500"
                 ),

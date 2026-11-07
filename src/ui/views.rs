@@ -20,8 +20,8 @@ use crate::app::{
     SubState, Subscription, ViewRow,
 };
 use crate::broker::{
-    BrokerEvent, BrokerType, ClientInfo, ExchangeType, Payload, QueueType, ServerStats, Ttl,
-    ValueView, DESTINATION_LIST_CAP, STREAM_PEEK_HINT,
+    BrokerEvent, BrokerStats, BrokerType, ClientInfo, ExchangeType, NodeHealth, Payload, QueueType,
+    RabbitmqStats, ServerStats, Ttl, ValueView, DESTINATION_LIST_CAP, STREAM_PEEK_HINT,
 };
 use crate::config::{AnimationSpeed, ConnectionConfig, PeekMode};
 use crate::theme::Theme;
@@ -143,7 +143,7 @@ fn connection_info(conn: &Connection) -> String {
     match conn.caps.r#type {
         BrokerType::Redis => {
             let mut parts: Vec<String> = Vec::new();
-            if let Some(stats) = &conn.dashboard.stats {
+            if let Some(stats) = conn.dashboard.stats.as_ref().and_then(BrokerStats::redis) {
                 if let Some(version) = &stats.redis_version {
                     parts.push(format!("v{version}"));
                 }
@@ -218,7 +218,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let now = app.now;
     let anim_speed = app.animation_speed();
     let panel_h = panel_band_height(frame.area().height);
-    // RabbitMQ's empty list names the vhost it looked in.
+    // RabbitMQ's Server band and empty list name the vhost.
     let vhost = active_vhost(app);
     // The peek pane says what opening a queue would do.
     let peek_mode = app.peek_mode();
@@ -267,7 +267,13 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let panel_area = conn.caps.can_tail().then(|| chunks[body_idx + 1]);
 
     if let Some(band_area) = band_area {
-        server_stats_band(frame, conn, health, now, anim_speed, theme, band_area);
+        let band = ServerBand {
+            health,
+            now,
+            anim_speed,
+            vhost: vhost.as_deref(),
+        };
+        server_stats_band(frame, conn, &band, theme, band_area);
     }
 
     // AMQP / RabbitMQ browse a destination list (no key scan), so their body is
@@ -1353,18 +1359,27 @@ fn entry_label(key: &str) -> &str {
     key.rsplit_once(':').map_or(key, |(_, tail)| tail)
 }
 
-/// The Server band shown atop the Browser for brokers that expose server
-/// statistics (Redis). A compact strip identifying the live connection — its
-/// name, `host:port` address, and the database in view — with the connection
-/// health dot riding in the title beside the "Server" label. The fuller
-/// statistics (memory, hit ratio, version, uptime, clients, ops/sec, keys) live
-/// in the Server Details tab below.
-fn server_stats_band(
-    frame: &mut Frame,
-    conn: &Connection,
+/// What the Server band shows besides the connection itself: the connection
+/// health behind its dot (and the clock that pulses it), and RabbitMQ's vhost.
+struct ServerBand<'a> {
     health: ConnHealth,
     now: OffsetDateTime,
     anim_speed: AnimationSpeed,
+    /// The RabbitMQ profile's vhost, shown in place of Redis's db.
+    vhost: Option<&'a str>,
+}
+
+/// The Server band shown atop the Browser for brokers that expose server
+/// statistics (Redis, and RabbitMQ with its management API). A compact strip
+/// identifying the live connection — its name, `host:port` address, and the
+/// database (Redis) or vhost (RabbitMQ) in view — with the connection health
+/// dot riding in the title beside the "Server" label. A RabbitMQ node alarm
+/// turns a connected dot to a warning. The fuller statistics live in the
+/// Server Details tab below.
+fn server_stats_band(
+    frame: &mut Frame,
+    conn: &Connection,
+    band: &ServerBand,
     theme: &Theme,
     area: Rect,
 ) {
@@ -1372,13 +1387,24 @@ fn server_stats_band(
     // so the band reads as a panel rather than text crammed against a frame.
     // The connection-health indicator (the former top-right header dot) rides in
     // the title here, beside the "Server" label.
-    let (dot, hlabel, dot_style) = crate::ui::health_indicator(health, theme);
-    // A connected dot breathes (when animation is on; steady when off);
-    // transitional/offline states always hold steady.
-    let dot_style = if health == ConnHealth::Connected {
-        crate::ui::anim::pulse(dot_style, now, anim_speed)
-    } else {
-        dot_style
+    let alarm = conn
+        .dashboard
+        .stats
+        .as_ref()
+        .and_then(BrokerStats::rabbitmq)
+        .is_some_and(RabbitmqStats::has_alarm);
+    let (dot, hlabel, dot_style) = match crate::ui::health_indicator(band.health, theme) {
+        // A node alarm (or a node down or partitioned) blocks publishers: the
+        // connection is up, but the broker needs a look.
+        _ if alarm && band.health == ConnHealth::Connected => ("●", "alarm", theme.warning),
+        // A connected dot breathes (when animation is on; steady when off);
+        // transitional/offline states always hold steady.
+        (dot, label, style) if band.health == ConnHealth::Connected => (
+            dot,
+            label,
+            crate::ui::anim::pulse(style, band.now, band.anim_speed),
+        ),
+        indicator => indicator,
     };
     let title = Line::from(vec![
         Span::styled(" Server ", theme.heading),
@@ -1394,17 +1420,23 @@ fn server_stats_band(
     frame.render_widget(block, area);
 
     // One identifying line: the connection name leads, then its address and the
-    // database currently in view. Separators and the `db` label stay dim so the
-    // name and figures read.
-    let line = Line::from(vec![
+    // database (or vhost) currently in view. Separators and the `db` / `vhost`
+    // labels stay dim so the name and figures read.
+    let mut spans = vec![
         Span::styled(conn.name.clone(), theme.heading),
         Span::styled(" · ", theme.dim),
         Span::raw(conn.handle.addr.clone()),
-        Span::styled(" · ", theme.dim),
-        Span::styled("db", theme.dim),
-        Span::raw(conn.db.to_string()),
-    ]);
-    frame.render_widget(Paragraph::new(line), inner);
+    ];
+    if conn.caps.uses_key_scan() {
+        spans.push(Span::styled(" · ", theme.dim));
+        spans.push(Span::styled("db", theme.dim));
+        spans.push(Span::raw(conn.db.to_string()));
+    } else if let Some(vhost) = band.vhost {
+        spans.push(Span::styled(" · ", theme.dim));
+        spans.push(Span::styled("vhost ", theme.dim));
+        spans.push(Span::raw(vhost.to_string()));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
 }
 
 /// The Browser's tabbed bottom panel: one bordered box whose *title line is the
@@ -1949,13 +1981,27 @@ fn console_content(
     frame.render_widget(Paragraph::new(prompt), prompt_area);
 }
 
-/// The Server Details tab's content: the server statistics moved down from the
-/// Server band (version, uptime, clients, memory, hit) on one line, the
-/// deployment facts on the next, then — after a margin — two time-series graphs
-/// (ops/sec and total keys) on the left and the connected-client list on the
-/// right. The leftmost bottom-panel tab; only ever drawn for a broker with a
-/// dashboard (Redis).
+/// The Server Details tab's content: three fact lines, then — after a margin —
+/// two time-series graphs. Redis: the server statistics moved down from the
+/// Server band (version, uptime, clients, memory, hit), the deployment facts
+/// and health, with ops/sec and network graphs on the left and the connected
+/// client list on the right. RabbitMQ: versions, totals and node health over
+/// full-width publish and deliver rate graphs. The leftmost bottom-panel tab;
+/// only ever drawn for a broker with a dashboard.
 fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
+    // RabbitMQ's last refresh failed: the figures would be stale, so say why
+    // instead.
+    if let Some(error) = &conn.dashboard.error {
+        let lines = vec![
+            Line::styled(
+                format!("Server details unavailable: {error}"),
+                theme.warning,
+            ),
+            Line::styled("r in the list retries the management API", theme.dim),
+        ];
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
     let Some(stats) = conn.dashboard.stats.as_ref() else {
         frame.render_widget(
             Paragraph::new(Line::styled("Collecting server details…", theme.dim)),
@@ -1972,9 +2018,8 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
         ..area
     };
 
-    // Three fact lines (server metrics, deployment facts, then health), a blank
-    // spacer for margin, then the body: graphs left, clients right.
-    let [metrics_area, facts_area, health_area, _gap, body_area] = Layout::vertical([
+    // Three fact lines, a blank spacer for margin, then the body.
+    let [first_area, second_area, third_area, _gap, body_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -1982,15 +2027,28 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
         Constraint::Min(0),
     ])
     .areas(area);
+    let stats = match stats {
+        BrokerStats::Redis(stats) => stats,
+        BrokerStats::Rabbitmq(stats) => {
+            let lines = [
+                (rabbitmq_versions_line(stats, theme), first_area),
+                (rabbitmq_totals_line(stats, theme), second_area),
+                (rabbitmq_nodes_line(stats, theme), third_area),
+            ];
+            for (line, line_area) in lines {
+                frame.render_widget(Paragraph::new(line), line_area);
+            }
+            rabbitmq_graphs(frame, conn, stats, theme, body_area);
+            return;
+        }
+    };
+    // Redis: server metrics, deployment facts, then health.
     frame.render_widget(
         Paragraph::new(server_metrics_line(stats, theme)),
-        metrics_area,
+        first_area,
     );
-    frame.render_widget(Paragraph::new(server_facts_line(stats, theme)), facts_area);
-    frame.render_widget(
-        Paragraph::new(server_health_line(stats, theme)),
-        health_area,
-    );
+    frame.render_widget(Paragraph::new(server_facts_line(stats, theme)), second_area);
+    frame.render_widget(Paragraph::new(server_health_line(stats, theme)), third_area);
 
     // Carve a two-column gutter out of the graphs column so it doesn't butt
     // against the client list.
@@ -2001,13 +2059,234 @@ fn server_details_content(frame: &mut Frame, conn: &Connection, theme: &Theme, a
         width: graphs_full.width.saturating_sub(2),
         ..graphs_full
     };
-    server_graphs(frame, conn, theme, graphs_area);
+    server_graphs(frame, conn, stats, theme, graphs_area);
     server_clients(
         frame,
         &stats.clients,
         conn.dashboard.details_scroll,
         theme,
         clients_area,
+    );
+}
+
+/// Push a dim ` · ` separator unless `spans` is still empty.
+fn push_sep(spans: &mut Vec<Span<'static>>, theme: &Theme) {
+    if !spans.is_empty() {
+        spans.push(Span::styled(" · ", theme.dim));
+    }
+}
+
+/// `n` followed by its dim unit, singular for one: `1 queue`, `18 queues`.
+fn push_count(
+    spans: &mut Vec<Span<'static>>,
+    n: u64,
+    one: &'static str,
+    many: &'static str,
+    theme: &Theme,
+) {
+    push_sep(spans, theme);
+    spans.push(Span::raw(list_count(n)));
+    spans.push(Span::styled(if n == 1 { one } else { many }, theme.dim));
+}
+
+/// RabbitMQ's first fact line: the RabbitMQ and Erlang versions and the
+/// cluster name, plus a warning when the metrics collector is off (which is
+/// why the rates and message totals are missing).
+fn rabbitmq_versions_line(stats: &RabbitmqStats, theme: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let facts = [
+        ("RabbitMQ ", &stats.rabbitmq_version),
+        ("Erlang ", &stats.erlang_version),
+        ("cluster ", &stats.cluster_name),
+    ];
+    for (label, value) in facts {
+        if let Some(value) = value {
+            push_sep(&mut spans, theme);
+            spans.push(Span::styled(label, theme.dim));
+            spans.push(Span::raw(value.clone()));
+        }
+    }
+    if stats.stats_disabled {
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("metrics collector off", theme.warning));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled("server details", theme.dim));
+    }
+    Line::from(spans)
+}
+
+/// RabbitMQ's totals line: messages (ready and unacknowledged), then queue,
+/// connection and consumer counts. Without the `monitoring` tag the broker
+/// counts only the user's vhosts, which a dim prefix says.
+fn rabbitmq_totals_line(stats: &RabbitmqStats, theme: &Theme) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some(n) = stats.messages {
+        push_count(&mut spans, n, " msg", " msgs", theme);
+    }
+    if let Some(n) = stats.messages_ready {
+        push_count(&mut spans, n, " ready", " ready", theme);
+    }
+    if let Some(n) = stats.messages_unacked {
+        push_count(&mut spans, n, " unacked", " unacked", theme);
+    }
+    if let Some(n) = stats.queues {
+        push_count(&mut spans, n, " queue", " queues", theme);
+    }
+    if let Some(n) = stats.connections {
+        push_count(&mut spans, n, " connection", " connections", theme);
+    }
+    if let Some(n) = stats.consumers {
+        push_count(&mut spans, n, " consumer", " consumers", theme);
+    }
+    if spans.is_empty() {
+        return Line::styled("no totals", theme.dim);
+    }
+    if !stats.cluster_wide {
+        spans.insert(0, Span::styled("your vhosts: ", theme.dim));
+    }
+    Line::from(spans)
+}
+
+/// RabbitMQ's node health line: per node, its memory, file descriptors, free
+/// disk and alarms (nodes split by a dim bar). Figures the broker didn't
+/// report are left out. `/api/nodes` needs the `monitoring` tag, so without it
+/// the line says so.
+fn rabbitmq_nodes_line(stats: &RabbitmqStats, theme: &Theme) -> Line<'static> {
+    if stats.nodes.is_empty() {
+        let why = if stats.cluster_wide {
+            "no node details"
+        } else {
+            "node health needs the monitoring tag"
+        };
+        return Line::styled(why, theme.dim);
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (i, node) in stats.nodes.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", theme.dim));
+        }
+        spans.extend(node_health_spans(node, theme));
+    }
+    Line::from(spans)
+}
+
+/// One node's segment of [`rabbitmq_nodes_line`]: its name, its alarms (first,
+/// so a narrow terminal doesn't cut them off), then its figures. Alarms and a
+/// figure under alarm read in the warning colour.
+fn node_health_spans(node: &NodeHealth, theme: &Theme) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::raw(node.name.clone())];
+    let alarms = node.alarms();
+    if !alarms.is_empty() {
+        for alarm in alarms {
+            push_sep(&mut spans, theme);
+            spans.push(Span::styled(alarm, theme.warning));
+        }
+    } else if node.mem_alarm.is_some() || node.disk_free_alarm.is_some() {
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("no alarms", theme.dim));
+    } else if node.running == Some(true) {
+        // Metrics off: the node reports only that it's up.
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("running", theme.dim));
+    }
+    let figure_style = |alarm: Option<bool>| {
+        if alarm == Some(true) {
+            theme.warning
+        } else {
+            Style::default()
+        }
+    };
+    if let Some(used) = node.mem_used {
+        let value = match node.mem_limit {
+            Some(limit) => format!("{} / {}", human_bytes(used), human_bytes(limit)),
+            None => human_bytes(used),
+        };
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("mem ", theme.dim));
+        spans.push(Span::styled(value, figure_style(node.mem_alarm)));
+    }
+    if let Some(used) = node.fd_used {
+        let value = match node.fd_total {
+            Some(total) => format!("{} / {}", list_count(used), list_count(total)),
+            None => list_count(used),
+        };
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("fd ", theme.dim));
+        spans.push(Span::raw(value));
+    }
+    if let Some(free) = node.disk_free {
+        push_sep(&mut spans, theme);
+        spans.push(Span::styled("disk ", theme.dim));
+        spans.push(Span::styled(
+            human_bytes(free),
+            figure_style(node.disk_free_alarm),
+        ));
+        spans.push(Span::styled(" free", theme.dim));
+        if let Some(limit) = node.disk_free_limit {
+            spans.push(Span::styled(" (min ", theme.dim));
+            spans.push(Span::raw(human_bytes(limit)));
+            spans.push(Span::styled(")", theme.dim));
+        }
+    }
+    spans
+}
+
+/// A per-second rate for a graph caption: one decimal, `—` when the broker
+/// didn't report it, and `0.0` for a smoothed rate below zero.
+fn rate_figure(rate: Option<f64>) -> String {
+    rate_label(rate).trim_end_matches("/s").to_string()
+}
+
+/// RabbitMQ's Server Details body: the publish rate graph stacked over the
+/// deliver rate graph, across the tab's full width. With the metrics
+/// collector off there are no rates to draw, so a note says why.
+fn rabbitmq_graphs(
+    frame: &mut Frame,
+    conn: &Connection,
+    stats: &RabbitmqStats,
+    theme: &Theme,
+    area: Rect,
+) {
+    if stats.stats_disabled {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "No message rates: the broker's metrics collector is disabled.",
+                theme.dim,
+            )),
+            area,
+        );
+        return;
+    }
+    let [publish_area, deliver_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Min(0)]).areas(area);
+    let peak = |history: &VecDeque<u64>| history.iter().copied().max().unwrap_or(0);
+    let history = &conn.dashboard.primary_history;
+    server_graph(
+        frame,
+        theme,
+        publish_area,
+        "Publish/s",
+        history,
+        format!(
+            "{} · peak {}",
+            rate_figure(stats.publish_rate),
+            peak(history)
+        ),
+    );
+    let history = &conn.dashboard.secondary_history;
+    server_graph(
+        frame,
+        theme,
+        deliver_area,
+        "Deliver/s",
+        history,
+        format!(
+            "{} · ack {} · peak {}",
+            rate_figure(stats.deliver_rate),
+            rate_figure(stats.ack_rate),
+            peak(history)
+        ),
     );
 }
 
@@ -2205,24 +2484,25 @@ fn server_health_line(stats: &ServerStats, theme: &Theme) -> Line<'static> {
     Line::from(spans)
 }
 
-/// The left column of the Server Details tab: an ops/sec graph stacked over a
-/// network-throughput graph, each captioned with its current value.
-fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect) {
+/// The left column of Redis's Server Details tab: an ops/sec graph stacked
+/// over a network-throughput graph, each captioned with its current value.
+fn server_graphs(
+    frame: &mut Frame,
+    conn: &Connection,
+    stats: &ServerStats,
+    theme: &Theme,
+    area: Rect,
+) {
     // The two graphs split the column evenly. Each carries its own caption, so
     // they read apart without a spacer row between them — a row the third
     // (health) fact line above now claims on a short terminal.
     let [ops_area, net_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Min(0)]).areas(area);
 
-    let ops_now = conn
-        .dashboard
-        .stats
-        .as_ref()
-        .and_then(|s| s.instantaneous_ops_per_sec)
-        .unwrap_or(0);
+    let ops_now = stats.instantaneous_ops_per_sec.unwrap_or(0);
     let ops_peak = conn
         .dashboard
-        .ops_history
+        .primary_history
         .iter()
         .copied()
         .max()
@@ -2232,27 +2512,20 @@ fn server_graphs(frame: &mut Frame, conn: &Connection, theme: &Theme, area: Rect
         theme,
         ops_area,
         "Ops/sec",
-        &conn.dashboard.ops_history,
+        &conn.dashboard.primary_history,
         format!("{ops_now} · peak {ops_peak}"),
     );
 
     // Network throughput: the read and write rates broken out in the caption
     // (INFO reports them in KB/s), over a sparkline of their bytes/sec sum.
-    let stats = conn.dashboard.stats.as_ref();
-    let in_bps = (stats
-        .and_then(|s| s.instantaneous_input_kbps)
-        .unwrap_or(0.0)
-        * 1024.0) as u64;
-    let out_bps = (stats
-        .and_then(|s| s.instantaneous_output_kbps)
-        .unwrap_or(0.0)
-        * 1024.0) as u64;
+    let in_bps = (stats.instantaneous_input_kbps.unwrap_or(0.0) * 1024.0) as u64;
+    let out_bps = (stats.instantaneous_output_kbps.unwrap_or(0.0) * 1024.0) as u64;
     server_graph(
         frame,
         theme,
         net_area,
         "Net",
-        &conn.dashboard.net_history,
+        &conn.dashboard.secondary_history,
         format!(
             "{}/s in · {}/s out",
             human_bytes(in_bps),

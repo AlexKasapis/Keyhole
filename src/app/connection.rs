@@ -456,8 +456,8 @@ impl App {
     }
 
     pub(super) fn request_stats(&mut self, id: ConnId) {
-        if let Some(conn) = self.conn_by_id(id) {
-            conn.handle.send(ConnCommand::RefreshStats);
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            conn.request_stats();
         }
     }
 

@@ -697,3 +697,174 @@ async fn rabbitmq_publish_is_refused_as_unsupported() {
         status.message
     );
 }
+
+// -- stats ------------------------------------------------------------------
+
+/// RabbitMQ's capabilities when the management probe at connect succeeded.
+fn rabbitmq_with_dashboard() -> Capabilities {
+    Capabilities {
+        can_dashboard: true,
+        ..Capabilities::rabbitmq()
+    }
+}
+
+/// Connect a RabbitMQ handle whose management API answered the probe, with
+/// the connect-time commands drained.
+fn connect_with_dashboard(app: &mut App) -> Receiver<ConnCommand> {
+    let (handle, mut cmds) = mock::capture_handle(1, "rabbit", rabbitmq_with_dashboard());
+    app.handle_event(AppEvent::Connected { handle });
+    sent(&mut cmds);
+    cmds
+}
+
+/// Run the active connection's clock up to its next stats refresh.
+fn reach_stats_tick(app: &mut App) {
+    app.active_conn_mut().unwrap().dashboard.stat_ticks = STATS_REFRESH_TICKS - 1;
+    app.on_tick();
+}
+
+fn stats_requests(cmds: &[ConnCommand]) -> usize {
+    cmds.iter()
+        .filter(|c| matches!(c, ConnCommand::RefreshStats))
+        .count()
+}
+
+fn stats_reply(app: &mut App, result: Result<RabbitmqStats, String>) {
+    app.handle_event(AppEvent::StatsUpdated {
+        id: ConnId(1),
+        result: result.map(BrokerStats::Rabbitmq),
+    });
+}
+
+#[tokio::test]
+async fn a_probed_management_api_adds_server_details_and_asks_for_stats() {
+    let (mut app, _rx) = test_app();
+    let (handle, mut cmds) = mock::capture_handle(1, "rabbit", rabbitmq_with_dashboard());
+    app.handle_event(AppEvent::Connected { handle });
+    assert!(
+        matches!(
+            sent(&mut cmds).as_slice(),
+            [
+                ConnCommand::ListDestinations { reprobe: false },
+                ConnCommand::RefreshStats
+            ]
+        ),
+        "connect lists and asks for the first stats"
+    );
+    let conn = app.active_conn().unwrap();
+    assert_eq!(
+        conn.panel_slots(),
+        vec![PanelTab::ServerDetails, PanelTab::Tail]
+    );
+    assert_eq!(conn.panel_tab_count(), 2);
+    assert_eq!(conn.active_panel(), PanelTab::ServerDetails);
+    assert!(conn.dashboard.in_flight);
+}
+
+#[tokio::test]
+async fn without_the_management_api_there_are_no_stats_or_details() {
+    let (mut app, _rx) = test_app();
+    let mut cmds = connect_capturing(&mut app);
+    reach_stats_tick(&mut app);
+    assert_eq!(stats_requests(&sent(&mut cmds)), 0);
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.panel_slots(), vec![PanelTab::Tail]);
+    assert!(!conn.dashboard.in_flight);
+}
+
+#[tokio::test]
+async fn tab_from_the_list_skips_server_details_for_the_tail_anchor() {
+    let (mut app, _rx) = test_app();
+    let mut cmds = connect_with_dashboard(&mut app);
+    submit_on_tail_anchor(&mut app, "exchange:ex");
+    assert!(
+        sent(&mut cmds)
+            .iter()
+            .any(|c| matches!(c, ConnCommand::Subscribe { .. })),
+        "the anchor tapped the exchange"
+    );
+}
+
+#[tokio::test]
+async fn stats_requests_never_stack_while_one_is_in_flight() {
+    let (mut app, _rx) = test_app();
+    let mut cmds = connect_with_dashboard(&mut app);
+    // The connect-time request hasn't been answered: the clock skips its turn
+    // (the liveness ping still goes out).
+    reach_stats_tick(&mut app);
+    let tick = sent(&mut cmds);
+    assert_eq!(stats_requests(&tick), 0, "{tick:?}");
+    assert!(tick.iter().any(|c| matches!(c, ConnCommand::Ping)));
+
+    // A reply, success or failure, frees the next turn.
+    stats_reply(&mut app, Ok(RabbitmqStats::default()));
+    reach_stats_tick(&mut app);
+    assert_eq!(stats_requests(&sent(&mut cmds)), 1);
+    reach_stats_tick(&mut app);
+    assert_eq!(stats_requests(&sent(&mut cmds)), 0, "in flight again");
+    stats_reply(&mut app, Err("management API unavailable".into()));
+    reach_stats_tick(&mut app);
+    assert_eq!(stats_requests(&sent(&mut cmds)), 1);
+}
+
+#[tokio::test]
+async fn a_repeated_stats_failure_reaches_the_footer_once() {
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_with_dashboard(&mut app);
+    let dead = "management API unavailable at http://x:15672: could not reach the management API";
+    stats_reply(&mut app, Err(dead.into()));
+    let status = app.status.take().expect("the first failure is reported");
+    assert!(status.is_error);
+    assert_eq!(status.message, format!("[1] stats: {dead}"));
+    assert_eq!(
+        app.active_conn().unwrap().dashboard.error.as_deref(),
+        Some(dead)
+    );
+
+    // The cached error comes back on every refresh: the footer stays quiet.
+    stats_reply(&mut app, Err(dead.into()));
+    assert!(app.status.is_none(), "the same failure isn't repeated");
+
+    // A different failure is news.
+    stats_reply(&mut app, Err("permission denied (HTTP 401)".into()));
+    assert!(app.status.take().is_some());
+
+    // A success clears it, so a later failure is reported again.
+    let stats = RabbitmqStats {
+        rabbitmq_version: Some("3.13.7".into()),
+        publish_rate: Some(9.6),
+        ..Default::default()
+    };
+    stats_reply(&mut app, Ok(stats));
+    let conn = app.active_conn().unwrap();
+    assert!(conn.dashboard.error.is_none());
+    assert_eq!(conn.dashboard.primary_history, [10]);
+    stats_reply(&mut app, Err(dead.into()));
+    assert!(app.status.is_some());
+}
+
+#[tokio::test]
+async fn a_failed_redis_stats_refresh_still_reports_every_time() {
+    // Redis keeps its behaviour: each failure reaches the footer, and the last
+    // figures stay up.
+    let (mut app, _rx) = test_app();
+    let id = connect(&mut app, 1, "prod").await;
+    app.handle_event(AppEvent::StatsUpdated {
+        id,
+        result: Ok(BrokerStats::Redis(ServerStats {
+            redis_version: Some("7.4".into()),
+            ..Default::default()
+        })),
+    });
+    for _ in 0..2 {
+        app.handle_event(AppEvent::StatsUpdated {
+            id,
+            result: Err("NOPERM INFO".into()),
+        });
+        let status = app.status.take().expect("reported");
+        assert_eq!(status.message, "[1] stats: NOPERM INFO");
+    }
+    let conn = app.active_conn().unwrap();
+    assert!(conn.dashboard.error.is_none());
+    assert!(conn.dashboard.stats.is_some());
+}

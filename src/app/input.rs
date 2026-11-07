@@ -532,10 +532,10 @@ impl App {
     /// the panel mode + focus-scoped feeds and freshens the anchor prompt.
     ///
     /// Landing on the bottom skips the passive Server Details tab: the first focus
-    /// jumps to the interactive Console, so Ctrl-↓ / Tab puts you somewhere you can
-    /// act. Any other remembered tab (`panel_tab` persists across focus changes —
-    /// e.g. a tail you were just on) is kept, so this only fires from the default
-    /// Server Details landing.
+    /// jumps to the interactive Console (Redis) or Tail anchor (RabbitMQ), so
+    /// Ctrl-↓ / Tab puts you somewhere you can act. Any other remembered tab
+    /// (`panel_tab` persists across focus changes — e.g. a tail you were just
+    /// on) is kept, so this only fires from the default Server Details landing.
     pub(super) fn set_pane_focus(&mut self, focus: PaneFocus) {
         if focus == PaneFocus::Bottom && !self.active_can_tail() {
             return;
@@ -543,11 +543,11 @@ impl App {
         if let Some(conn) = self.active_conn_mut() {
             conn.focus = focus;
             if focus == PaneFocus::Bottom && conn.active_panel() == PanelTab::ServerDetails {
-                if let Some(i) = conn
-                    .panel_slots()
+                let slots = conn.panel_slots();
+                let first_input = [PanelTab::Console, PanelTab::Tail]
                     .iter()
-                    .position(|t| *t == PanelTab::Console)
-                {
+                    .find_map(|tab| slots.iter().position(|t| t == tab));
+                if let Some(i) = first_input {
                     conn.panel_tab = i;
                 }
             }

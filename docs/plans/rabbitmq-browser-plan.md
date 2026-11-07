@@ -24,7 +24,7 @@ already runs `rabbitmq:3-management` and maps the API to host port `15673`
 | v1 scope | Queue + exchange list, queue peek, exchange tap from the list, restored tails, **plus** an overview stats band, connections/consumers tabs, and publish |
 | Management endpoint | **Derived, with overrides.** By default `http://<host>:15672` (`https://<host>:15671` when `tls`), using the AMQP username and password (RabbitMQ has one user database). Optional `management_url` / `management_username` / `management_password` override these. If the API can't be reached, the connection stays usable for tails only and the pane says why. |
 | Peek in `browse` mode | **Get + requeue** through `POST /api/queues/{vhost}/{q}/get`. Messages go back on the queue with `redelivered` set. On quorum queues the pane warns that a requeue may count toward `delivery-limit`. (Phase 0: only 3.x counts it, so the warning is limited to 3.x quorum queues that have a limit. See Phase 4.) |
-| Vhost scope | Only the profile's `vhost`. Overview and node stats are cluster-wide. |
+| Vhost scope | Only the profile's `vhost`. Overview and node stats are cluster-wide (the overview only for a `monitoring` user; see Phase 0, Q3). |
 
 ### Reused building blocks
 
@@ -93,7 +93,9 @@ while peeked. Requeued messages kept their order. The delivery-limit warning is 
   paths: `message_stats.publish_details.rate` returns
   `{"message_stats":{"publish_details":{"rate":9.6}}}`. Absent keys are omitted, not `null`
   (`delivery_limit` on 3.x, `message_stats` on a queue that never saw traffic). It also works
-  on `/api/nodes`, `/api/vhosts/{v}/connections` and `/api/consumers/{v}`.
+  on `/api/nodes`, `/api/vhosts/{v}/connections` and `/api/consumers/{v}`. On `/api/overview`
+  it only trims top-level keys: `message_stats.publish_details.rate` returns the whole
+  `message_stats` group (3.13.7, found in Phase 5).
 - **Paging.** `page` + `page_size` return an envelope:
   `{filtered_count, item_count, items, page, page_count, page_size, total_count}`, items sorted
   by name. `page_size` is capped at 500 (501 → 400 `invalid_pagination_parameters`), `page=0`
@@ -130,7 +132,12 @@ both versions. `tags` is a JSON array.
 | `/api/queues/%2F`, `/api/exchanges/%2F` | 401 | 200, all (needs a vhost permission) | 200 |
 | `POST /api/queues/%2F/{q}/get` | 401 | 200 with read permission on the queue | same |
 
-`administrator` includes everything `monitoring` can do. **None of the tested endpoints returned
+`administrator` includes everything `monitoring` can do. **A `management`-only user's overview
+totals aren't cluster-wide** (both versions): they cover only the vhosts the user can access and
+only its own connections and channels (connections 1 vs 2, exchanges 13 vs 20 on 4.4), and
+`object_totals.consumers` is absent.
+
+**None of the tested endpoints returned
 403.** Every auth failure was a 401, told apart by `reason`:
 
 - `{"error":"not_authorized","reason":"Not_Authorized"}`: wrong username or password (note
@@ -462,13 +469,18 @@ between 3.x and 4.x (Phase 0, Q1; used in Phase 4).
   - totals for queued, ready and unacked messages
   - queue, connection and consumer counts
   - per-node memory used / limit, fd used / total, disk free / limit, and alarms
+
+  A `management`-only user's overview totals aren't cluster-wide (Phase 0, Q3): they count only
+  the user's vhosts and its own connections. The tab labels the totals "your vhosts" and leaves
+  the connection count out.
 - **Server band** (`views.rs:816`): name · address · `vhost /` (Redis keeps `db`). An alarm
   turns the health dot to warning.
 - **Server Details tab:**
   - Fact lines: version / cluster; totals; node health (memory, fd, disk, alarms). Absent
     values are left out.
   - Graphs: "Publish/s" and "Deliver/s".
-  - The right column holds the Connections tab (Phase 6) instead of the Redis client list.
+  - The right column holds the Connections tab (Phase 6) instead of the Redis client list. As
+    built, the graphs take the full width until then.
 - **Tests:**
   - Build `RabbitmqStats` from the fixtures, including when node data is missing (no
     `monitoring` tag: `overview.management`) and with metrics disabled (`*.no-metrics.v4`).
