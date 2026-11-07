@@ -592,35 +592,39 @@ impl App {
         self.request_peek(id);
     }
 
-    /// Publish `body` to the active AMQP connection's selected destination. The
-    /// browser's only write: gated on the connection's [`can_publish`] capability
-    /// and a selected destination, with the result reported via
-    /// [`AppEvent::Published`](crate::event::AppEvent::Published).
-    pub(super) fn publish_to_selected(&mut self, body: String) {
-        let Some(id) = self.active_id() else {
+    /// Send the publish composed in the prompts, with `body`. The browser's
+    /// only write: gated on the connection's [`can_publish`] capability, with
+    /// the result reported via
+    /// [`AppEvent::Published`](crate::event::AppEvent::Published). The routing
+    /// key typed for a RabbitMQ exchange is remembered for its next publish.
+    ///
+    /// [`can_publish`]: crate::broker::Capabilities::can_publish
+    pub(super) fn send_publish(&mut self, draft: PublishDraft, body: String) {
+        let PublishDraft {
+            conn: id,
+            dest,
+            routing_key,
+        } = draft;
+        let Some(conn) = self.conn_by_id_mut(id) else {
             return;
         };
-        let outcome = match self.conn_by_id(id) {
-            Some(conn) if !conn.caps.can_publish => {
-                Err("this connection cannot publish".to_string())
-            }
-            Some(conn) => match conn.selected_destination().map(|d| d.spec()) {
-                Some(spec) => {
-                    let label = spec.label();
-                    conn.handle.send(ConnCommand::Publish {
-                        spec,
-                        body: body.into_bytes(),
-                    });
-                    Ok(label)
-                }
-                None => Err("no destination selected to publish to".to_string()),
-            },
-            None => return,
-        };
-        match outcome {
-            Ok(label) => self.set_status(format!("Publishing to {label}…"), false),
-            Err(e) => self.set_status(e, true),
+        if !conn.caps.can_publish {
+            self.set_status("this connection cannot publish".to_string(), true);
+            return;
         }
+        if dest.publish_takes_key() {
+            conn.publish
+                .keys
+                .insert(dest.name.clone(), routing_key.clone());
+        }
+        let spec = dest.spec();
+        let label = spec.label();
+        conn.handle.send(ConnCommand::Publish {
+            spec,
+            routing_key,
+            body: body.into_bytes(),
+        });
+        self.set_status(format!("Publishing to {label}…"), false);
     }
 
     /// Remove the highlighted destination from the active AMQP connection,

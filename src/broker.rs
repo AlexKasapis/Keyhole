@@ -166,13 +166,14 @@ impl Capabilities {
     /// list queues or exchanges, so the destination list comes from the
     /// management API ([`BrokerConnection::list_destinations`]). So do its stats:
     /// `connect` turns `can_dashboard` on when the API answered its probe.
+    /// Publishing goes over AMQP, so it's on whether or not the API answered.
     pub fn rabbitmq() -> Self {
         Self {
             r#type: BrokerType::Rabbitmq,
             can_browse: true,
             can_dashboard: false,
             can_console: false,
-            can_publish: false,
+            can_publish: true,
         }
     }
 
@@ -197,6 +198,14 @@ impl Capabilities {
     /// management API (see [`BrokerConnection::peek`]).
     pub fn peeks_queues(&self) -> bool {
         matches!(self.r#type, BrokerType::Amqp | BrokerType::Rabbitmq)
+    }
+
+    /// Whether a publish to the queue in view peeks it again, so the new
+    /// message shows up. AMQP 1.0 does. A RabbitMQ peek takes the messages off
+    /// the queue (browse mode puts them back flagged redelivered), so it only
+    /// runs when the user presses Enter.
+    pub fn repeeks_after_publish(&self) -> bool {
+        matches!(self.r#type, BrokerType::Amqp)
     }
 
     /// Whether the Browser body is a destination list (AMQP 1.0, RabbitMQ) rather
@@ -360,16 +369,21 @@ pub struct PeekReq {
     pub limit: usize,
 }
 
-/// A request to publish a single message to a destination (AMQP topic/queue).
-/// This is the only *write* the browser performs; it is capability-gated
-/// ([`Capabilities::can_publish`]) and driven by a deliberate keystroke, so the
-/// browser's default observe-only posture is unchanged for brokers that don't
-/// offer it.
-#[derive(Debug, Clone)]
+/// A request to publish a single message to a destination (an AMQP 1.0 topic
+/// or queue, a RabbitMQ queue or exchange). This is the only *write* the
+/// browser performs; it is capability-gated ([`Capabilities::can_publish`])
+/// and driven by a deliberate keystroke, so the browser's default observe-only
+/// posture is unchanged for brokers that don't offer it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishReq {
-    /// The destination to publish to (an AMQP topic or queue).
+    /// The destination to publish to. A RabbitMQ exchange's binding key is
+    /// unused: the message goes out with `routing_key`.
     pub spec: SubSpec,
-    /// The raw message body bytes, sent verbatim as an AMQP data section.
+    /// The RabbitMQ routing key: the queue's name for a queue (published
+    /// through the default exchange), the key typed for an exchange (empty for
+    /// a fanout or headers exchange, which ignore it). AMQP 1.0 ignores it.
+    pub routing_key: String,
+    /// The raw message body bytes, sent verbatim.
     pub body: Vec<u8>,
 }
 
@@ -1163,8 +1177,10 @@ pub trait BrokerConnection: Send {
         anyhow::bail!("this broker does not list destinations")
     }
 
-    /// Publish a single message to `req.spec`. The one *write* in the trait;
-    /// default unsupported, so observe-only brokers keep this bail. Gated by
+    /// Publish a single message to `req.spec`, returning once the broker took
+    /// it; an `Err` says why it didn't (RabbitMQ: unroutable, NACKed or
+    /// refused). The one *write* in the trait; default unsupported, so
+    /// observe-only brokers keep this bail. Gated by
     /// [`Capabilities::can_publish`].
     async fn publish(&mut self, _req: PublishReq) -> anyhow::Result<()> {
         anyhow::bail!("this broker does not support publishing")
@@ -1395,7 +1411,9 @@ mod tests {
         let rmq = Capabilities::rabbitmq();
         assert_eq!(rmq.r#type, BrokerType::Rabbitmq);
         assert!(rmq.can_browse && rmq.can_tail());
-        assert!(!rmq.can_dashboard && !rmq.can_console && !rmq.can_publish);
+        assert!(!rmq.can_dashboard && !rmq.can_console);
+        // It publishes over AMQP, so without the management API too.
+        assert!(rmq.can_publish);
         assert!(!rmq.uses_key_scan());
         // Its list comes from the broker, so it isn't user-curated.
         assert!(rmq.has_destinations() && !rmq.curates_destinations());
@@ -1407,6 +1425,9 @@ mod tests {
         // doesn't. Both destination browsers peek queues; Redis has none.
         assert!(r.auto_refresh() && rmq.auto_refresh() && !a.auto_refresh());
         assert!(a.peeks_queues() && rmq.peeks_queues() && !r.peeks_queues());
+        // A RabbitMQ peek takes messages off the queue, so a publish doesn't
+        // trigger one; AMQP 1.0 peeks the queue it published to again.
+        assert!(a.repeeks_after_publish() && !rmq.repeeks_after_publish());
 
         // Only RabbitMQ lists its clients, through the management API that
         // also gives it the dashboard.

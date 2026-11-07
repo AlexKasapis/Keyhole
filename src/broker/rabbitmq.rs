@@ -1,8 +1,8 @@
 //! RabbitMQ (AMQP 0.9.1) implementation of [`BrokerConnection`], built on
 //! `lapin`. Works against every RabbitMQ version (3.x and 4.x).
 //!
-//! Read + record only, exactly like the AMQP 1.0 broker (see
-//! [`Capabilities::rabbitmq`]). The one capability is a
+//! Read + record, plus a deliberate one-message publish, like the AMQP 1.0
+//! broker (see [`Capabilities::rabbitmq`]). The live view is a
 //! **non-destructive exchange tap**:
 //!  1. declare a temporary, server-named, `exclusive` + `auto_delete` queue;
 //!  2. bind it to the target exchange with the requested binding key;
@@ -28,6 +28,11 @@
 //! a real queue: the management API's `/get` takes the messages off the queue
 //! and, in browse mode, puts them straight back (`ack_requeue_true`) flagged
 //! `redelivered`. It only runs when the user opens a queue.
+//!
+//! A **publish** ([`RabbitmqConnection::publish`]) goes over AMQP on a channel
+//! of the main connection, with publisher confirms on and `mandatory` set, so
+//! it reports whether the broker confirmed, NACKed or returned (couldn't
+//! route) the message. It doesn't need the management API.
 
 mod mgmt;
 
@@ -42,10 +47,14 @@ use time::OffsetDateTime;
 
 use lapin::message::Delivery;
 use lapin::options::{
-    BasicConsumeOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
+    BasicConsumeOptions, BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions,
+    QueueBindOptions, QueueDeclareOptions,
 };
 use lapin::types::FieldTable;
-use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
+use lapin::{
+    BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, Consumer,
+    ExchangeKind,
+};
 
 use self::mgmt::{
     AckMode, ApiError, ConnectionInfo, ConsumerInfo, ExchangeInfo, GetMessage, Management,
@@ -54,7 +63,7 @@ use self::mgmt::{
 use super::{
     BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, Capabilities, ClientConnection,
     DestKind, DestinationInfo, DestinationList, ExchangeType, NodeHealth, Payload, PeekReq,
-    QueueConsumer, QueueType, RabbitmqStats, Roster, RosterKind, RosterRows, SubSpec,
+    PublishReq, QueueConsumer, QueueType, RabbitmqStats, Roster, RosterKind, RosterRows, SubSpec,
     STREAM_PEEK_HINT,
 };
 use crate::config::{PeekMode, RabbitmqProfile};
@@ -64,12 +73,25 @@ use crate::config::{PeekMode, RabbitmqProfile};
 /// channels authenticate as the same user.
 const DEFAULT_CREDENTIAL: &str = "guest";
 
+/// How long a publish waits for the broker's confirm. A broker under a memory
+/// or disk alarm blocks publishing connections without a word, and the actor
+/// runs one command at a time, so the wait must end.
+const PUBLISH_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// AMQP 0.9.1's `delivery_mode` for a persistent message.
+const PERSISTENT: u8 = 2;
+
 /// A live (or not-yet-connected) RabbitMQ (AMQP 0.9.1) connection.
 pub struct RabbitmqConnection {
     profile: RabbitmqProfile,
     password: Option<String>,
-    /// The main connection, kept open for liveness checks.
+    /// The main connection, kept open for liveness checks and publishing.
     conn: Option<Connection>,
+    /// The channel publishes go out on, with publisher confirms on. Opened by
+    /// the first publish, and again by the next one after a broker error (a
+    /// 403 on an internal exchange, a missing exchange) closed it. Taps have
+    /// their own connections, so this channel closing never touches them.
+    publish_channel: Option<Channel>,
     /// The HTTP management API and what its last probe found (tags, version,
     /// or the `mgmt_error` that disables it).
     mgmt: Management,
@@ -97,6 +119,7 @@ impl RabbitmqConnection {
             profile,
             password,
             conn: None,
+            publish_channel: None,
             mgmt,
             exchange_types: HashMap::new(),
             preview_bytes: preview_bytes.max(1),
@@ -145,6 +168,33 @@ impl RabbitmqConnection {
         let name = format!("keyhole-{}-{}", self.profile.name, super::next_conn_seq());
         ConnectionProperties::default().with_connection_name(name.into())
     }
+
+    /// The open publish channel, or a new one (confirms on) when there is none
+    /// or a broker error closed the last.
+    async fn publish_channel(&mut self) -> anyhow::Result<Channel> {
+        if let Some(channel) = self
+            .publish_channel
+            .as_ref()
+            .filter(|c| c.status().connected())
+        {
+            return Ok(channel.clone());
+        }
+        self.publish_channel = None;
+        let conn = self
+            .conn
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("connection is not established"))?;
+        let channel = conn
+            .create_channel()
+            .await
+            .context("opening the publish channel")?;
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .context("turning on publisher confirms")?;
+        self.publish_channel = Some(channel.clone());
+        Ok(channel)
+    }
 }
 
 #[async_trait]
@@ -157,6 +207,7 @@ impl BrokerConnection for RabbitmqConnection {
             // flattening it into the message here.
             .context("connecting to RabbitMQ")?;
         self.conn = Some(conn);
+        self.publish_channel = None;
         // Find a dead or misconfigured management API once, up front; a failure
         // is recorded and the connection stays usable for tails.
         self.mgmt.run_probe().await;
@@ -362,6 +413,59 @@ impl BrokerConnection for RabbitmqConnection {
                 }
             }),
         }
+    }
+
+    /// Publish one persistent message: to a queue through the default
+    /// exchange (its routing key is the queue's name), or to an exchange with
+    /// `req.routing_key`. Waits for the broker's confirm. `mandatory` makes the
+    /// broker return a message no queue takes, which is reported as
+    /// unroutable. A broker error closes the channel; the next publish opens
+    /// another.
+    ///
+    /// Every message is marked persistent (`delivery_mode` 2): keyhole can't
+    /// tell which queues an exchange will route it to, a durable queue then
+    /// keeps it across a restart like the messages its applications send, and
+    /// the confirm comes once the broker has stored it. A transient queue
+    /// ignores the flag. The body goes out as it was typed, with no content
+    /// type, as AMQP 1.0's publish does.
+    async fn publish(&mut self, req: PublishReq) -> anyhow::Result<()> {
+        let (exchange, target) = match &req.spec {
+            SubSpec::Queue(q) => (String::new(), format!("queue `{q}`")),
+            SubSpec::Exchange { exchange, .. } => {
+                (exchange.clone(), format!("exchange `{exchange}`"))
+            }
+            other => anyhow::bail!("{} is not a RabbitMQ destination", other.label()),
+        };
+        let channel = self.publish_channel().await?;
+        let sent = tokio::time::timeout(
+            PUBLISH_CONFIRM_TIMEOUT,
+            publish_confirmed(&channel, &exchange, &req.routing_key, &req.body),
+        )
+        .await;
+        let confirmation = match sent {
+            Ok(Ok(confirmation)) => confirmation,
+            Ok(Err(e)) => {
+                // A broker refusal closes the channel, and any other failure
+                // leaves it suspect: the next publish opens a fresh one.
+                self.publish_channel = None;
+                return Err(publish_error(e, &target));
+            }
+            Err(_) => {
+                // A confirm may still arrive on this channel; start afresh.
+                self.publish_channel = None;
+                anyhow::bail!(
+                    "no confirm from the broker within {}s (is an alarm blocking publishers?)",
+                    PUBLISH_CONFIRM_TIMEOUT.as_secs()
+                );
+            }
+        };
+        let exchange_type = self.exchange_types.get(&exchange);
+        publish_result(
+            PublishOutcome::from(confirmation),
+            &req.spec,
+            exchange_type,
+            &req.routing_key,
+        )
     }
 
     async fn tail_notice(&mut self, spec: &SubSpec) -> Option<String> {
@@ -758,6 +862,93 @@ fn management_client(profile: &RabbitmqProfile, password: Option<String>) -> Mgm
         username,
         password.unwrap_or_else(|| DEFAULT_CREDENTIAL.to_string()),
     )
+}
+
+/// Publish `body` on `channel` (confirms on) with `mandatory` set, and wait
+/// for the broker's answer.
+async fn publish_confirmed(
+    channel: &Channel,
+    exchange: &str,
+    routing_key: &str,
+    body: &[u8],
+) -> lapin::Result<Confirmation> {
+    channel
+        .basic_publish(
+            exchange.into(),
+            routing_key.into(),
+            BasicPublishOptions {
+                mandatory: true,
+                ..Default::default()
+            },
+            body,
+            BasicProperties::default().with_delivery_mode(PERSISTENT),
+        )
+        .await?
+        .await
+}
+
+/// Why a publish failed at the AMQP level. A broker refusal (e.g.
+/// `ACCESS_REFUSED` on an internal exchange, `NOT_FOUND` for a deleted
+/// exchange) comes back as its reply text.
+fn publish_error(e: lapin::Error, target: &str) -> anyhow::Error {
+    match e.kind() {
+        lapin::ErrorKind::ProtocolError(refusal) => {
+            anyhow::anyhow!("refused: {}", refusal.get_message().as_str())
+        }
+        _ => anyhow::Error::new(e).context(format!("publishing to {target}")),
+    }
+}
+
+/// How the broker answered a confirmed publish.
+#[derive(Debug, PartialEq, Eq)]
+enum PublishOutcome {
+    /// Acked, and some queue took it.
+    Confirmed,
+    /// Returned: no queue matched (`mandatory`).
+    Unroutable,
+    /// NACKed: the broker couldn't take it (a queue full with
+    /// `reject-publish`, a quorum queue without a quorum).
+    Nacked,
+}
+
+impl From<Confirmation> for PublishOutcome {
+    fn from(confirmation: Confirmation) -> Self {
+        match confirmation {
+            // RabbitMQ returns an unroutable message, then acks it.
+            Confirmation::Ack(Some(_)) | Confirmation::Nack(Some(_)) => Self::Unroutable,
+            Confirmation::Nack(None) => Self::Nacked,
+            // `NotRequested` can't happen: the channel turned confirms on.
+            Confirmation::Ack(None) | Confirmation::NotRequested => Self::Confirmed,
+        }
+    }
+}
+
+/// The publish's result: `Ok` when confirmed, otherwise why not, starting with
+/// the kind of failure (the footer shows the start). How an unroutable
+/// message is explained follows the exchange's type from the last listing.
+fn publish_result(
+    outcome: PublishOutcome,
+    spec: &SubSpec,
+    exchange_type: Option<&ExchangeType>,
+    routing_key: &str,
+) -> anyhow::Result<()> {
+    match outcome {
+        PublishOutcome::Confirmed => Ok(()),
+        PublishOutcome::Nacked => anyhow::bail!("NACKed: the broker didn't take the message"),
+        PublishOutcome::Unroutable => match (spec, exchange_type) {
+            (SubSpec::Queue(q), _) => anyhow::bail!("unroutable: no queue named `{q}`"),
+            (_, Some(ExchangeType::Fanout)) => {
+                anyhow::bail!("unroutable: no queue is bound to the exchange")
+            }
+            (_, Some(ExchangeType::Headers)) => {
+                anyhow::bail!("unroutable: no binding matches a message without headers")
+            }
+            _ if routing_key.is_empty() => {
+                anyhow::bail!("unroutable: no queue bound for the empty key")
+            }
+            _ => anyhow::bail!("unroutable: no queue bound for key `{routing_key}`"),
+        },
+    }
 }
 
 /// Owns a tap's dedicated connection/channel/consumer so the stream stays alive.
@@ -1942,8 +2133,121 @@ mod tests {
         server.join().unwrap();
         let caps = probed.capabilities();
         assert!(caps.can_dashboard, "the probe succeeded");
-        // Publishing is a later phase.
-        assert!(!caps.can_publish && !caps.can_console);
+        assert!(!caps.can_console);
+    }
+
+    #[tokio::test]
+    async fn publishing_needs_no_management_api() {
+        // It goes over AMQP: offered without a usable API (as before a good
+        // probe) and with one.
+        let unprobed = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        assert!(unprobed.mgmt.client().is_err());
+        assert!(unprobed.capabilities().can_publish);
+        let (probed, server) = listing_conn(false, Vec::new()).await;
+        server.join().unwrap();
+        assert!(probed.capabilities().can_publish);
+    }
+
+    #[test]
+    fn a_confirmation_reads_as_confirmed_or_nacked() {
+        assert_eq!(
+            PublishOutcome::from(Confirmation::Ack(None)),
+            PublishOutcome::Confirmed
+        );
+        assert_eq!(
+            PublishOutcome::from(Confirmation::Nack(None)),
+            PublishOutcome::Nacked
+        );
+    }
+
+    #[test]
+    fn a_failed_publish_says_why_starting_with_the_kind_of_failure() {
+        use ExchangeType::{Direct, Fanout, Headers, Topic};
+        use PublishOutcome::{Confirmed, Nacked, Unroutable};
+        let queue = SubSpec::Queue("orders".into());
+        let exchange = SubSpec::Exchange {
+            exchange: "keyhole.demo".into(),
+            binding_key: "#".into(),
+        };
+        let why = |outcome, spec: &SubSpec, exchange_type, key| {
+            publish_result(outcome, spec, exchange_type, key)
+                .unwrap_err()
+                .to_string()
+        };
+        assert!(publish_result(Confirmed, &queue, None, "orders").is_ok());
+        assert!(publish_result(Confirmed, &exchange, Some(&Topic), "k").is_ok());
+        // Through the default exchange, a missing queue is the only way to
+        // miss.
+        assert_eq!(
+            why(Unroutable, &queue, None, "orders"),
+            "unroutable: no queue named `orders`"
+        );
+        assert_eq!(
+            why(Unroutable, &exchange, Some(&Topic), "order.nope"),
+            "unroutable: no queue bound for key `order.nope`"
+        );
+        assert_eq!(
+            why(Unroutable, &exchange, Some(&Direct), ""),
+            "unroutable: no queue bound for the empty key"
+        );
+        // An exchange the listing hasn't seen is explained by its key.
+        assert_eq!(
+            why(Unroutable, &exchange, None, "k"),
+            "unroutable: no queue bound for key `k`"
+        );
+        // Fanout and headers exchanges ignore the key, so it isn't named.
+        assert_eq!(
+            why(Unroutable, &exchange, Some(&Fanout), ""),
+            "unroutable: no queue is bound to the exchange"
+        );
+        assert_eq!(
+            why(Unroutable, &exchange, Some(&Headers), ""),
+            "unroutable: no binding matches a message without headers"
+        );
+        assert_eq!(
+            why(Nacked, &exchange, Some(&Topic), "k"),
+            "NACKed: the broker didn't take the message"
+        );
+    }
+
+    #[test]
+    fn a_broker_refusal_reads_as_its_reply_text() {
+        use lapin::protocol::{AMQPError, AMQPSoftError};
+        let text = "ACCESS_REFUSED - cannot publish to internal exchange \
+                    'amq.rabbitmq.trace' in vhost '/'";
+        let refused = lapin::Error::from(lapin::ErrorKind::ProtocolError(AMQPError::new(
+            AMQPSoftError::ACCESSREFUSED.into(),
+            text.into(),
+        )));
+        assert_eq!(
+            publish_error(refused, "exchange `amq.rabbitmq.trace`").to_string(),
+            format!("refused: {text}")
+        );
+        // Anything else names what was being done.
+        let lost = lapin::Error::from(lapin::ErrorKind::MissingHeartbeatError);
+        assert_eq!(
+            format!("{:#}", publish_error(lost, "queue `orders`")),
+            "publishing to queue `orders`: no heartbeat received from server for too long"
+        );
+    }
+
+    #[tokio::test]
+    async fn publishing_needs_a_queue_or_an_exchange_and_a_connection() {
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let topic = PublishReq {
+            spec: SubSpec::Topic("t".into()),
+            routing_key: String::new(),
+            body: Vec::new(),
+        };
+        let err = conn.publish(topic).await.unwrap_err().to_string();
+        assert_eq!(err, "topic:t is not a RabbitMQ destination");
+        let queue = PublishReq {
+            spec: SubSpec::Queue("orders".into()),
+            routing_key: "orders".into(),
+            body: Vec::new(),
+        };
+        let err = conn.publish(queue).await.unwrap_err().to_string();
+        assert_eq!(err, "connection is not established");
     }
 
     #[test]
@@ -3176,5 +3480,199 @@ mod integration_tests {
         assert!(tap.queue.starts_with("amq.gen-"), "{tap:?}");
         assert!(tap.tag.starts_with("keyhole-"), "{tap:?}");
         assert_eq!(tap.ack_required, Some(false), "the tap auto-acks");
+    }
+
+    // -- publish ----------------------------------------------------------
+
+    /// Publish `body` through `conn`, as the browser does.
+    async fn publish_via(
+        conn: &mut RabbitmqConnection,
+        spec: SubSpec,
+        routing_key: &str,
+        body: &str,
+    ) -> anyhow::Result<()> {
+        conn.publish(PublishReq {
+            spec,
+            routing_key: routing_key.to_string(),
+            body: body.as_bytes().to_vec(),
+        })
+        .await
+    }
+
+    /// Delete the test's `queues` and `exchanges` over `channel`.
+    async fn clean_up(channel: &Channel, queues: &[&str], exchanges: &[&str]) {
+        for queue in queues {
+            channel
+                .queue_delete((*queue).into(), Default::default())
+                .await
+                .unwrap_or_else(|e| panic!("deleting {queue}: {e:#}"));
+        }
+        for exchange in exchanges {
+            channel
+                .exchange_delete((*exchange).into(), Default::default())
+                .await
+                .unwrap_or_else(|e| panic!("deleting {exchange}: {e:#}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_published_to_a_queue_is_peeked_back() {
+        let queue = unique("keyhole.it.pub");
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+
+        // No listing first: publishing needs only the AMQP connection.
+        let mut conn = connected().await;
+        publish_via(&mut conn, SubSpec::Queue(queue.clone()), &queue, "hello")
+            .await
+            .expect("confirmed");
+        let events = peek_queue(&mut conn, &queue, PeekMode::Browse)
+            .await
+            .expect("peek");
+        assert_eq!(bodies(&events), ["hello"]);
+        let ev = &events[0];
+        assert_eq!(ev.meta("exchange"), Some("(default)"));
+        assert_eq!(ev.meta("routing_key"), Some(queue.as_str()));
+        assert_eq!(ev.meta("delivery_mode"), Some("2 (persistent)"));
+        assert_eq!(ev.meta("content_type"), None, "sent as typed");
+
+        clean_up(&channel, &[&queue], &[]).await;
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_routing_key_takes_an_exchange_publish_to_its_bound_queue() {
+        let exchange = unique("keyhole.it.pubx");
+        let queue = unique("keyhole.it.pubq");
+        declare_topic_exchange(&exchange).await;
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        channel
+            .queue_bind(
+                queue.as_str().into(),
+                exchange.as_str().into(),
+                "order.*".into(),
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .unwrap();
+
+        let mut conn = connected().await;
+        let spec = SubSpec::Exchange {
+            exchange: exchange.clone(),
+            binding_key: "#".into(),
+        };
+        publish_via(&mut conn, spec, "order.test", r#"{"id":1}"#)
+            .await
+            .expect("confirmed");
+        let events = peek_queue(&mut conn, &queue, PeekMode::Browse)
+            .await
+            .expect("peek");
+        assert_eq!(bodies(&events), [r#"{"id":1}"#]);
+        assert_eq!(events[0].meta("exchange"), Some(exchange.as_str()));
+        assert_eq!(events[0].meta("routing_key"), Some("order.test"));
+
+        clean_up(&channel, &[&queue], &[&exchange]).await;
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn an_unroutable_publish_is_reported_and_the_channel_stays_usable() {
+        let exchange = unique("keyhole.it.nobody");
+        declare_topic_exchange(&exchange).await;
+        let mut conn = connected().await;
+        // The listing tells the connection which exchanges are topic ones.
+        conn.list_destinations(false).await.expect("listed");
+        let spec = SubSpec::Exchange {
+            exchange: exchange.clone(),
+            binding_key: "#".into(),
+        };
+        let err = publish_via(&mut conn, spec.clone(), "nobody.home", "lost")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "unroutable: no queue bound for key `nobody.home`"
+        );
+        let missing = unique("keyhole.it.missing");
+        let err = publish_via(&mut conn, SubSpec::Queue(missing.clone()), &missing, "lost")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("unroutable: no queue named `{missing}`")
+        );
+        // A returned message leaves the channel open.
+        let channel = conn.publish_channel.clone().expect("still open");
+        assert!(channel.status().connected());
+
+        let (setup, setup_channel) = setup_channel().await;
+        clean_up(&setup_channel, &[], &[&exchange]).await;
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_queue_that_rejects_publishes_when_full_nacks_one() {
+        let queue = unique("keyhole.it.full");
+        let (setup, channel) = setup_channel().await;
+        let mut args = FieldTable::default();
+        args.insert("x-max-length".into(), lapin::types::AMQPValue::LongInt(1));
+        args.insert(
+            "x-overflow".into(),
+            lapin::types::AMQPValue::LongString("reject-publish".into()),
+        );
+        declare_queue(&channel, &queue, false, args).await;
+
+        let mut conn = connected().await;
+        let spec = SubSpec::Queue(queue.clone());
+        publish_via(&mut conn, spec.clone(), &queue, "fits")
+            .await
+            .expect("room for one");
+        let err = publish_via(&mut conn, spec.clone(), &queue, "overflows")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "NACKed: the broker didn't take the message"
+        );
+
+        clean_up(&channel, &[&queue], &[]).await;
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_refused_publish_closes_only_its_channel_and_the_next_publish_works() {
+        let queue = unique("keyhole.it.after");
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+
+        let mut conn = connected().await;
+        // Clients can't publish to an internal exchange: the broker closes the
+        // channel with a 403.
+        let trace = SubSpec::Exchange {
+            exchange: "amq.rabbitmq.trace".into(),
+            binding_key: "#".into(),
+        };
+        let err = publish_via(&mut conn, trace, "k", "refused")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("refused: ACCESS_REFUSED - cannot publish to internal exchange"),
+            "{err}"
+        );
+        // The connection survives, and the next publish opens a new channel.
+        conn.ping().await.expect("the connection is alive");
+        publish_via(&mut conn, SubSpec::Queue(queue.clone()), &queue, "after")
+            .await
+            .expect("a new channel");
+        let events = peek_queue(&mut conn, &queue, PeekMode::Browse)
+            .await
+            .expect("peek");
+        assert_eq!(bodies(&events), ["after"]);
+
+        clean_up(&channel, &[&queue], &[]).await;
+        setup.close(200, "bye".into()).await.ok();
     }
 }

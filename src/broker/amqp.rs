@@ -174,6 +174,8 @@ impl BrokerConnection for AmqpConnection {
         peek_queue(self.url(), peek_id, queue, destructive, req.limit).await
     }
 
+    /// Publish to the topic or queue address. AMQP 1.0 has no routing key, so
+    /// `req.routing_key` is ignored.
     async fn publish(&mut self, req: PublishReq) -> anyhow::Result<()> {
         let address = match &req.spec {
             SubSpec::Topic(t) => format!("topic://{t}"),
@@ -1122,6 +1124,7 @@ mod integration_tests {
         let mut conn = connected().await;
         conn.publish(PublishReq {
             spec: SubSpec::Queue(queue.clone()),
+            routing_key: String::new(),
             body: b"published-bytes".to_vec(),
         })
         .await
@@ -1158,6 +1161,7 @@ mod integration_tests {
             while pub_conn
                 .publish(PublishReq {
                     spec: SubSpec::Topic(topic_for_pub.clone()),
+                    routing_key: String::new(),
                     body: b"pub-to-topic".to_vec(),
                 })
                 .await

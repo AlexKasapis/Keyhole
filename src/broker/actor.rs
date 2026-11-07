@@ -48,10 +48,12 @@ pub enum ConnCommand {
         mode: crate::config::PeekMode,
         limit: usize,
     },
-    /// Publish a single message to a destination (AMQP). The reply is an
-    /// [`AppEvent::Published`]. The lone write command.
+    /// Publish a single message to a destination (AMQP 1.0, RabbitMQ). The
+    /// reply is an [`AppEvent::Published`]. The lone write command. See
+    /// [`PublishReq`] for the fields.
     Publish {
         spec: SubSpec,
+        routing_key: String,
         body: Vec<u8>,
     },
     /// List the broker's queues and exchanges (RabbitMQ). The reply is an
@@ -492,10 +494,18 @@ async fn process(
                 })
                 .await
         }
-        ConnCommand::Publish { spec, body } => {
+        ConnCommand::Publish {
+            spec,
+            routing_key,
+            body,
+        } => {
             let target = spec.label();
             let result = conn
-                .publish(PublishReq { spec, body })
+                .publish(PublishReq {
+                    spec,
+                    routing_key,
+                    body,
+                })
                 .await
                 .map_err(|e| format!("{e:#}"));
             events
@@ -587,6 +597,8 @@ pub(crate) mod mock {
     //! and by the `app`/`ui` test suites to obtain a real [`ConnHandle`] without
     //! a live broker.
 
+    use std::sync::{Arc, Mutex};
+
     use async_trait::async_trait;
     use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
@@ -596,7 +608,7 @@ pub(crate) mod mock {
     use crate::broker::{
         BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, BrowsePage, BrowseReq,
         Capabilities, ConnId, DestKind, DestinationInfo, DestinationList, ExchangeType, InspectReq,
-        PeekReq, QueueType, Roster, RosterKind, ServerStats, SubSpec, ValueView,
+        PeekReq, PublishReq, QueueType, Roster, RosterKind, ServerStats, SubSpec, ValueView,
     };
     use crate::event::AppEvent;
 
@@ -639,6 +651,12 @@ pub(crate) mod mock {
         pub roster: Option<Roster>,
         /// When set, `roster` fails with this message instead.
         pub roster_err: Option<String>,
+        /// Every publish request received, in order. Shared, so a test keeps
+        /// a clone after the mock moves into its actor.
+        pub published: Arc<Mutex<Vec<PublishReq>>>,
+        /// When set, `publish` fails with this message (after recording the
+        /// request).
+        pub publish_err: Option<String>,
     }
 
     impl MockBroker {
@@ -662,6 +680,8 @@ pub(crate) mod mock {
                 list_err: None,
                 roster: None,
                 roster_err: None,
+                published: Arc::default(),
+                publish_err: None,
             }
         }
 
@@ -754,6 +774,14 @@ pub(crate) mod mock {
                 .roster
                 .clone()
                 .unwrap_or_else(|| Roster::empty(kind, false, false)))
+        }
+
+        async fn publish(&mut self, req: PublishReq) -> anyhow::Result<()> {
+            self.published.lock().expect("publish log").push(req);
+            match &self.publish_err {
+                Some(e) => anyhow::bail!("{e}"),
+                None => Ok(()),
+            }
         }
     }
 
@@ -1163,6 +1191,61 @@ mod tests {
                 assert!(error.contains("boom"), "error was {error:?}");
             }
             other => panic!("expected Peeked, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn publish_hands_the_request_to_the_broker_and_reports_its_answer() {
+        let mock = MockBroker::new();
+        let published = mock.published.clone();
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("publish")).await;
+        let exchange = SubSpec::Exchange {
+            exchange: "keyhole.demo".into(),
+            binding_key: "#".into(),
+        };
+        handle.send(ConnCommand::Publish {
+            spec: exchange.clone(),
+            routing_key: "order.created".into(),
+            body: b"hi".to_vec(),
+        });
+        match next(&mut rx).await {
+            Some(AppEvent::Published { target, result, .. }) => {
+                assert_eq!(target, "exchange:keyhole.demo");
+                assert_eq!(result, Ok(()));
+            }
+            other => panic!("expected Published, got {other:?}"),
+        }
+        assert_eq!(
+            *published.lock().unwrap(),
+            [PublishReq {
+                spec: exchange,
+                routing_key: "order.created".into(),
+                body: b"hi".to_vec(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_nacked_or_unroutable_publish_is_reported_as_failed() {
+        for reason in [
+            "NACKed: the broker didn't take the message",
+            "unroutable: no queue bound for key `order.nope`",
+        ] {
+            let mut mock = MockBroker::new();
+            mock.publish_err = Some(reason.into());
+            let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("publisherr")).await;
+            handle.send(ConnCommand::Publish {
+                spec: SubSpec::Queue("orders".into()),
+                routing_key: "orders".into(),
+                body: Vec::new(),
+            });
+            match next(&mut rx).await {
+                Some(AppEvent::Published { target, result, .. }) => {
+                    assert_eq!(target, "queue:orders");
+                    assert_eq!(result, Err(reason.to_string()));
+                }
+                other => panic!("expected Published, got {other:?}"),
+            }
         }
     }
 

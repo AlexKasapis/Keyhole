@@ -58,7 +58,12 @@ pub async fn publish_once(conn: &mut dyn BrokerConnection, seq: u64) -> anyhow::
         )
     };
     let body = fixtures::order_event_json(seq, kind).into_bytes();
-    conn.publish(PublishReq { spec, body }).await
+    conn.publish(PublishReq {
+        spec,
+        routing_key: String::new(),
+        body,
+    })
+    .await
 }
 
 #[cfg(all(test, feature = "integration"))]

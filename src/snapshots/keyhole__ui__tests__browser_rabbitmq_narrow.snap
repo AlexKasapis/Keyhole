@@ -9,8 +9,8 @@ expression: "render_lines(&mut app, 90, 24)"
 │  audit                    stream         0││Press t or Enter to tap it with binding key│
 │  amq.direct               direct          ││#, which matches every routing key.        │
 │  amq.fanout               fanout          ││                                           │
-│  amq.headers              headers         ││                                           │
-│  amq.rabbitmq.trace       topic           ││                                           │
+│  amq.headers              headers         ││Press P to publish a message: give its     │
+│  amq.rabbitmq.trace       topic           ││routing key, then its body.                │
 │▶ keyhole.demo             topic           ││                                           │
 │                                           ││                                           │
 │                                           ││                                           │
@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter taps it · non-destructive copy via a temporary queue · key defaults to #          │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- r refresh · t tap · Tab tails · : palette · ? help
+ r refresh · t tap · P publish · Tab tails · : palette · ? help

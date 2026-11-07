@@ -14,8 +14,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use crate::app::{App, ConnHealth, InputMode, PaneFocus, PanelTab, RecordingsFocus, Screen};
-use crate::broker::BrokerType;
+use crate::app::{
+    App, ConnHealth, DestKind, InputMode, PaneFocus, PanelTab, RecordingsFocus, Screen,
+};
+use crate::broker::{BrokerType, ExchangeType};
 use crate::theme::Theme;
 
 /// Draw one frame from the current application state.
@@ -72,6 +74,14 @@ pub(crate) fn health_indicator(
 /// keybind hints take the rest of the row.
 const STATUS_WIDTH: u16 = 44;
 
+/// `message` cut to fit the footer's status column (which ends with a
+/// one-space pad), with an ellipsis when it's longer. For a status whose full
+/// text shows elsewhere, such as a RabbitMQ publish failure in the details
+/// pane.
+pub(crate) fn fit_status(message: &str) -> String {
+    views::truncate(message, usize::from(STATUS_WIDTH) - 1)
+}
+
 fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     match app.mode {
         InputMode::Filter => {
@@ -123,11 +133,27 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
+        InputMode::PublishKey => {
+            let exchange = app
+                .publish_draft
+                .as_ref()
+                .map(|d| d.dest.name.as_str())
+                .unwrap_or_default();
+            let line = Line::from(vec![
+                Span::styled(" routing key ", theme.accent),
+                Span::raw(format!("{}▏", app.publish_buf)),
+                Span::styled(
+                    format!("   publish to {exchange} · Enter next · Esc cancel"),
+                    theme.dim,
+                ),
+            ]);
+            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+        }
         InputMode::Publish => {
             let line = Line::from(vec![
                 Span::styled(" publish ", theme.accent),
                 Span::raw(format!("{}▏", app.publish_buf)),
-                Span::styled("   Enter send", theme.dim),
+                Span::styled(format!("{}   Enter send", publish_target(app)), theme.dim),
             ]);
             frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
         }
@@ -179,6 +205,33 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 );
             }
         },
+    }
+}
+
+/// Where the body prompt's RabbitMQ publish goes: the queue, or the exchange
+/// and how it routes the message. Empty for AMQP 1.0, whose prompt names
+/// nothing.
+fn publish_target(app: &App) -> String {
+    let Some(draft) = app.publish_draft.as_ref() else {
+        return String::new();
+    };
+    let rabbitmq = app
+        .active_conn()
+        .is_some_and(|c| c.caps.r#type == BrokerType::Rabbitmq);
+    if !rabbitmq {
+        return String::new();
+    }
+    let dest = &draft.dest;
+    let exchange_type = dest.info.as_ref().and_then(|i| i.exchange_type.as_ref());
+    match (dest.kind, exchange_type) {
+        (DestKind::Queue, _) => format!("   to queue {}", dest.name),
+        (_, Some(ExchangeType::Fanout)) => format!("   to {} (fanout)", dest.name),
+        (_, Some(ExchangeType::Headers)) => format!(
+            "   to {} · no headers, so only header-less bindings match",
+            dest.name
+        ),
+        _ if draft.routing_key.is_empty() => format!("   to {} with an empty key", dest.name),
+        _ => format!("   to {} with key {}", dest.name, draft.routing_key),
     }
 }
 
@@ -266,10 +319,18 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 let curated = app
                     .active_conn()
                     .is_some_and(|c| c.caps.curates_destinations());
+                // An internal exchange refuses client publishes, so `P`
+                // isn't offered on one.
+                let internal = app
+                    .active_conn()
+                    .and_then(|c| c.selected_destination())
+                    .is_some_and(|d| d.is_internal());
                 if !curated && on_messages {
-                    // RabbitMQ's peeked messages: filter them (no publish yet).
+                    // RabbitMQ's peeked messages: filter them, or publish to
+                    // their queue.
                     owned(&[
                         ("/", "filter"),
+                        ("P", "publish"),
                         ("Tab", "tails"),
                         (":", "palette"),
                         ("?", "help"),
@@ -277,13 +338,12 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 } else if !curated {
                     // RabbitMQ: its list comes from the broker (nothing to add or
                     // remove), so `r` lists it again, and `t` taps an exchange.
-                    owned(&[
-                        ("r", "refresh"),
-                        ("t", "tap"),
-                        ("Tab", "tails"),
-                        (":", "palette"),
-                        ("?", "help"),
-                    ])
+                    let mut pairs = vec![("r", "refresh"), ("t", "tap")];
+                    if !internal {
+                        pairs.push(("P", "publish"));
+                    }
+                    pairs.extend([("Tab", "tails"), (":", "palette"), ("?", "help")]);
+                    owned(&pairs)
                 } else if on_messages {
                     owned(&[
                         ("/", "filter"),
@@ -2855,6 +2915,154 @@ mod tests {
         assert!(
             !footer.contains("a add") && !footer.contains("remove"),
             "{footer}"
+        );
+    }
+
+    /// The words in the right half of each rendered line (the browser's right
+    /// pane), joined by single spaces, so text the pane wraps reads as one
+    /// sentence.
+    fn right_half_words(text: &str) -> String {
+        text.lines()
+            .flat_map(|line| {
+                let half = line.chars().count() / 2;
+                line.chars()
+                    .skip(half)
+                    .collect::<String>()
+                    .replace('│', " ")
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_details_say_what_p_does_for_each_kind() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        for (name, expect) in [
+            ("orders", "Press P to publish a message to it."),
+            ("keyhole.demo", "give its routing key, then its body"),
+            ("amq.direct", "give its routing key, then its body"),
+            ("amq.fanout", "to every queue bound to it"),
+            ("amq.headers", "which this publish doesn't set"),
+            (
+                "amq.rabbitmq.trace",
+                "Clients can't publish to an internal exchange.",
+            ),
+        ] {
+            select_destination(&mut app, name);
+            let text = render_lines(&mut app, 160, 30);
+            assert!(right_half_words(&text).contains(expect), "{name}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_footer_offers_publish_except_on_an_internal_exchange() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        for (name, offered) in [
+            ("orders", true),
+            ("keyhole.demo", true),
+            ("amq.rabbitmq.trace", false),
+        ] {
+            select_destination(&mut app, name);
+            let text = render_lines(&mut app, 160, 30);
+            let footer = text.lines().last().unwrap();
+            assert_eq!(footer.contains("P publish"), offered, "{name}: {footer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_details_show_the_last_publish_to_that_destination() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        app.handle_event(AppEvent::Published {
+            id: ConnId(1),
+            target: "exchange:keyhole.demo".into(),
+            result: Ok(()),
+        });
+        select_destination(&mut app, "keyhole.demo");
+        let text = render_lines(&mut app, 160, 30);
+        assert!(
+            text.contains("Last publish confirmed by the broker."),
+            "{text}"
+        );
+        select_destination(&mut app, "amq.direct");
+        let text = render_lines(&mut app, 160, 30);
+        assert!(!text.contains("Last publish"), "another exchange's: {text}");
+
+        // A failure shows in full, beyond what the footer has room for.
+        app.handle_event(AppEvent::Published {
+            id: ConnId(1),
+            target: "exchange:amq.direct".into(),
+            result: Err("unroutable: no queue bound for key `order.created.eu-west-1`".into()),
+        });
+        // The pane wraps it: compare the words.
+        let text = render_lines(&mut app, 160, 30);
+        assert!(
+            right_half_words(&text).contains(
+                "Last publish failed — unroutable: no queue bound for key \
+                 `order.created.eu-west-1`"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_publish_prompts_say_where_the_message_goes() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        let footer = |app: &mut App| {
+            render_lines(app, 160, 30)
+                .lines()
+                .last()
+                .unwrap()
+                .to_string()
+        };
+
+        select_destination(&mut app, "keyhole.demo");
+        press(&mut app, KeyEvent::from(KeyCode::Char('P')));
+        let prompt = footer(&mut app);
+        assert!(
+            prompt.contains(" routing key ▏   publish to keyhole.demo · Enter next"),
+            "{prompt}"
+        );
+        for c in "order.test".chars() {
+            press(&mut app, KeyEvent::from(KeyCode::Char(c)));
+        }
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
+        let prompt = footer(&mut app);
+        assert!(
+            prompt.contains(" publish ▏   to keyhole.demo with key order.test   Enter send"),
+            "{prompt}"
+        );
+        press(&mut app, KeyEvent::from(KeyCode::Esc));
+
+        for (name, expect) in [
+            ("orders", "to queue orders"),
+            ("amq.fanout", "to amq.fanout (fanout)"),
+            (
+                "amq.headers",
+                "to amq.headers · no headers, so only header-less bindings match",
+            ),
+        ] {
+            select_destination(&mut app, name);
+            press(&mut app, KeyEvent::from(KeyCode::Char('P')));
+            let prompt = footer(&mut app);
+            assert!(prompt.contains(expect), "{name}: {prompt}");
+            press(&mut app, KeyEvent::from(KeyCode::Esc));
+        }
+    }
+
+    #[tokio::test]
+    async fn amqp_publish_prompt_names_no_target() {
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        app.screen = Screen::Browser;
+        app.handle_event(AppEvent::Input(crossterm::event::Event::Key(
+            KeyEvent::from(KeyCode::Char('P')),
+        )));
+        let text = render_lines(&mut app, 90, 24);
+        assert_eq!(
+            text.lines().last().unwrap().trim_end(),
+            " publish ▏   Enter send"
         );
     }
 

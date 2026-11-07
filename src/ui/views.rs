@@ -850,12 +850,13 @@ fn wrapped_rows(line: &Line, width: u16) -> u16 {
 }
 
 /// RabbitMQ's right pane before a peek: the selected queue's or exchange's
-/// details, and what Enter and `t` do with it. A queue's notes follow the peek
-/// `mode`.
+/// details, how the last publish to it went (`published`), and what Enter,
+/// `t` and `P` do with it. A queue's notes follow the peek `mode`.
 fn rabbitmq_details_pane(
     frame: &mut Frame,
     dest: &Destination,
     mode: PeekMode,
+    published: Option<&Result<(), String>>,
     theme: &Theme,
     area: Rect,
 ) {
@@ -869,6 +870,18 @@ fn rabbitmq_details_pane(
     let rate = rate_label(info.and_then(|i| i.publish_rate));
     let mut lines = Vec::new();
     let mut notes = Vec::new();
+    match published {
+        Some(Ok(())) => notes.push(Line::styled(
+            "Last publish confirmed by the broker.",
+            theme.success,
+        )),
+        Some(Err(e)) => notes.push(Line::styled(
+            format!("Last publish failed — {e}"),
+            theme.error,
+        )),
+        None => {}
+    }
+    let publish_hint = publish_hint(dest);
     let hint = match dest.kind {
         DestKind::Exchange => {
             let exchange_type = info.and_then(|i| i.exchange_type.clone());
@@ -954,6 +967,8 @@ fn rabbitmq_details_pane(
     }
     lines.push(Line::from(""));
     lines.push(Line::styled(hint, theme.dim));
+    lines.push(Line::from(""));
+    lines.push(Line::styled(publish_hint, theme.dim));
     let para = Paragraph::new(lines)
         .block(
             Block::bordered()
@@ -963,6 +978,27 @@ fn rabbitmq_details_pane(
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
+}
+
+/// What `P` does on a RabbitMQ queue or exchange. An internal exchange
+/// refuses client publishes, so it isn't offered there. A headers exchange
+/// routes on the message's headers, which the publish doesn't set.
+fn publish_hint(dest: &Destination) -> &'static str {
+    if dest.kind == DestKind::Queue {
+        return "Press P to publish a message to it.";
+    }
+    if dest.is_internal() {
+        return "Clients can't publish to an internal exchange.";
+    }
+    match dest.info.as_ref().and_then(|i| i.exchange_type.as_ref()) {
+        Some(ExchangeType::Fanout) => "Press P to publish a message to every queue bound to it.",
+        Some(ExchangeType::Headers) => {
+            "Press P to publish a message. A headers exchange routes on message headers, \
+             which this publish doesn't set, so only a binding without header arguments \
+             takes it."
+        }
+        _ => "Press P to publish a message: give its routing key, then its body.",
+    }
 }
 
 /// The details pane's warning that a browse peek counts toward a 3.x quorum
@@ -1034,7 +1070,14 @@ fn rabbitmq_peek_pane(
         );
     };
     if dest.kind != DestKind::Queue || dest.is_stream() || !conn.peek_is_selected() {
-        return rabbitmq_details_pane(frame, dest, mode, theme, area);
+        let label = dest.canonical();
+        let published = conn
+            .publish
+            .last
+            .as_ref()
+            .filter(|(target, _)| *target == label)
+            .map(|(_, result)| result);
+        return rabbitmq_details_pane(frame, dest, mode, published, theme, area);
     }
     let name = dest.name.clone();
     if conn.peek.pending {
@@ -3187,7 +3230,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Enter open · t tail · Ctrl-→ messages · Ctrl-← destinations"),
         Line::from("  AMQP: a add · r discover · x/d remove · P publish · / filter"),
         Line::from("  RabbitMQ: Enter peek queue · t/Enter tap exchange · r refresh"),
-        Line::from("  (a direct exchange asks for a key) · / filter messages"),
+        Line::from("  P publish · / filter messages · tap/publish may ask for a key"),
         Line::from(""),
         Line::styled("Global keys (any pane)", theme.heading),
         Line::from("  : palette · ? help · m mouse · Esc back · Ctrl-C quit"),
@@ -3445,7 +3488,7 @@ fn payload_preview(payload: &Payload, max: usize) -> String {
 /// Truncate to a display width of `max` columns, appending an ellipsis when
 /// shortened. Width-aware so wide (CJK/emoji) characters don't overflow the
 /// column and break alignment of whatever follows.
-fn truncate(s: &str, max: usize) -> String {
+pub(super) fn truncate(s: &str, max: usize) -> String {
     if UnicodeWidthStr::width(s) <= max {
         return s.to_string();
     }

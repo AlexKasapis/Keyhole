@@ -684,18 +684,277 @@ async fn rabbitmq_destination_pane_ignores_curated_list_keys() {
     assert_eq!(row_names(&app).len(), 8, "nothing was removed");
 }
 
+// -- publish ----------------------------------------------------------------
+
+/// Type `text` into the open prompt.
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(ch(c));
+    }
+}
+
+/// The `Publish` commands among `cmds`, as `(spec, routing key, body)`.
+fn publishes(cmds: &[ConnCommand]) -> Vec<(SubSpec, String, String)> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            ConnCommand::Publish {
+                spec,
+                routing_key,
+                body,
+            } => Some((
+                spec.clone(),
+                routing_key.clone(),
+                String::from_utf8(body.clone()).unwrap(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Deliver a publish reply for connection 1.
+fn published(app: &mut App, target: &str, result: Result<(), String>) {
+    app.handle_event(AppEvent::Published {
+        id: ConnId(1),
+        target: target.into(),
+        result,
+    });
+}
+
 #[tokio::test]
-async fn rabbitmq_publish_is_refused_as_unsupported() {
-    let (mut app, _rx) = test_app();
-    connect_rabbitmq(&mut app, 1, "rabbit").await;
+async fn rabbitmq_publishes_with_and_without_the_management_api() {
+    for caps in [Capabilities::rabbitmq(), rabbitmq_with_dashboard()] {
+        assert!(caps.can_publish, "{caps:?}");
+        let (mut app, _rx) = test_app();
+        let (handle, mut cmds) = mock::capture_handle(1, "rabbit", caps);
+        app.handle_event(AppEvent::Connected { handle });
+        // Without the API there is no list, so there's nothing to select.
+        listed(&mut app, Err("management API unavailable at u".into()));
+        app.handle_key(ch('P'));
+        assert_eq!(app.mode, InputMode::Normal);
+        let status = app.status.as_ref().expect("status set");
+        assert!(status.is_error);
+        assert_eq!(status.message, "select a destination to publish to");
+        assert!(publishes(&sent(&mut cmds)).is_empty());
+    }
+}
+
+#[tokio::test]
+async fn rabbitmq_p_on_a_queue_asks_only_for_the_body() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(ch('P'));
+    assert_eq!(app.mode, InputMode::Publish, "no routing key step");
+    assert!(app.publish_buf.is_empty());
+    type_text(&mut app, "hello");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.mode, InputMode::Normal);
+    assert!(app.publish_draft.is_none());
+    // Through the default exchange, keyed by the queue's name.
+    assert_eq!(
+        publishes(&sent(&mut cmds)),
+        [(queue("orders"), "orders".to_string(), "hello".to_string())]
+    );
+    assert_eq!(
+        app.status.as_ref().unwrap().message,
+        "Publishing to queue:orders…"
+    );
+}
+
+#[tokio::test]
+async fn rabbitmq_p_on_a_topic_or_direct_exchange_asks_for_the_key_then_the_body() {
+    for name in ["keyhole.demo", "amq.direct"] {
+        let (mut app, _rx, mut cmds) = listed_app();
+        select_row(&mut app, name);
+        app.handle_key(ch('P'));
+        assert_eq!(app.mode, InputMode::PublishKey, "{name}");
+        type_text(&mut app, "order.test");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, InputMode::Publish, "{name}: on to the body");
+        assert!(app.publish_buf.is_empty(), "{name}: the body starts empty");
+        type_text(&mut app, "{}");
+        assert!(publishes(&sent(&mut cmds)).is_empty(), "nothing sent yet");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.mode, InputMode::Normal);
+        assert_eq!(
+            publishes(&sent(&mut cmds)),
+            [(
+                exchange(name, "#"),
+                "order.test".to_string(),
+                "{}".to_string()
+            )]
+        );
+    }
+}
+
+#[tokio::test]
+async fn rabbitmq_p_on_a_fanout_or_headers_exchange_skips_the_key() {
+    // Both ignore the routing key.
+    for name in ["amq.fanout", "amq.headers"] {
+        let (mut app, _rx, mut cmds) = listed_app();
+        select_row(&mut app, name);
+        app.handle_key(ch('P'));
+        assert_eq!(app.mode, InputMode::Publish, "{name}");
+        type_text(&mut app, "x");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            publishes(&sent(&mut cmds)),
+            [(exchange(name, "#"), String::new(), "x".to_string())]
+        );
+    }
+}
+
+#[tokio::test]
+async fn rabbitmq_p_is_not_offered_on_an_internal_exchange() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "amq.rabbitmq.trace");
     app.handle_key(ch('P'));
     assert_eq!(app.mode, InputMode::Normal);
+    assert!(app.publish_draft.is_none());
     let status = app.status.as_ref().expect("status set");
     assert!(status.is_error);
-    assert!(
-        status.message.contains("not available"),
-        "the refusal says the broker can't publish: {}",
-        status.message
+    assert_eq!(status.message, "can't publish to an internal exchange");
+    assert!(sent(&mut cmds).is_empty());
+}
+
+#[tokio::test]
+async fn rabbitmq_the_key_prompt_offers_the_last_key_sent_to_that_exchange() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "keyhole.demo");
+    app.handle_key(ch('P'));
+    assert!(app.publish_buf.is_empty(), "nothing to offer yet");
+    type_text(&mut app, "order.created");
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(publishes(&sent(&mut cmds)).len(), 1);
+
+    // The same exchange offers that key again; editing it changes it.
+    app.handle_key(ch('P'));
+    assert_eq!(app.mode, InputMode::PublishKey);
+    assert_eq!(app.publish_buf, "order.created");
+    for _ in "created".chars() {
+        app.handle_key(key(KeyCode::Backspace));
+    }
+    type_text(&mut app, "paid");
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        publishes(&sent(&mut cmds))[0].1,
+        "order.paid",
+        "the edited key is sent"
+    );
+
+    // Another exchange has its own memory. A publish cancelled at the body
+    // isn't remembered.
+    select_row(&mut app, "amq.direct");
+    app.handle_key(ch('P'));
+    assert!(app.publish_buf.is_empty());
+    type_text(&mut app, "never.sent");
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode, InputMode::Normal);
+    assert!(app.publish_draft.is_none());
+    app.handle_key(ch('P'));
+    assert!(app.publish_buf.is_empty());
+    // Esc at the key step cancels too.
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.mode, InputMode::Normal);
+    assert!(sent(&mut cmds).is_empty());
+
+    select_row(&mut app, "keyhole.demo");
+    app.handle_key(ch('P'));
+    assert_eq!(app.publish_buf, "order.paid", "the last key sent");
+}
+
+#[tokio::test]
+async fn rabbitmq_a_publish_goes_where_p_was_pressed_even_if_the_list_moves() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "keyhole.demo");
+    app.handle_key(ch('P'));
+    type_text(&mut app, "k");
+    // A refresh while typing drops the exchange, so the cursor moves on.
+    let mut list = mock::sample_destinations();
+    list.items.retain(|d| d.name != "keyhole.demo");
+    listed(&mut app, Ok(list));
+    assert_ne!(selected_name(&app).as_deref(), Some("keyhole.demo"));
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        publishes(&sent(&mut cmds)),
+        [(
+            exchange("keyhole.demo", "#"),
+            "k".to_string(),
+            String::new()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn rabbitmq_a_publish_reports_its_outcome_and_peeks_nothing() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(vec![broker_event("old")]));
+    // Publish from inside the message list.
+    app.handle_key(ctrl_key(KeyCode::Right));
+    app.handle_key(ch('P'));
+    type_text(&mut app, "new");
+    app.handle_key(key(KeyCode::Enter));
+    sent(&mut cmds);
+
+    published(&mut app, "queue:orders", Ok(()));
+    assert!(sent(&mut cmds).is_empty(), "no automatic peek");
+    let status = app.status.as_ref().unwrap();
+    assert!(!status.is_error);
+    assert_eq!(status.message, "Published to queue:orders");
+    // The queue's peek is out of date: dropped, so the pane shows the outcome
+    // and Enter peeks again.
+    let conn = app.active_conn().unwrap();
+    assert!(!conn.peek_is_selected() && !conn.peek.focused);
+    assert_eq!(
+        conn.publish.last,
+        Some(("queue:orders".to_string(), Ok(())))
+    );
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        peeks(&sent(&mut cmds)),
+        [(queue("orders"), config::PeekMode::Browse)]
+    );
+}
+
+#[tokio::test]
+async fn rabbitmq_a_publish_elsewhere_keeps_the_peek() {
+    let (mut app, _rx, _cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(vec![broker_event("m")]));
+    published(&mut app, "exchange:keyhole.demo", Ok(()));
+    assert!(app.active_conn().unwrap().has_peeked_messages());
+}
+
+#[tokio::test]
+async fn rabbitmq_a_failed_publish_fits_the_footer_and_keeps_the_detail() {
+    let (mut app, _rx, _cmds) = listed_app();
+    let unroutable = "unroutable: no queue bound for key `order.created.eu-west-1`";
+    published(&mut app, "exchange:keyhole.demo", Err(unroutable.into()));
+    let status = app.status.as_ref().unwrap();
+    assert!(status.is_error);
+    assert_eq!(
+        status.message,
+        "unroutable: no queue bound for key `order.…"
+    );
+    assert_eq!(
+        app.active_conn().unwrap().publish.last,
+        Some(("exchange:keyhole.demo".to_string(), Err(unroutable.into())))
+    );
+    // A short reason fits as it is.
+    published(
+        &mut app,
+        "queue:orders",
+        Err("NACKed: the broker didn't take the message".into()),
+    );
+    assert_eq!(
+        app.status.as_ref().unwrap().message,
+        "NACKed: the broker didn't take the message"
     );
 }
 

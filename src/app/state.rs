@@ -1,7 +1,7 @@
 //! UI-facing application state types owned by [`crate::app::App`].
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,7 +12,8 @@ use crate::broker::actor::{ConnCommand, ConnHandle};
 pub use crate::broker::DestKind;
 use crate::broker::{
     BrokerEvent, BrokerStats, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId,
-    DestinationInfo, EntryMeta, QueueType, Roster, RosterKind, SubSpec, Ttl, ValueType, ValueView,
+    DestinationInfo, EntryMeta, ExchangeType, QueueType, Roster, RosterKind, SubSpec, Ttl,
+    ValueType, ValueView,
 };
 use crate::config::{ConnectionConfig, PeekMode};
 
@@ -136,7 +137,10 @@ pub enum InputMode {
     /// Typing a destination spec (`topic:name` / `queue:name`) to add to an AMQP
     /// connection's curated destination list (the left pane).
     AddDestination,
-    /// Typing a message body to publish to the selected AMQP destination.
+    /// Typing the routing key for a publish to a RabbitMQ exchange, before
+    /// the body ([`InputMode::Publish`]).
+    PublishKey,
+    /// Typing a message body to publish to the selected destination.
     Publish,
     /// Typing a substring filter over the AMQP peek message list.
     PeekFilter,
@@ -897,6 +901,49 @@ impl Destination {
         }
         self.info.as_ref()?.peek_delivery_limit
     }
+
+    /// Whether this is an internal RabbitMQ exchange (e.g.
+    /// `amq.rabbitmq.trace`), which refuses client publishes.
+    pub fn is_internal(&self) -> bool {
+        self.info.as_ref().is_some_and(|i| i.internal)
+    }
+
+    /// Whether publishing here asks for a routing key: a RabbitMQ exchange
+    /// that routes on it. A fanout or headers exchange ignores the key, and a
+    /// queue's is its name.
+    pub fn publish_takes_key(&self) -> bool {
+        self.kind == DestKind::Exchange
+            && !matches!(
+                self.info.as_ref().and_then(|i| i.exchange_type.as_ref()),
+                Some(ExchangeType::Fanout | ExchangeType::Headers)
+            )
+    }
+}
+
+/// A publish being composed in the `P` prompts. Its connection and target are
+/// fixed when `P` opens them, so a list refresh while the user types can't
+/// redirect it.
+#[derive(Debug, Clone)]
+pub struct PublishDraft {
+    pub conn: ConnId,
+    pub dest: Destination,
+    /// The routing key: a RabbitMQ queue's name, or what the key prompt took
+    /// for an exchange (empty for fanout and headers). Empty for AMQP 1.0,
+    /// which has none.
+    pub routing_key: String,
+}
+
+/// What a connection remembers about its publishes: the routing key last
+/// used on each RabbitMQ exchange, which the key prompt offers again, and the
+/// last publish's outcome, which RabbitMQ's details pane shows under its
+/// destination. In memory only, for the session.
+#[derive(Debug, Default)]
+pub struct PublishMemory {
+    /// The routing key last published with, by exchange name.
+    pub keys: HashMap<String, String>,
+    /// The last publish: its destination's label (`queue:name` /
+    /// `exchange:name`) and how the broker answered.
+    pub last: Option<(String, Result<(), String>)>,
 }
 
 /// The left-pane destination browser for an AMQP 1.0 or RabbitMQ connection:
@@ -1167,6 +1214,9 @@ pub struct Connection {
     pub destinations: DestinationBrowser,
     /// Queue message peek (right pane) — AMQP 1.0 and RabbitMQ.
     pub peek: PeekInspector,
+    /// Routing keys and the last outcome of publishing — AMQP 1.0 and
+    /// RabbitMQ.
+    pub publish: PublishMemory,
     /// Live tails for this connection. Pub/sub and stream tails each get their
     /// own tab in the Browser's bottom panel (after the Pub/Sub and Tail anchors
     /// respectively); MONITOR and keyspace tails live under their fixed anchor
@@ -1198,6 +1248,7 @@ impl Connection {
             rosters: Rosters::default(),
             destinations: DestinationBrowser::default(),
             peek: PeekInspector::default(),
+            publish: PublishMemory::default(),
             subs: Vec::new(),
             panel_tab: 0,
             focus: PaneFocus::Keys,

@@ -311,6 +311,49 @@ async fn amqp_publish_prompt_confirms_and_clears() {
 }
 
 #[tokio::test]
+async fn amqp_publish_sends_the_body_without_a_routing_key() {
+    let (mut app, _rx) = test_app();
+    let (handle, mut cmds) = mock::capture_handle(1, "mq", Capabilities::amqp());
+    app.handle_event(AppEvent::Connected { handle });
+    app.add_amqp_destination(SubSpec::Topic("news".into()));
+    while cmds.try_recv().is_ok() {}
+    app.handle_key(ch('P'));
+    assert_eq!(app.mode, InputMode::Publish, "AMQP 1.0 has no key step");
+    app.handle_key(ch('x'));
+    app.handle_key(key(KeyCode::Enter));
+    match cmds.try_recv() {
+        Ok(ConnCommand::Publish {
+            spec,
+            routing_key,
+            body,
+        }) => {
+            assert_eq!(spec, SubSpec::Topic("news".into()));
+            assert_eq!(routing_key, "");
+            assert_eq!(body, b"x");
+        }
+        other => panic!("expected a Publish, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn amqp_a_publish_to_the_selected_queue_peeks_it_again() {
+    let (mut app, _rx) = test_app();
+    let (handle, mut cmds) = mock::capture_handle(1, "mq", Capabilities::amqp());
+    app.handle_event(AppEvent::Connected { handle });
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+    while cmds.try_recv().is_ok() {}
+    app.handle_event(AppEvent::Published {
+        id: ConnId(1),
+        target: "queue:orders".into(),
+        result: Ok(()),
+    });
+    match cmds.try_recv() {
+        Ok(ConnCommand::Peek { spec, .. }) => assert_eq!(spec, SubSpec::Queue("orders".into())),
+        other => panic!("expected a Peek of orders, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn amqp_publish_refused_without_a_destination() {
     let (mut app, _rx) = test_app();
     connect_amqp(&mut app, 1, "mq").await;

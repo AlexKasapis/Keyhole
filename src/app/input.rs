@@ -62,6 +62,7 @@ impl App {
             InputMode::Form => return self.handle_form_key(key),
             InputMode::Rename => return self.handle_rename_key(key),
             InputMode::AddDestination => return self.handle_add_destination_key(key),
+            InputMode::PublishKey => return self.handle_routing_key_key(key),
             InputMode::Publish => return self.handle_publish_key(key),
             InputMode::PeekFilter => return self.handle_peek_filter_key(key),
             // Normal / Command / Subscribe are reconciled from the focused pane.
@@ -324,8 +325,13 @@ impl App {
         }
     }
 
-    /// Enter the publish prompt for the selected destination. Refused (with a
-    /// status) when the connection can't publish or nothing is selected.
+    /// Open the publish prompts for the selected destination. A RabbitMQ
+    /// exchange that routes on its key (direct, topic) first asks for the
+    /// routing key, offering the last one used on it; a queue (published to
+    /// under its own name), a fanout or headers exchange (which ignore the
+    /// key) and AMQP 1.0 go straight to the body. Refused (with a status) when
+    /// the connection can't publish, nothing is selected, or the selection is
+    /// an internal exchange, which refuses client publishes.
     fn begin_publish(&mut self) {
         let Some(conn) = self.active_conn() else {
             return;
@@ -337,12 +343,40 @@ impl App {
             );
             return;
         }
-        if conn.selected_destination().is_none() {
+        let Some(dest) = conn.selected_destination().cloned() else {
             self.set_status("select a destination to publish to".to_string(), true);
             return;
+        };
+        if dest.is_internal() {
+            self.set_status("can't publish to an internal exchange".to_string(), true);
+            return;
         }
+        let rabbitmq = conn.caps.r#type == BrokerType::Rabbitmq;
+        let routing_key = if rabbitmq && dest.kind == DestKind::Queue {
+            dest.name.clone()
+        } else {
+            String::new()
+        };
+        let (mode, prefill) = if dest.publish_takes_key() {
+            let last = conn.publish.keys.get(&dest.name).cloned();
+            (InputMode::PublishKey, last.unwrap_or_default())
+        } else {
+            (InputMode::Publish, String::new())
+        };
+        self.publish_draft = Some(PublishDraft {
+            conn: conn.id,
+            dest,
+            routing_key,
+        });
+        self.publish_buf = prefill;
+        self.mode = mode;
+    }
+
+    /// Drop the publish being composed and leave its prompt.
+    fn cancel_publish(&mut self) {
         self.publish_buf.clear();
-        self.mode = InputMode::Publish;
+        self.publish_draft = None;
+        self.mode = InputMode::Normal;
     }
 
     /// The `r` key: refresh the destination list from the broker. AMQP 1.0
@@ -471,20 +505,40 @@ impl App {
         }
     }
 
+    /// The routing-key prompt's keys (a RabbitMQ exchange): edit the key, which
+    /// starts as the last one used on the exchange; Enter moves on to the body
+    /// prompt, Esc cancels the publish. The key is taken verbatim: an empty
+    /// one is valid, and spaces are part of it.
+    pub(super) fn handle_routing_key_key(&mut self, key: KeyEvent) {
+        match handle_text_input(&mut self.publish_buf, key) {
+            TextEdit::Editing => {}
+            TextEdit::Cancelled => self.cancel_publish(),
+            TextEdit::Submitted => {
+                let routing_key = std::mem::take(&mut self.publish_buf);
+                match self.publish_draft.as_mut() {
+                    Some(draft) => {
+                        draft.routing_key = routing_key;
+                        self.mode = InputMode::Publish;
+                    }
+                    None => self.cancel_publish(),
+                }
+            }
+        }
+    }
+
     /// The publish prompt's keys: type a message body, Enter publishes it to the
-    /// selected destination, Esc cancels. An empty body is a valid (empty)
-    /// message, so it is not rejected.
+    /// destination `P` was pressed on, Esc cancels. An empty body is a valid
+    /// (empty) message, so it is not rejected.
     pub(super) fn handle_publish_key(&mut self, key: KeyEvent) {
         match handle_text_input(&mut self.publish_buf, key) {
             TextEdit::Editing => {}
-            TextEdit::Cancelled => {
-                self.publish_buf.clear();
-                self.mode = InputMode::Normal;
-            }
+            TextEdit::Cancelled => self.cancel_publish(),
             TextEdit::Submitted => {
                 let body = std::mem::take(&mut self.publish_buf);
                 self.mode = InputMode::Normal;
-                self.publish_to_selected(body);
+                if let Some(draft) = self.publish_draft.take() {
+                    self.send_publish(draft, body);
+                }
             }
         }
     }

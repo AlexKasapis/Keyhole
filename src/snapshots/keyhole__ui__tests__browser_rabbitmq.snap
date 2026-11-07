@@ -14,7 +14,7 @@ expression: "render_lines(&mut app, 160, 30)"
 │  keyhole.demo            topic                                         19.6/s││Tailing a queue would consume its messages. To watch them, tap an exchange    │
 │                                                                              ││that routes to it.                                                            │
 │                                                                              ││                                                                              │
-│                                                                              ││                                                                              │
+│                                                                              ││Press P to publish a message to it.                                           │
 │                                                                              ││                                                                              │
 │                                                                              ││                                                                              │
 │                                                                              ││                                                                              │
@@ -31,4 +31,4 @@ expression: "render_lines(&mut app, 160, 30)"
 │                                                                                                                                                              │
 │Enter taps it · non-destructive copy via a temporary queue · key defaults to #                                                                                │
 └──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- r refresh · t tap · Tab tails · : palette · ? help
+ r refresh · t tap · P publish · Tab tails · : palette · ? help

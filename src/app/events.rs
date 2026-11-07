@@ -363,9 +363,36 @@ impl App {
         }
     }
 
-    /// A publish completed: confirm or report it, and re-peek when the message
-    /// landed in the queue currently selected so the user sees it appear.
+    /// A publish completed: confirm or report it, and remember the outcome
+    /// for the details pane. AMQP 1.0 then re-peeks when the message landed in
+    /// the queue currently selected, so the user sees it appear. A RabbitMQ
+    /// peek takes the messages off the queue, so a publish never runs one: it
+    /// drops the queue's peek, now out of date, so the pane shows the outcome
+    /// and Enter peeks again. Its failure goes on the footer as the broker
+    /// layer words it (unroutable, NACKed, refused), cut to fit; the details
+    /// pane shows it in full.
     pub(super) fn on_published(&mut self, id: ConnId, target: String, result: Result<(), String>) {
+        let mut repeeks = true;
+        if let Some(conn) = self.conn_by_id_mut(id) {
+            conn.publish.last = Some((target.clone(), result.clone()));
+            repeeks = conn.caps.repeeks_after_publish();
+            if !repeeks
+                && conn
+                    .peek
+                    .peeked
+                    .as_ref()
+                    .is_some_and(|s| s.label() == target)
+            {
+                conn.peek = Default::default();
+            }
+        }
+        if !repeeks {
+            match result {
+                Ok(()) => self.set_status(format!("Published to {target}"), false),
+                Err(e) => self.set_status(crate::ui::fit_status(&e), true),
+            }
+            return;
+        }
         match result {
             Ok(()) => {
                 self.set_status(format!("Published to {target}"), false);

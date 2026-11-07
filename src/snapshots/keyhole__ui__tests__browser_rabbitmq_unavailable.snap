@@ -25,4 +25,4 @@ expression: "render_lines(&mut app, 90, 24)"
 │                                                                                        │
 │Enter taps it · non-destructive copy via a temporary queue · key defaults to #          │
 └────────────────────────────────────────────────────────────────────────────────────────┘
- r refresh · t tap · Tab tails · : palette · ? help
+ r refresh · t tap · P publish · Tab tails · : palette · ? help

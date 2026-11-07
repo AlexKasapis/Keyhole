@@ -18,9 +18,9 @@ mod settings;
 
 pub use state::{
     ConfirmState, ConnForm, ConnHealth, Connection, Console, ConsoleEntry, DestKind, Destination,
-    InputMode, Listing, PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState,
-    RecordingFile, RecordingsFocus, ScanStep, Screen, SettingsRow, SettingsState, Status,
-    StatusKind, SubState, Subscription, ViewRow,
+    InputMode, Listing, PaletteCommand, PaletteState, PaneFocus, PanelTab, PublishDraft,
+    RecordState, RecordingFile, RecordingsFocus, ScanStep, Screen, SettingsRow, SettingsState,
+    Status, StatusKind, SubState, Subscription, ViewRow,
 };
 // Only the tests inspect a scan's phase from outside `state`.
 #[cfg(test)]
@@ -113,8 +113,12 @@ pub struct App {
     pub(crate) mode: InputMode,
     pub(crate) filter: String,
     pub(crate) subscribe_buf: String,
-    /// The message body being typed in the AMQP publish prompt.
+    /// The text being typed in the publish prompts: the routing key
+    /// ([`InputMode::PublishKey`]), then the message body
+    /// ([`InputMode::Publish`]).
     pub(crate) publish_buf: String,
+    /// The publish those prompts are composing, set when `P` opens them.
+    pub(crate) publish_draft: Option<PublishDraft>,
     pub(crate) form: Option<ConnForm>,
     pub(crate) status: Option<Status>,
     /// Connection health while no connection is active. `Connected` is derived
@@ -205,6 +209,7 @@ impl App {
             filter: String::new(),
             subscribe_buf: String::new(),
             publish_buf: String::new(),
+            publish_draft: None,
             form: None,
             status: None,
             health: ConnHealth::Offline,
