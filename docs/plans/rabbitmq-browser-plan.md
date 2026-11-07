@@ -552,8 +552,25 @@ on, so a broker NACK or `unroutable` (with `mandatory`) shows up in `AppEvent::P
 
 ## Phase 8 — Dev stack, docs, release notes
 
-- `config.dev.toml`: add `management_url = "http://127.0.0.1:15673"` to `dev-rabbitmq`
-  (the host port differs from the default).
+**Done (2026-11-08).** A `rabbitmq4` compose service (`rabbitmq:4-management`, profile
+`rabbitmq4`, host ports 5675/15675) runs beside 3.x, and CI's build job runs the RabbitMQ
+integration tests a second time against it (`just test-int-rabbitmq4` locally; coverage stays
+on 3.x). The tests delete what they create through a `Cleanup` guard, and declare durable
+queues, because 4.4 refuses transient queues that aren't exclusive. `config.dev.toml` has a
+`dev-rabbitmq4` profile. The README, the docs site (`connecting.astro` management settings, a
+new RabbitMQ browser page, `tails.astro`), `website/src/lib/capabilities.ts` and the CHANGELOG
+are updated. Found while verifying: closing an AMQP or RabbitMQ tail left the bottom panel's
+focus past its last tab (now back on Tail), and the help overlay gained RabbitMQ's tabs and the
+routing-key step.
+
+The list, peek, overview and connections integration tests already existed (Phases 2–6). On a
+fresh 4.4.0 they all passed once their queues were durable; the only other 4.x difference was
+the container's first boot: a `rabbitmqctl` run as root straight after `up` writes the Erlang
+cookie before the node does, and the node then fails with `eacces`, so the recipe waits with
+`up --wait` instead.
+
+- ~~`config.dev.toml`: add `management_url = "http://127.0.0.1:15673"` to `dev-rabbitmq`
+  (the host port differs from the default).~~ Done in Phase 3.
 - ~~`keyhole dev` (`dev/rabbitmq.rs`): also declare durable queues `keyhole.demo.orders`
   (classic) and `keyhole.demo.audit` (quorum), bound to `keyhole.demo`, so the browser has
   queues to peek. Add the names to `dev/fixtures.rs`.~~ Done in Phase 4:
@@ -614,5 +631,20 @@ From Phase 3 on, also check it in the running app: `just dev`, then
 - Multi-vhost browsing.
 - Non-destructive reads of stream queues through a stream consumer with an offset.
 - Changing capabilities mid-session after a successful re-probe. Today you reconnect.
+- `management_password = "prompt"` silently falls back to `guest` instead of a clear "prompt
+  isn't supported" error.
+- An unresolvable `management_password` fails the whole connection instead of leaving tails
+  usable.
+- Destination names longer than the Name column are cut without an ellipsis.
+- The tap's own `amq.gen-*` spy queues appear in the list (consider hiding exclusive queues).
+- The serial actor can be delayed by multi-page listings on large vhosts (move management calls
+  to their own task).
+- No dedicated re-peek key: Enter on a peeked queue steps into its messages.
+- Publish can't set headers or properties.
+- Roster rows sort as plain text (`keyhole-10` before `keyhole-2`).
+- The `keyhole dev` RabbitMQ publisher loop exits on the first publish error.
+- The docs site's Keybindings page doesn't list the destination-browser keys (`t`, `P`, `r`,
+  `a`, `x`/`d`, Ctrl-→).
+- The Settings page row is still labelled "AMQP peek mode", though it covers RabbitMQ too.
 - Moving AMQP 1.0 Jolokia discovery behind `list_destinations`.
 - Server-side writes: purge, delete, move.

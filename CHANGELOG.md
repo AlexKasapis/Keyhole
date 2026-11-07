@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RabbitMQ management API settings.** RabbitMQ profiles take
+  `management_url`, `management_username` and `management_password`. The API
+  defaults to `http://<host>:15672` (`https://<host>:15671` with `tls`) and the
+  AMQP username and password; managed brokers such as Amazon MQ and CloudAMQP
+  serve it on `https://<host>`, so set `management_url` for them.
+  `management_password` takes `env:` or `keyring:`. If the API can't be
+  reached, the connection still opens with exchange taps working, the browser
+  says why, and `r` retries.
+- **RabbitMQ queue and exchange browser.** The Browser lists the profile's
+  vhost: queues, then exchanges, with their kind, messages (ready/unacked),
+  consumers and publish rate. It loads on connect, refreshes every
+  `browse_refresh_ms` and on `r`, and keeps the cursor on the same row.
+- **RabbitMQ queue peek.** Enter on a queue reads up to 200 of its messages
+  through the management API into the message inspector. In browse mode they
+  go straight back on the queue, flagged redelivered; on RabbitMQ 3.x each
+  peek counts toward a quorum queue's delivery limit, and the pane warns.
+  Destructive mode removes them, and skip reads nothing. Stream queues can't
+  be peeked, and the pane says what to do instead.
+- **Exchange taps from the RabbitMQ list.** `t` or Enter taps a topic, fanout
+  or headers exchange with `#`, and opens the Tail tab with `exchange:name/`
+  for a direct exchange, to add the routing key.
+- **RabbitMQ stats.** With the management API, the Server band shows the
+  vhost and node alarms, and a Server Details tab shows versions, totals, node
+  health and Publish/s and Deliver/s graphs.
+- **RabbitMQ Connections and Consumers tabs**, listing the vhost's client
+  connections and consumers.
+- **Publish to RabbitMQ.** `P` publishes one message to the selected queue or
+  exchange, with publisher confirms. An exchange first asks for the routing
+  key, offering the last one used on it (fanout and headers exchanges skip
+  it), and the footer reports a confirm, an unroutable message, a NACK or a
+  refusal.
+- **`keyhole dev` RabbitMQ demo queues.** The demo exchange now feeds durable
+  queues `keyhole.demo.orders` (classic) and `keyhole.demo.audit` (quorum),
+  capped at 1,000 messages, so the browser has queues to peek.
+
 ### Changed
 
 - **Gruvbox is now the default theme**, applied when no `[theme]` `base` is set
@@ -20,6 +57,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `exchange:name` or `exchange:name/binding-key`. Since the AMQP 1.0 browser
   landed, the tail panel lived only on the Browser screen, which RabbitMQ
   connections never reached.
+- **AMQP 1.0 peek pane.** After selecting another queue, Enter and Ctrl-→
+  could show the previous queue's messages under the new queue's name, and a
+  failed peek stayed on "Peeking…". The pane now shows only the selected
+  queue's peek, and a failed peek shows its error.
+- **AMQP 1.0 publishing** sends to the destination selected when `P` was
+  pressed, rather than whatever is selected when the message is submitted.
+- **Closing an AMQP 1.0 or RabbitMQ tail tab** returns to the Tail tab.
+  Before, Tab then skipped a tab, or stayed on the same one.
 
 ## [0.1.2] - 2026-06-26
 
