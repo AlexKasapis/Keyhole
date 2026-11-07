@@ -69,7 +69,7 @@ keyhole   # launch the TUI
 ¹ AMQP 1.0 can't list destinations: you list them in the profile, or Keyhole
 discovers ActiveMQ's over Jolokia (`management_url`).
 ² Needs RabbitMQ's HTTP management API (`management_url`, default
-`http://<host>:15672`); a publish picks its queue or exchange from that list.
+`http://<host>:15672`, or `https://<host>:15671` with `tls = true`); a publish picks its queue or exchange from that list.
 Exchange taps need only AMQP.
 
 All three brokers are always built in.

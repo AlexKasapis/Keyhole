@@ -100,7 +100,9 @@ const tabs = [
   <p>
     Keyhole connects to brokers you describe in your config file — one <code>[[connection]]</code>
     table each, tagged by <code>type</code>. Pick one from the list on launch, or jump to it with
-    <code>--connect &lt;name&gt;</code>. Every connection is opened read-only by default.
+    <code>--connect &lt;name&gt;</code>. Keyhole writes to a broker only when you publish a message
+    or peek a queue (a RabbitMQ peek takes messages off and puts them back; see
+    <a href="/rabbitmq#modes">Peek modes</a>).
   </p>
 
   <h3 id="define" data-toc="define">Defining a connection</h3>
@@ -197,7 +199,8 @@ const tabs = [
     connection still opens and taps still work: the destination pane says where it looked and why
     it failed, and <kbd>r</kbd> tries again. The stats band and the Server Details, Connections and
     Consumers tabs are only there when the check at connect succeeded, so reconnect once the API
-    answers.
+    answers. A <code>management_password</code> that can't be resolved, such as an unset
+    <code>env:</code> variable or a missing keyring entry, does fail the connection.
   </p>
   <p>
     The user needs at least the <code>management</code> tag and the vhost permissions: read

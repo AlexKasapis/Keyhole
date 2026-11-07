@@ -186,13 +186,18 @@ const description =
         <div class="caps-head">
           <div class="eyebrow">TRUSTWORTHY BY DEFAULT</div>
           <h2 class="h2" id="verify-h">Verifiable, observe-first</h2>
-          <p class="caps-sub">Read-only by design — and every release is signed.</p>
+          <p class="caps-sub">Writes only when you ask — and every release is signed.</p>
         </div>
 
         <div class="verify-body">
           <p class="verify-copy">
-            Browsing, inspecting, tailing and recording are all read-only. Every release artifact is
-            checksummed, signed (sigstore/cosign keyless) and carries SLSA build-provenance
+            Browsing, inspecting, tailing and recording leave your data alone. Keyhole writes only
+            when you publish a message or peek a queue: RabbitMQ has no read-only peek, so a browse
+            takes each message and puts it straight back (<a
+              href={`${docs}/rabbitmq#modes`}
+              target="_blank"
+              rel="noopener">peek modes</a
+            >). Every release artifact is checksummed, signed (sigstore/cosign keyless) and carries SLSA build-provenance
             attestations, alongside a CycloneDX SBOM. The canonical, verifiable install command
             points straight at GitHub:
           </p>

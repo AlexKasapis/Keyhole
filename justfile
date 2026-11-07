@@ -50,8 +50,9 @@ test-int-rabbitmq4:
     # --wait polls the healthcheck. Don't `exec rabbitmqctl` right after `up`
     # instead: run as root before the node starts, it writes the Erlang cookie,
     # which the 4.x node then can't read, and it fails to boot.
-    docker compose --profile rabbitmq4 up -d --wait rabbitmq4
+    # Set before `up`, so a broker that never turns healthy is removed too.
     trap 'docker compose --profile rabbitmq4 rm -sfv rabbitmq4' EXIT
+    docker compose --profile rabbitmq4 up -d --wait rabbitmq4
     amqp=$(docker compose --profile rabbitmq4 port rabbitmq4 5672)
     mgmt=$(docker compose --profile rabbitmq4 port rabbitmq4 15672)
     KEYHOLE_TEST_RABBITMQ_PORT="${amqp##*:}" KEYHOLE_TEST_RABBITMQ_MGMT_PORT="${mgmt##*:}" \
