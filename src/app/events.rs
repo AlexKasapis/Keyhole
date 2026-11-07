@@ -376,7 +376,11 @@ impl App {
         if let Some(conn) = self.conn_by_id_mut(id) {
             conn.publish.last = Some((target.clone(), result.clone()));
             repeeks = conn.caps.repeeks_after_publish();
+            // Only a peek shown before the publish is out of date. One still
+            // in flight runs after it on the serial actor (and has already
+            // touched the queue), so its reply is kept for `on_peeked`.
             if !repeeks
+                && !conn.peek.pending
                 && conn
                     .peek
                     .peeked

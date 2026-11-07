@@ -922,6 +922,34 @@ async fn rabbitmq_a_publish_reports_its_outcome_and_peeks_nothing() {
 }
 
 #[tokio::test]
+async fn rabbitmq_a_peek_in_flight_during_a_publish_shows_its_reply() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(ch('P'));
+    type_text(&mut app, "new");
+    app.handle_key(key(KeyCode::Enter));
+    // Enter again while the publish is in flight: the actor peeks after it.
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        peeks(&sent(&mut cmds)),
+        [(queue("orders"), config::PeekMode::Browse)]
+    );
+    assert!(app.active_conn().unwrap().peek.pending);
+
+    published(&mut app, "queue:orders", Ok(()));
+    let peek = &app.active_conn().unwrap().peek;
+    assert!(peek.pending, "the peek is still awaited");
+    assert_eq!(peek.peeked, Some(queue("orders")));
+
+    // The broker already ran the get-and-requeue, so its reply is shown.
+    peeked(&mut app, "orders", Ok(vec![broker_event("new")]));
+    let conn = app.active_conn().unwrap();
+    assert!(conn.has_peeked_messages());
+    assert!(!conn.peek.pending);
+    assert_eq!(conn.peek.events.len(), 1);
+}
+
+#[tokio::test]
 async fn rabbitmq_a_publish_elsewhere_keeps_the_peek() {
     let (mut app, _rx, _cmds) = listed_app();
     select_row(&mut app, "orders");
