@@ -1658,6 +1658,42 @@ mod tests {
         assert!(!stats.has_alarm(), "unknown alarms aren't alarms");
     }
 
+    #[test]
+    fn a_fresh_node_has_versions_and_counts_but_no_figures_yet() {
+        // Captured within a second of a new 3.13.7 node accepting logins:
+        // `message_stats` and `queue_totals` are `{}` until traffic arrives,
+        // and the node has no figures before its first stats emission.
+        let stats = stats_from(
+            &fixture!("overview.fresh.v3"),
+            Some(&fixture!("nodes.fresh.v3")),
+            true,
+        );
+        assert!(!stats.stats_disabled);
+        assert_eq!(stats.rabbitmq_version.as_deref(), Some("3.13.7"));
+        assert!(stats.erlang_version.is_some() && stats.cluster_name.is_some());
+        assert_eq!(
+            (stats.publish_rate, stats.deliver_rate, stats.ack_rate),
+            (None, None, None)
+        );
+        assert_eq!(
+            (stats.messages, stats.messages_ready, stats.messages_unacked),
+            (None, None, None)
+        );
+        assert_eq!(
+            (stats.queues, stats.connections, stats.consumers),
+            (Some(0), Some(0), Some(0))
+        );
+        assert_eq!(
+            stats.nodes,
+            [NodeHealth {
+                name: "rabbit@e71afc9e7c51".into(),
+                running: Some(true),
+                ..Default::default()
+            }]
+        );
+        assert!(!stats.has_alarm());
+    }
+
     #[tokio::test]
     async fn stats_read_the_overview_then_the_nodes_for_a_monitoring_user() {
         use crate::broker::http::stub::header;
@@ -2158,6 +2194,10 @@ mod integration_tests {
     #[tokio::test]
     async fn stats_report_the_version_totals_and_node_health() {
         // The `keyhole` user is an administrator, so the nodes are read too.
+        // Only what a node reports from the start is checked: on a fresh node
+        // (CI's) `message_stats` and `queue_totals` stay empty until traffic
+        // arrives, and a node is only `name` and `running` until its first
+        // stats emission. The fixture tests cover the figures.
         let mut conn = connected().await;
         let stats = conn.stats().await.expect("stats");
         let stats = stats.rabbitmq().expect("RabbitMQ stats");
@@ -2169,12 +2209,6 @@ mod integration_tests {
         let node = stats.nodes.first().expect("node health");
         assert!(node.name.starts_with("rabbit@"), "{}", node.name);
         assert_eq!(node.running, Some(true));
-        if !stats.stats_disabled {
-            assert!(stats.publish_rate.is_some() && stats.messages.is_some());
-            assert!(node.mem_used.is_some() && node.mem_limit.is_some());
-            assert!(node.fd_used.is_some() && node.disk_free.is_some());
-            assert_eq!(node.mem_alarm, Some(false));
-        }
     }
 
     #[tokio::test]

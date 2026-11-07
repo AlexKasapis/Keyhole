@@ -952,7 +952,7 @@ impl RabbitmqStats {
 }
 
 /// One RabbitMQ node's resource use and alarms. The figures are missing when
-/// the metrics collector is off.
+/// the metrics collector is off, and on a node that just started.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeHealth {
     pub name: String,

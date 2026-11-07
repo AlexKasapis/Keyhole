@@ -2408,7 +2408,16 @@ mod tests {
         );
         assert!(!text.contains("connections"));
         assert!(text.contains("node health needs the monitoring tag"));
-        assert!(text.contains("Publish/s 9.6"), "rates still come through");
+        // The rates still come through, and cover the same vhosts.
+        assert!(text.contains("your vhosts: Publish/s 9.6"), "{text}");
+        assert!(text.contains("your vhosts: Deliver/s 14.4"), "{text}");
+
+        let (mut app, _rx) = rabbitmq_dashboard(sample_rabbitmq_stats()).await;
+        let text = screen_text(&mut app);
+        assert!(
+            !text.contains("your vhosts"),
+            "a monitoring user's are cluster-wide"
+        );
     }
 
     #[tokio::test]
@@ -2453,6 +2462,81 @@ mod tests {
         );
         assert!(text.contains("r in the list retries"));
         assert!(!text.contains("Publish/s"), "no stale figures");
+    }
+
+    #[tokio::test]
+    async fn a_failed_rabbitmq_refresh_leaves_the_band_dot_neutral() {
+        // The last good stats had an alarm, then a refresh failed: like the
+        // Details tab, the band claims neither that stale alarm nor health.
+        let mut alarmed = sample_rabbitmq_stats();
+        alarmed.nodes[0].mem_alarm = Some(true);
+        let (mut app, _rx) = rabbitmq_dashboard(alarmed.clone()).await;
+        app.handle_event(AppEvent::StatsUpdated {
+            id: ConnId(1),
+            result: Err("management API unavailable at http://127.0.0.1:15672".into()),
+        });
+        let text = screen_text(&mut app);
+        assert!(text.contains("● stats unavailable"), "{text}");
+        assert!(!text.contains("● alarm") && !text.contains("● connected"));
+        // Steady and dim, at any instant (no breathing).
+        let dim = app.theme.dim;
+        assert_eq!(dot_at(&mut app, 0).fg, dim.fg);
+        assert_eq!(dot_at(&mut app, 1).fg, dim.fg);
+
+        // The next good refresh shows the alarm again.
+        app.handle_event(AppEvent::StatsUpdated {
+            id: ConnId(1),
+            result: Ok(BrokerStats::Rabbitmq(alarmed)),
+        });
+        assert!(screen_text(&mut app).contains("● alarm"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_redis_refresh_keeps_the_band_connected() {
+        let (mut app, _rx) = app_with_connection().await;
+        app.screen = Screen::Browser;
+        app.handle_event(AppEvent::StatsUpdated {
+            id: ConnId(1),
+            result: Err("NOPERM INFO".into()),
+        });
+        let text = screen_text(&mut app);
+        assert!(text.contains("● connected"), "{text}");
+        assert!(!text.contains("stats unavailable"));
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_server_details_on_a_fresh_node() {
+        // A node that just started (as `overview.fresh.v3` / `nodes.fresh.v3`):
+        // versions and zero counts, no message totals, rates or node figures.
+        let stats = RabbitmqStats {
+            publish_rate: None,
+            deliver_rate: None,
+            ack_rate: None,
+            messages: None,
+            messages_ready: None,
+            messages_unacked: None,
+            queues: Some(0),
+            connections: Some(0),
+            consumers: Some(0),
+            nodes: vec![NodeHealth {
+                name: "rabbit@e71afc9e7c51".into(),
+                running: Some(true),
+                ..Default::default()
+            }],
+            ..sample_rabbitmq_stats()
+        };
+        let (mut app, _rx) = rabbitmq_dashboard(stats).await;
+        let text = screen_text(&mut app);
+        assert!(text.contains("RabbitMQ 3.13.7"), "{text}");
+        assert!(
+            text.contains("0 queues · 0 connections · 0 consumers"),
+            "{text}"
+        );
+        assert!(!text.contains("msgs") && !text.contains("mem "), "{text}");
+        assert!(text.contains("rabbit@e71afc9e7c51 · running"), "{text}");
+        assert!(text.contains("Publish/s — · peak"), "{text}");
+        assert!(text.contains("Deliver/s — · ack — · peak"), "{text}");
+        assert!(text.contains("● connected"), "no alarm: {text}");
     }
 
     #[tokio::test]

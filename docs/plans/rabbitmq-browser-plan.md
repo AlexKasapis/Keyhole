@@ -110,6 +110,15 @@ while peeked. Requeued messages kept their order. The delivery-limit warning is 
   queue rows lose `messages*`, `consumers` and `message_stats`; nodes lose memory / fd / disk;
   `/api/vhosts/{v}/connections` returns `[]`; `/api/consumers/{v}` returns 400 "Stats in
   management UI are disabled on this node". `/get` still works.
+- **A fresh node** (3.13.7, from the moment it accepts logins) is missing figures too, with
+  metrics on: `/api/overview` has `"message_stats": {}` and `"queue_totals": {}` (only
+  `object_totals` is there, all zeros), and they stay empty while the node is idle (90 s
+  watched): `queue_totals` fills in once a queue exists and `message_stats` once something is
+  published, each at the next stats emission. `/api/nodes` has
+  only `name`, `type`, `running` and `being_drained` (plus `cluster_links` and
+  `metrics_gc_queue_length`) until the node's first stats emission, a few seconds in: no
+  memory, fd or disk figures, limits, alarms or `partitions`. CI's service broker is fresh,
+  so live tests must not expect any figure (found after Phase 5).
 - Columns used for the fixtures, recommended for Phase 2:
   - queues: `name,type,state,durable,auto_delete,exclusive,arguments,policy,effective_policy_definition,delivery_limit,messages,messages_ready,messages_unacknowledged,consumers,message_stats.publish_details.rate,message_stats.deliver_get_details.rate,message_stats.ack_details.rate,message_stats.redeliver_details.rate`
   - exchanges: `name,type,durable,auto_delete,internal,arguments,policy,message_stats.publish_in_details.rate,message_stats.publish_out_details.rate`
@@ -221,6 +230,7 @@ above.
 | `get.dead-lettered` | from the DLQ | `x-death` with reason `delivery_limit` |
 | `get.empty` | empty queue | `[]` |
 | `{overview,nodes,queues,exchanges,connections}.no-metrics` (v4 only) | same requests with the metrics collector disabled | Missing counts, rates and node stats; `connections` is `[]` |
+| `{overview,nodes}.fresh` (v3 only) | `GET /api/overview`, `GET /api/nodes` (admin) within a second of a new node accepting logins | Empty `message_stats` / `queue_totals`; a node with only `name` / `running` |
 | `error.401.bad-credentials` | wrong password | `not_authorized` / `Not_Authorized` |
 | `error.401.not-management` | user with no tags | "Not management user" |
 | `error.401.not-monitoring` | `/api/nodes` (management user) | "Not monitor user" |
@@ -462,8 +472,8 @@ between 3.x and 4.x (Phase 0, Q1; used in Phase 4).
   Rename the two history fields to neutral names.
 - `RabbitmqStats` is built from `overview()` plus `nodes()` when the user has the
   `monitoring` or `administrator` tag. A management-only user's overview has no `node`. With
-  metrics disabled, the overview has no `message_stats` / `queue_totals` and nodes have no
-  memory, fd or disk figures (Phase 0, Q2). It holds:
+  metrics disabled, or on a fresh node, the overview has no `message_stats` / `queue_totals`
+  and nodes have no memory, fd or disk figures (Phase 0, Q2). It holds:
   - RabbitMQ and Erlang versions, cluster name
   - publish / deliver / ack rates
   - totals for queued, ready and unacked messages
@@ -471,10 +481,11 @@ between 3.x and 4.x (Phase 0, Q1; used in Phase 4).
   - per-node memory used / limit, fd used / total, disk free / limit, and alarms
 
   A `management`-only user's overview totals aren't cluster-wide (Phase 0, Q3): they count only
-  the user's vhosts and its own connections. The tab labels the totals "your vhosts" and leaves
-  the connection count out.
+  the user's vhosts and its own connections. The tab labels the totals and the rate graphs
+  "your vhosts" and leaves the connection count out.
 - **Server band** (`views.rs:816`): name · address · `vhost /` (Redis keeps `db`). An alarm
-  turns the health dot to warning.
+  turns the health dot to warning. While the latest refresh has failed (the tab shows the
+  error), the dot is a dim "stats unavailable" rather than the stale alarm or health.
 - **Server Details tab:**
   - Fact lines: version / cluster; totals; node health (memory, fd, disk, alarms). Absent
     values are left out.
@@ -483,7 +494,8 @@ between 3.x and 4.x (Phase 0, Q1; used in Phase 4).
     built, the graphs take the full width until then.
 - **Tests:**
   - Build `RabbitmqStats` from the fixtures, including when node data is missing (no
-    `monitoring` tag: `overview.management`) and with metrics disabled (`*.no-metrics.v4`).
+    `monitoring` tag: `overview.management`), with metrics disabled (`*.no-metrics.v4`) and on
+    a fresh node (`*.fresh.v3`).
   - `StatsPanel::record` for both variants.
   - Snapshots of the band and Server Details.
   - Update the existing Redis stats tests mechanically for the enum.

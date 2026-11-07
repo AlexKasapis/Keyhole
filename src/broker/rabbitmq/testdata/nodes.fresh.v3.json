@@ -1,0 +1,19 @@
+[
+  {
+    "name": "rabbit@e71afc9e7c51",
+    "type": "disc",
+    "running": true,
+    "being_drained": false,
+    "cluster_links": [],
+    "metrics_gc_queue_length": {
+      "connection_closed": 0,
+      "channel_closed": 0,
+      "consumer_deleted": 0,
+      "exchange_deleted": 0,
+      "queue_deleted": 0,
+      "vhost_deleted": 0,
+      "node_node_deleted": 0,
+      "channel_consumer_deleted": 0
+    }
+  }
+]

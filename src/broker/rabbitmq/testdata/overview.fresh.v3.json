@@ -1,0 +1,119 @@
+{
+  "management_version": "3.13.7",
+  "rates_mode": "basic",
+  "sample_retention_policies": {
+    "global": [
+      600,
+      3600,
+      28800,
+      86400
+    ],
+    "basic": [
+      600,
+      3600
+    ],
+    "detailed": [
+      600
+    ]
+  },
+  "exchange_types": [
+    {
+      "name": "direct",
+      "description": "AMQP direct exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "fanout",
+      "description": "AMQP fanout exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "headers",
+      "description": "AMQP headers exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "topic",
+      "description": "AMQP topic exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "x-federation-upstream",
+      "description": "Federation upstream helper exchange",
+      "internal_purpose": "federation",
+      "enabled": true
+    }
+  ],
+  "product_version": "3.13.7",
+  "product_name": "RabbitMQ",
+  "rabbitmq_version": "3.13.7",
+  "cluster_name": "rabbit@e71afc9e7c51",
+  "erlang_version": "26.2.5.16",
+  "erlang_full_version": "Erlang/OTP 26 [erts-14.2.5.12] [source] [64-bit] [smp:22:22] [ds:22:22:10] [async-threads:1] [jit:ns]",
+  "release_series_support_status": "supported",
+  "disable_stats": false,
+  "is_op_policy_updating_enabled": true,
+  "enable_queue_totals": false,
+  "message_stats": {},
+  "churn_rates": {},
+  "queue_totals": {},
+  "object_totals": {
+    "consumers": 0,
+    "exchanges": 7,
+    "queues": 0,
+    "connections": 0,
+    "channels": 0
+  },
+  "statistics_db_event_queue": 0,
+  "node": "rabbit@e71afc9e7c51",
+  "listeners": [
+    {
+      "node": "rabbit@e71afc9e7c51",
+      "protocol": "amqp",
+      "ip_address": "::",
+      "port": 5672,
+      "socket_opts": {
+        "backlog": 128,
+        "nodelay": true,
+        "linger": [
+          true,
+          0
+        ],
+        "exit_on_close": false
+      }
+    },
+    {
+      "node": "rabbit@e71afc9e7c51",
+      "protocol": "clustering",
+      "ip_address": "::",
+      "port": 25672,
+      "socket_opts": []
+    },
+    {
+      "node": "rabbit@e71afc9e7c51",
+      "protocol": "http",
+      "ip_address": "::",
+      "port": 15672,
+      "socket_opts": {
+        "cowboy_opts": {
+          "sendfile": false
+        },
+        "port": 15672
+      }
+    },
+    {
+      "node": "rabbit@e71afc9e7c51",
+      "protocol": "http/prometheus",
+      "ip_address": "::",
+      "port": 15692,
+      "socket_opts": {
+        "port": 15692,
+        "protocol": "http/prometheus",
+        "cowboy_opts": {
+          "sendfile": false
+        }
+      }
+    }
+  ],
+  "contexts": []
+}

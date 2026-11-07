@@ -1374,8 +1374,9 @@ struct ServerBand<'a> {
 /// identifying the live connection — its name, `host:port` address, and the
 /// database (Redis) or vhost (RabbitMQ) in view — with the connection health
 /// dot riding in the title beside the "Server" label. A RabbitMQ node alarm
-/// turns a connected dot to a warning. The fuller statistics live in the
-/// Server Details tab below.
+/// turns a connected dot to a warning, and a failed RabbitMQ refresh to a dim
+/// "stats unavailable". The fuller statistics live in the Server Details tab
+/// below.
 fn server_stats_band(
     frame: &mut Frame,
     conn: &Connection,
@@ -1393,7 +1394,12 @@ fn server_stats_band(
         .as_ref()
         .and_then(BrokerStats::rabbitmq)
         .is_some_and(RabbitmqStats::has_alarm);
+    // Only a RabbitMQ refresh records an error: its last figures are stale.
+    let stale = conn.dashboard.error.is_some();
     let (dot, hlabel, dot_style) = match crate::ui::health_indicator(band.health, theme) {
+        // The latest refresh failed, so the broker's health is unknown: claim
+        // neither the stale alarm nor a healthy breathing dot.
+        _ if stale && band.health == ConnHealth::Connected => ("●", "stats unavailable", theme.dim),
         // A node alarm (or a node down or partitioned) blocks publishers: the
         // connection is up, but the broker needs a look.
         _ if alarm && band.health == ConnHealth::Connected => ("●", "alarm", theme.warning),
@@ -2261,12 +2267,19 @@ fn rabbitmq_graphs(
     let [publish_area, deliver_area] =
         Layout::vertical([Constraint::Min(0), Constraint::Min(0)]).areas(area);
     let peak = |history: &VecDeque<u64>| history.iter().copied().max().unwrap_or(0);
+    // Like the totals, the rates cover only the user's vhosts without the
+    // `monitoring` tag.
+    let scope = if stats.cluster_wide {
+        ""
+    } else {
+        "your vhosts: "
+    };
     let history = &conn.dashboard.primary_history;
     server_graph(
         frame,
         theme,
         publish_area,
-        "Publish/s",
+        &format!("{scope}Publish/s"),
         history,
         format!(
             "{} · peak {}",
@@ -2279,7 +2292,7 @@ fn rabbitmq_graphs(
         frame,
         theme,
         deliver_area,
-        "Deliver/s",
+        &format!("{scope}Deliver/s"),
         history,
         format!(
             "{} · ack {} · peak {}",
