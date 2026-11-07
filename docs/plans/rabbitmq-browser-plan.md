@@ -534,7 +534,11 @@ on, so a broker NACK or `unroutable` (with `mandatory`) shows up in `AppEvent::P
   (classic) and `keyhole.demo.audit` (quorum), bound to `keyhole.demo`, so the browser has
   queues to peek. Add the names to `dev/fixtures.rs`.~~ Done in Phase 4:
   `fixtures::RABBITMQ_QUEUES` binds `keyhole.demo.orders` with `order.*` and
-  `keyhole.demo.audit` with `#`.
+  `keyhole.demo.audit` with `#`. Both are declared with `x-max-length = 1000`
+  (`fixtures::RABBITMQ_QUEUE_MAX_LENGTH`; the default overflow drops the oldest), the user's
+  decision (2026-11-07), so a long-running `just dev` doesn't grow them without bound. A demo
+  queue left uncapped by an earlier `keyhole dev` fails the declare with
+  `PRECONDITION_FAILED`; `keyhole dev` then deletes it and declares it afresh.
 - `docker-compose.yml`: consider `rabbitmq:4-management`, or a second profile that runs both
   versions, so the integration tests cover 4.x. Phase 0 found real differences between the
   versions: the quorum delivery count on peek, the vhost-denied status, and the 3.13

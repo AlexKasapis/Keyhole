@@ -8,7 +8,8 @@
 # RabbitMQ tap target (type it in the TUI): exchange:keyhole.demo
 #                                       or  exchange:keyhole.demo/order.*
 # RabbitMQ queues to peek (Enter in the browser): keyhole.demo.orders (classic,
-# bound with order.*) and keyhole.demo.audit (quorum, bound with #).
+# bound with order.*) and keyhole.demo.audit (quorum, bound with #), each
+# capped at the newest 1000 messages.
 
 [[connection]]
 type = "redis"

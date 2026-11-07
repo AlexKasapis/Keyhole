@@ -33,8 +33,14 @@ pub struct RabbitmqQueue {
     pub quorum: bool,
 }
 
+/// The most messages each demo queue keeps (`x-max-length`): past it the
+/// oldest are dropped, so a long-running `keyhole dev` doesn't grow them
+/// without bound.
+pub const RABBITMQ_QUEUE_MAX_LENGTH: i32 = 1000;
+
 /// The demo queues: a classic queue of the order events, and a quorum queue
-/// that audits everything published to the exchange.
+/// that audits everything published to the exchange. Both are capped at
+/// [`RABBITMQ_QUEUE_MAX_LENGTH`].
 pub const RABBITMQ_QUEUES: [RabbitmqQueue; 2] = [
     RabbitmqQueue {
         name: "keyhole.demo.orders",

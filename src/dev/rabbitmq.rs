@@ -2,15 +2,19 @@
 //!
 //! The app's RabbitMQ broker has no publish path, so this uses the raw `lapin`
 //! client to declare a durable topic exchange, with durable queues bound to it
-//! ([`fixtures::RABBITMQ_QUEUES`]), and publish to it. Tap the exchange in the
-//! TUI via `exchange:keyhole.demo`, or open a queue to peek what it collected.
+//! ([`fixtures::RABBITMQ_QUEUES`], capped at
+//! [`fixtures::RABBITMQ_QUEUE_MAX_LENGTH`] messages), and publish to it. Tap the
+//! exchange in the TUI via `exchange:keyhole.demo`, or open a queue to peek what
+//! it collected.
 
 use std::time::Duration;
 
 use anyhow::Context;
 use lapin::options::{
     BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
+    QueueDeleteOptions,
 };
+use lapin::protocol::{AMQPErrorKind, AMQPSoftError};
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
@@ -44,7 +48,7 @@ async fn open(
     let conn = Connection::connect(&url(profile, password), ConnectionProperties::default())
         .await
         .context("connecting to RabbitMQ")?;
-    let channel = conn.create_channel().await.context("opening channel")?;
+    let mut channel = conn.create_channel().await.context("opening channel")?;
     channel
         .exchange_declare(
             fixtures::RABBITMQ_EXCHANGE.into(),
@@ -58,33 +62,43 @@ async fn open(
         .await
         .with_context(|| format!("declaring exchange `{}`", fixtures::RABBITMQ_EXCHANGE))?;
     for queue in &fixtures::RABBITMQ_QUEUES {
-        declare_queue(&channel, queue).await?;
+        channel = declare_queue(&conn, channel, queue).await?;
     }
     Ok((conn, channel))
 }
 
-/// Declare a durable demo queue (a quorum queue when asked) and bind it to the
-/// demo exchange. Declaring an existing queue with the same settings is a
-/// no-op, so every run can do it.
-async fn declare_queue(channel: &Channel, queue: &fixtures::RabbitmqQueue) -> anyhow::Result<()> {
-    let mut args = FieldTable::default();
-    if queue.quorum {
-        args.insert(
-            "x-queue-type".into(),
-            AMQPValue::LongString("quorum".into()),
-        );
-    }
-    channel
-        .queue_declare(
-            queue.name.into(),
-            QueueDeclareOptions {
-                durable: true,
-                ..Default::default()
-            },
-            args,
-        )
-        .await
-        .with_context(|| format!("declaring queue `{}`", queue.name))?;
+/// Declare a durable demo queue (a quorum queue when asked, capped at
+/// [`fixtures::RABBITMQ_QUEUE_MAX_LENGTH`]) and bind it to the demo exchange.
+/// Declaring an existing queue with the same settings is a no-op, so every run
+/// can do it.
+///
+/// One declared with other settings (by a `keyhole dev` from before the cap)
+/// is refused with `PRECONDITION_FAILED`, which also closes the channel. It
+/// holds only demo messages, so it's deleted and declared afresh on a new
+/// channel. Returns the channel to carry on with.
+async fn declare_queue(
+    conn: &Connection,
+    channel: Channel,
+    queue: &fixtures::RabbitmqQueue,
+) -> anyhow::Result<Channel> {
+    let context = || format!("declaring queue `{}`", queue.name);
+    let channel = match declare(&channel, queue).await {
+        Ok(()) => channel,
+        Err(e) if is_precondition_failed(&e) => {
+            let channel = conn.create_channel().await.context("reopening channel")?;
+            channel
+                .queue_delete(queue.name.into(), QueueDeleteOptions::default())
+                .await
+                .with_context(|| format!("deleting the outdated queue `{}`", queue.name))?;
+            declare(&channel, queue).await.with_context(context)?;
+            println!(
+                "rabbitmq: re-created queue {} (it had other settings: {e})",
+                queue.name
+            );
+            channel
+        }
+        Err(e) => return Err(e).with_context(context),
+    };
     channel
         .queue_bind(
             queue.name.into(),
@@ -95,7 +109,43 @@ async fn declare_queue(channel: &Channel, queue: &fixtures::RabbitmqQueue) -> an
         )
         .await
         .with_context(|| format!("binding queue `{}`", queue.name))?;
+    Ok(channel)
+}
+
+/// Declare `queue` with the demo settings.
+async fn declare(channel: &Channel, queue: &fixtures::RabbitmqQueue) -> lapin::Result<()> {
+    let mut args = FieldTable::default();
+    if queue.quorum {
+        args.insert(
+            "x-queue-type".into(),
+            AMQPValue::LongString("quorum".into()),
+        );
+    }
+    args.insert(
+        "x-max-length".into(),
+        AMQPValue::LongInt(fixtures::RABBITMQ_QUEUE_MAX_LENGTH),
+    );
+    channel
+        .queue_declare(
+            queue.name.into(),
+            QueueDeclareOptions {
+                durable: true,
+                ..Default::default()
+            },
+            args,
+        )
+        .await?;
     Ok(())
+}
+
+/// Whether the broker refused a declare because the queue exists with other
+/// settings.
+fn is_precondition_failed(e: &lapin::Error) -> bool {
+    matches!(
+        e.kind(),
+        lapin::ErrorKind::ProtocolError(err)
+            if *err.kind() == AMQPErrorKind::Soft(AMQPSoftError::PRECONDITIONFAILED)
+    )
 }
 
 /// Continuous: publish fake messages to the demo exchange until `token` is
@@ -251,6 +301,31 @@ mod integration_tests {
             .message_count()
     }
 
+    /// Whether `queue` exists as the demo settings declare it: a non-passive
+    /// declare succeeds only when its arguments are equivalent. The settings
+    /// are spelled out here rather than reusing [`declare`].
+    async fn is_capped(conn: &Connection, queue: &fixtures::RabbitmqQueue) -> bool {
+        let channel = conn.create_channel().await.unwrap();
+        let mut args = FieldTable::default();
+        if queue.quorum {
+            args.insert(
+                "x-queue-type".into(),
+                AMQPValue::LongString("quorum".into()),
+            );
+        }
+        args.insert("x-max-length".into(), AMQPValue::LongInt(1000));
+        let durable = QueueDeclareOptions {
+            durable: true,
+            ..Default::default()
+        };
+        let ok = channel
+            .queue_declare(queue.name.into(), durable, args)
+            .await
+            .is_ok();
+        channel.close(200, "bye".into()).await.ok();
+        ok
+    }
+
     #[tokio::test]
     async fn declares_the_exchange_and_queues_and_publishes() {
         // A second run re-declares everything without a conflict.
@@ -261,6 +336,9 @@ mod integration_tests {
         let (conn, channel) = open(&test_profile(), Some("keyhole"))
             .await
             .expect("connect + declare exchange and queues");
+        for queue in &fixtures::RABBITMQ_QUEUES {
+            assert!(is_capped(&conn, queue).await, "{} is capped", queue.name);
+        }
         let before: Vec<u32> = futures_util::future::join_all(
             fixtures::RABBITMQ_QUEUES
                 .iter()
@@ -284,6 +362,51 @@ mod integration_tests {
             }
             assert!(after >= before + 3, "{}: {before} → {after}", queue.name);
         }
+        conn.close(200, "bye".into()).await.ok();
+    }
+    #[tokio::test]
+    async fn a_demo_queue_declared_with_other_settings_is_replaced() {
+        // As a `keyhole dev` from before the cap left it: durable and
+        // uncapped. (A test queue, so a running `keyhole dev` is unaffected.)
+        let name = format!("keyhole.it.demo.{}", std::process::id());
+        let queue = fixtures::RabbitmqQueue {
+            name: Box::leak(name.into_boxed_str()),
+            binding_key: "#",
+            quorum: true,
+        };
+        let (conn, channel) = open(&test_profile(), Some("keyhole"))
+            .await
+            .expect("connect + declare");
+        let mut quorum = FieldTable::default();
+        quorum.insert(
+            "x-queue-type".into(),
+            AMQPValue::LongString("quorum".into()),
+        );
+        channel
+            .queue_declare(
+                queue.name.into(),
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                quorum,
+            )
+            .await
+            .expect("an uncapped quorum queue");
+        assert!(!is_capped(&conn, &queue).await);
+
+        // The demo declare is refused, then deletes it and declares it afresh,
+        // on a channel that still works.
+        let channel = declare_queue(&conn, channel, &queue).await;
+        let capped = is_capped(&conn, &queue).await;
+        let cleanup = conn.create_channel().await.unwrap();
+        cleanup
+            .queue_delete(queue.name.into(), QueueDeleteOptions::default())
+            .await
+            .ok();
+        let channel = channel.expect("re-created");
+        assert!(capped, "{} is capped", queue.name);
+        publish_once(&channel, 1).await.expect("the channel works");
         conn.close(200, "bye".into()).await.ok();
     }
 }
