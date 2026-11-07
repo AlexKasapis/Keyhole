@@ -23,6 +23,12 @@ just test-int      # integration tests (brings up dockerized brokers)
 just release-lint  # installer test suite + shellcheck + actionlint
 ```
 
+`just test-int` runs the RabbitMQ integration tests twice, against RabbitMQ 3.x
+and then a fresh 4.x (the `rabbitmq4` compose service, host ports 5675/15675),
+as CI does. `just test-int-rabbitmq4` runs only the 4.x pass. The tests delete
+the queues and exchanges they create, and assert only what a fresh broker
+reports.
+
 ## Tests are required
 
 Per [`CLAUDE.md`](CLAUDE.md), every change ships with adequate test coverage and

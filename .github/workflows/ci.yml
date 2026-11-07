@@ -58,6 +58,22 @@ jobs:
           --health-timeout 10s
           --health-retries 15
           --health-start-period 20s
+      # RabbitMQ 4.x, for a second pass of the RabbitMQ integration tests:
+      # peek, vhost errors and quorum delivery counts differ from 3.x.
+      rabbitmq4:
+        image: rabbitmq:4-management
+        env:
+          RABBITMQ_DEFAULT_USER: keyhole
+          RABBITMQ_DEFAULT_PASS: keyhole
+        ports:
+          - 5675:5672
+          - 15675:15672 # management HTTP API
+        options: >-
+          --health-cmd "rabbitmqctl -q authenticate_user keyhole keyhole"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 15
+          --health-start-period 20s
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -99,6 +115,14 @@ jobs:
           KEYHOLE_TEST_RABBITMQ_PORT: "5673"
           KEYHOLE_TEST_RABBITMQ_MGMT_PORT: "15673"
         run: cargo test --locked --features integration -- --include-ignored
+
+      - name: Integration tests (RabbitMQ 4.x)
+        # Only the RabbitMQ tests, again, against the 4.x service. The test
+        # binary is already built, so this adds seconds.
+        env:
+          KEYHOLE_TEST_RABBITMQ_PORT: "5675"
+          KEYHOLE_TEST_RABBITMQ_MGMT_PORT: "15675"
+        run: cargo test --locked --features integration -- --include-ignored rabbitmq::integration_tests
 
   # Guard the release plumbing (installer script + workflows) on every push,
   # so breakage is caught here rather than when a real `vX.Y.Z` tag is pushed.
@@ -195,6 +219,10 @@ jobs:
   # then fail if it regresses below the floor. The broker services + readiness
   # waits mirror the `build` job. CLAUDE.md mandates the codebase stays
   # adequately covered; this job is what enforces it.
+  #
+  # The build job's RabbitMQ 4.x pass isn't repeated here: it runs the same
+  # code as the 3.x pass, and the version-specific parsing is covered by the
+  # v3/v4 fixture tests, so it would add a broker and run time for little gain.
   #
   # The floor is 90%; the observed integration-inclusive line coverage is ~92%
   # (326 tests). Ratchet it upward toward the observed number as coverage

@@ -149,7 +149,7 @@ just run            # cargo run
 just fmt            # rustfmt
 just lint           # clippy -D warnings
 just test           # unit + snapshot tests
-just test-int       # integration tests against dockerized Redis + ActiveMQ + RabbitMQ
+just test-int       # integration tests against dockerized Redis + ActiveMQ + RabbitMQ 3.x and 4.x
 ```
 
 Logs are written to `~/.local/share/keyhole/logs/`.

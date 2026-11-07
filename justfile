@@ -29,8 +29,8 @@ lint-fix:
 test:
     ./scripts/test.sh
 
-# Integration tests against dockerized Redis + ActiveMQ + RabbitMQ.
-test-int:
+# Integration tests: Redis + ActiveMQ + RabbitMQ 3.x, then RabbitMQ 4.x (as CI).
+test-int: && test-int-rabbitmq4
     docker compose --profile rabbitmq up -d redis activemq rabbitmq
     # ActiveMQ has no healthcheck; wait for its AMQP port to accept connections.
     bash -c 'for i in $(seq 1 60); do (echo > /dev/tcp/127.0.0.1/${KEYHOLE_ACTIVEMQ_PORT:-5674}) 2>/dev/null && break; sleep 2; done'
@@ -39,6 +39,23 @@ test-int:
     bash -c 'for i in $(seq 1 60); do docker compose exec -T rabbitmq rabbitmqctl -q authenticate_user keyhole keyhole >/dev/null 2>&1 && break; sleep 2; done'
     -cargo test --features integration -- --include-ignored
     docker compose --profile rabbitmq down
+
+# The RabbitMQ integration tests against a fresh RabbitMQ 4.x container.
+test-int-rabbitmq4:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The `rabbitmq4` compose service, on host ports 5675/15675 (or
+    # KEYHOLE_RABBITMQ4_PORT / KEYHOLE_RABBITMQ4_MGMT_PORT), removed again with
+    # its data afterwards, so every run starts from a fresh broker.
+    # --wait polls the healthcheck. Don't `exec rabbitmqctl` right after `up`
+    # instead: run as root before the node starts, it writes the Erlang cookie,
+    # which the 4.x node then can't read, and it fails to boot.
+    docker compose --profile rabbitmq4 up -d --wait rabbitmq4
+    trap 'docker compose --profile rabbitmq4 rm -sfv rabbitmq4' EXIT
+    amqp=$(docker compose --profile rabbitmq4 port rabbitmq4 5672)
+    mgmt=$(docker compose --profile rabbitmq4 port rabbitmq4 15672)
+    KEYHOLE_TEST_RABBITMQ_PORT="${amqp##*:}" KEYHOLE_TEST_RABBITMQ_MGMT_PORT="${mgmt##*:}" \
+        cargo test --features integration -- --include-ignored rabbitmq::integration_tests
 
 # Seed the local Redis with sample browse data.
 seed:

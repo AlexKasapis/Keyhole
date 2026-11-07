@@ -319,7 +319,25 @@ mod tests {
         // Docker-compose host ports (NOT the app's 5672 factory defaults).
         assert_eq!(find("redis").address(), "127.0.0.1:6379");
         assert_eq!(find("amqp").address(), "127.0.0.1:5674");
+        // The first rabbitmq profile, the one `keyhole dev` publishes to, is
+        // the 3.x dev broker; `dev-rabbitmq4` is the 4.x compose service.
         assert_eq!(find("rabbitmq").address(), "127.0.0.1:5673");
+        let rabbitmq4 = cfg
+            .connections
+            .iter()
+            .find_map(|c| match c {
+                ConnectionConfig::Rabbitmq(p) if p.name == "dev-rabbitmq4" => Some(p),
+                _ => None,
+            })
+            .expect("config.dev.toml has a dev-rabbitmq4 profile");
+        assert_eq!(
+            (rabbitmq4.host.as_str(), rabbitmq4.port),
+            ("127.0.0.1", 5675)
+        );
+        assert_eq!(
+            rabbitmq4.management_url.as_deref(),
+            Some("http://127.0.0.1:15675")
+        );
 
         let ConnectionConfig::Amqp(amqp) = find("amqp") else {
             unreachable!("type_label == amqp")

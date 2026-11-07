@@ -49,3 +49,17 @@ password = "env:KEYHOLE_DEV_RABBITMQ_PASSWORD"
 # The management API (queue/exchange list) logs in with the same user. Compose
 # maps it to host port 15673, not the derived default :15672.
 management_url = "http://127.0.0.1:15673"
+
+# RabbitMQ 4.x, for checking the browser against it by hand. `just dev` doesn't
+# start it, and `keyhole dev` publishes only to the first rabbitmq profile
+# (3.x above), so start it yourself; it has no demo queues until you add some:
+#   docker compose --profile rabbitmq4 up -d --wait rabbitmq4
+[[connection]]
+type = "rabbitmq"
+name = "dev-rabbitmq4"
+host = "127.0.0.1"
+port = 5675
+vhost = "/"
+username = "keyhole"
+password = "env:KEYHOLE_DEV_RABBITMQ_PASSWORD"
+management_url = "http://127.0.0.1:15675"
