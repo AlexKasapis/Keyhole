@@ -146,17 +146,22 @@ impl App {
         // surface there).
         self.health = ConnHealth::Connected;
         // Kick off the broker-appropriate first load.
-        if caps.uses_key_scan() {
-            self.start_scan(id, true);
-        } else if caps.can_browse {
-            // AMQP: a curated destination browser. Seed the list from the saved
-            // profile, then peek whatever queue lands selected.
-            self.seed_destinations(id);
-            self.request_peek(id);
-            // Enrich the curated list with the broker's own topics/queues when
-            // the profile names a management URL. Silent: a no-op when discovery
-            // isn't configured, and failures stay off the footer on connect.
-            self.discover_destinations(id, false);
+        match caps.r#type {
+            BrokerType::Redis => self.start_scan(id, true),
+            BrokerType::Amqp => {
+                // A curated destination browser. Seed the list from the saved
+                // profile, then peek whatever queue lands selected.
+                self.seed_destinations(id);
+                self.request_peek(id);
+                // Enrich the curated list with the broker's own topics/queues when
+                // the profile names a management URL. Silent: a no-op when
+                // discovery isn't configured, and failures stay off the footer on
+                // connect.
+                self.discover_destinations(id, false);
+            }
+            // Nothing to load yet: AMQP 0.9.1 can't list destinations, so the
+            // pane stays empty and exchange taps start from the Tail anchor.
+            BrokerType::Rabbitmq => {}
         }
         if caps.can_dashboard {
             self.request_stats(id);

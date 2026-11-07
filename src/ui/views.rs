@@ -246,7 +246,8 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     }
     rows.push(Constraint::Min(0));
     // The bottom panel hosts the tails — present for Redis (alongside its
-    // console) and AMQP (its only panel). See [`Capabilities::can_tail`].
+    // console) and AMQP / RabbitMQ (their only panel). See
+    // [`Capabilities::can_tail`].
     if conn.caps.can_tail() {
         rows.push(Constraint::Length(panel_h));
     }
@@ -261,11 +262,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         server_stats_band(frame, conn, health, now, anim_speed, theme, band_area);
     }
 
-    // AMQP browses a curated destination list (no key scan), so its body is a
-    // destination list + queue-peek pane — two separate bordered panes the
+    // AMQP / RabbitMQ browse a destination list (no key scan), so their body is
+    // a destination list + queue-peek pane — two separate bordered panes the
     // keyboard moves between — rather than the Redis key table + its attached
     // value inspector.
-    if !conn.caps.uses_key_scan() {
+    if conn.caps.has_destinations() {
         let [table_area, value_area] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(body_area);
@@ -517,14 +518,21 @@ fn amqp_destination_pane(
         .title_style(theme.heading)
         .border_style(border_style(theme, list_focused));
     if conn.destinations.items.is_empty() {
-        let hint = Paragraph::new(vec![
-            Line::from(""),
-            Line::styled("  No destinations yet.", theme.dim),
-            Line::styled("  Press 'a' to add topic:name or queue:name,", theme.dim),
-            Line::styled("  or 'r' to discover them from the broker.", theme.dim),
-        ])
-        .block(block);
-        frame.render_widget(hint, area);
+        let lines = match conn.caps.r#type {
+            // AMQP 0.9.1 can't list destinations, so point at the Tail anchor.
+            BrokerType::Rabbitmq => vec![
+                Line::from(""),
+                Line::styled("  Type exchange:name in the Tail tab", theme.dim),
+                Line::styled("  (press Tab) to tap an exchange.", theme.dim),
+            ],
+            _ => vec![
+                Line::from(""),
+                Line::styled("  No destinations yet.", theme.dim),
+                Line::styled("  Press 'a' to add topic:name or queue:name,", theme.dim),
+                Line::styled("  or 'r' to discover them from the broker.", theme.dim),
+            ],
+        };
+        frame.render_widget(Paragraph::new(lines).block(block), area);
         return;
     }
     let rows: Vec<Row> = conn
@@ -568,7 +576,11 @@ fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area:
         }
         Some((name, DestKind::Queue)) => name,
         None => {
-            return render_peek_hint(frame, theme, area, None, "Add a destination with 'a'.");
+            let hint = match conn.caps.r#type {
+                BrokerType::Rabbitmq => "Taps open as tabs in the panel below.",
+                _ => "Add a destination with 'a'.",
+            };
+            return render_peek_hint(frame, theme, area, None, hint);
         }
     };
 
@@ -913,8 +925,18 @@ fn panel_band(
             "channel or pattern",
             "Enter subscribes · a glob (* ? [) makes it a pattern (PSUBSCRIBE)",
         ),
+        // RabbitMQ's single Tail anchor accepts an exchange tap spec.
+        PanelTab::Tail if conn.caps.r#type == BrokerType::Rabbitmq => anchor_input(
+            frame,
+            theme,
+            content_area,
+            mode,
+            subscribe_buf,
+            "exchange:name or exchange:name/binding-key",
+            "Enter taps it · non-destructive copy via a temporary queue · key defaults to #",
+        ),
         // AMQP's single Tail anchor accepts a full destination spec.
-        PanelTab::Tail if !conn.caps.uses_key_scan() => anchor_input(
+        PanelTab::Tail if conn.caps.has_destinations() => anchor_input(
             frame,
             theme,
             content_area,

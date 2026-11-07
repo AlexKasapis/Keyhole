@@ -169,13 +169,14 @@ impl App {
                 self.set_pane_focus(PaneFocus::Bottom);
                 return;
             }
-            // Ctrl-←/→ walk the AMQP master-detail focus (destinations ⇄ message
-            // list). Redis has no horizontal pane focus, so it ignores them.
-            (true, KeyCode::Right) if self.active_is_amqp() => {
+            // Ctrl-←/→ walk the destination browser's master-detail focus
+            // (destinations ⇄ message list). Redis has no horizontal pane focus,
+            // so it ignores them.
+            (true, KeyCode::Right) if self.active_has_destinations() => {
                 self.focus_messages();
                 return;
             }
-            (true, KeyCode::Left) if self.active_is_amqp() => {
+            (true, KeyCode::Left) if self.active_has_destinations() => {
                 self.unfocus_messages();
                 return;
             }
@@ -202,27 +203,27 @@ impl App {
                 // navigation scrolls the feed and p/x/r control it.
                 _ => self.handle_feed_key(key),
             }
-        } else if self.active_is_amqp() {
-            // The AMQP left pane is the curated destination list, not a key list.
+        } else if self.active_has_destinations() {
+            // The left pane is a destination list (AMQP / RabbitMQ), not a key list.
             self.handle_destination_key(key);
         } else if let Some(action) = action::map_keys_focus(&key) {
             self.apply(action);
         }
     }
 
-    /// Whether the active connection is an AMQP 1.0 broker (a curated destination
-    /// browser rather than a Redis key scan).
-    pub(super) fn active_is_amqp(&self) -> bool {
+    /// Whether the active connection browses destinations (AMQP 1.0, RabbitMQ)
+    /// rather than Redis keys. See [`Capabilities::has_destinations`].
+    pub(super) fn active_has_destinations(&self) -> bool {
         self.active_conn()
-            .map(|c| c.caps.r#type == BrokerType::Amqp)
-            .unwrap_or(false)
+            .is_some_and(|c| c.caps.has_destinations())
     }
 
-    /// Keys while the AMQP destination list (left pane) is focused: navigate the
-    /// list, Enter to open the selection (peek a queue / tail a topic), `a` to add
-    /// a destination, `x`/`d` to remove one, `r` to (re)discover destinations from
-    /// the broker, `t` to tail it, `P` to publish. `Ctrl-→` steps focus into the
-    /// message list (handled in [`Self::handle_browser_key`]).
+    /// Keys while the destination list (left pane) is focused: navigate the
+    /// list, Enter to open the selection (peek a queue / tail a topic), `t` to
+    /// tail it, `P` to publish. A curated (AMQP) list also takes `a` to add a
+    /// destination, `x`/`d` to remove one and `r` to (re)discover destinations
+    /// from the broker. `Ctrl-→` steps focus into the message list (handled in
+    /// [`Self::handle_browser_key`]).
     ///
     /// When the message pane holds the keyboard the keys drive that pane instead
     /// (see [`Self::handle_message_key`]). The global keys (`:`/`?`/`m`/…) are
@@ -232,15 +233,22 @@ impl App {
             return self.handle_message_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Add / remove / discover edit a user-curated list (AMQP 1.0); a list that
+        // comes from the broker (RabbitMQ) doesn't take them.
+        let curated = self
+            .active_conn()
+            .is_some_and(|c| c.caps.curates_destinations());
         match (ctrl, key.code) {
             (false, KeyCode::Down) => self.nav(1),
             (false, KeyCode::Up) => self.nav(-1),
             (false, KeyCode::Home) => self.nav_edge(true),
             (false, KeyCode::End) => self.nav_edge(false),
             (false, KeyCode::Enter) => self.open_selected_destination(),
-            (false, KeyCode::Char('a')) => self.begin_add_destination(),
-            (false, KeyCode::Char('r')) => self.refresh_destinations(),
-            (false, KeyCode::Char('x') | KeyCode::Char('d')) => self.delete_selected_destination(),
+            (false, KeyCode::Char('a')) if curated => self.begin_add_destination(),
+            (false, KeyCode::Char('r')) if curated => self.refresh_destinations(),
+            (false, KeyCode::Char('x') | KeyCode::Char('d')) if curated => {
+                self.delete_selected_destination()
+            }
             (false, KeyCode::Char('t')) => self.tail_selected_destination(),
             (false, KeyCode::Char('P')) => self.begin_publish(),
             _ => {}
@@ -316,10 +324,17 @@ impl App {
     /// Enter the publish prompt for the selected destination. Refused (with a
     /// status) when the connection can't publish or nothing is selected.
     fn begin_publish(&mut self) {
-        let ready = self
-            .active_conn()
-            .is_some_and(|c| c.caps.can_publish && c.selected_destination().is_some());
-        if !ready {
+        let Some(conn) = self.active_conn() else {
+            return;
+        };
+        if !conn.caps.can_publish {
+            self.set_status(
+                "publishing is not available for this broker".to_string(),
+                true,
+            );
+            return;
+        }
+        if conn.selected_destination().is_none() {
             self.set_status("select a destination to publish to".to_string(), true);
             return;
         }

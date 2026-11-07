@@ -1406,9 +1406,10 @@ impl Connection {
     /// render under their anchor — so their focus-driven lifecycle never shifts
     /// the tab indices. [`Self::panel_tab`] indexes into this.
     pub fn panel_slots(&self) -> Vec<PanelTab> {
-        // AMQP has no Redis anchors (no stats/console/monitor/keyspace). Its
-        // bottom panel is a single Tail anchor (an input to start a topic/queue
-        // tail) followed by one tab per live tail.
+        // AMQP / RabbitMQ have no Redis anchors (no stats/console/monitor/
+        // keyspace). Their bottom panel is a single Tail anchor (an input to
+        // start a topic/queue tail or an exchange tap) followed by one tab per
+        // live tail.
         if !self.caps.uses_key_scan() {
             let mut slots = vec![PanelTab::Tail];
             slots.extend((0..self.subs.len()).map(PanelTab::Sub));
@@ -1435,8 +1436,8 @@ impl Connection {
         slots
     }
 
-    /// Number of tabs in the bottom panel. AMQP: a single Tail anchor plus one
-    /// per live tail. Redis: the six fixed anchors plus one per pub/sub or stream
+    /// Number of tabs in the bottom panel. AMQP / RabbitMQ: a single Tail anchor
+    /// plus one per live tail. Redis: the six fixed anchors plus one per pub/sub or stream
     /// tail (MONITOR/keyspace tails have no tab of their own).
     pub fn panel_tab_count(&self) -> usize {
         if !self.caps.uses_key_scan() {

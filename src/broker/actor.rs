@@ -558,7 +558,7 @@ pub(crate) mod mock {
     use tokio_util::sync::CancellationToken;
     use tokio_util::task::TaskTracker;
 
-    use super::{spawn_connection, ConnHandle, SpawnParams};
+    use super::{spawn_connection, ConnCommand, ConnHandle, SpawnParams};
     use crate::broker::{
         BrokerConnection, BrokerEvent, BrokerEventStream, BrowsePage, BrowseReq, Capabilities,
         ConnId, InspectReq, PeekReq, ServerStats, SubSpec, ValueView,
@@ -753,6 +753,26 @@ pub(crate) mod mock {
         })
         .await
         .expect("mock rabbitmq connect")
+    }
+
+    /// A handle reporting `caps` with no actor behind it: every command the UI
+    /// sends lands on the returned receiver, so a test can assert exactly what
+    /// was sent.
+    pub fn capture_handle(
+        id: u32,
+        name: &str,
+        caps: Capabilities,
+    ) -> (ConnHandle, mpsc::Receiver<ConnCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let handle = ConnHandle {
+            id: ConnId(id),
+            name: name.to_string(),
+            addr: "127.0.0.1:5672".to_string(),
+            caps,
+            cmd_tx,
+            cancel: CancellationToken::new(),
+        };
+        (handle, cmd_rx)
     }
 }
 

@@ -17,6 +17,7 @@ mod forms;
 mod navigation;
 mod notifications;
 mod pure_helpers;
+mod rabbitmq;
 mod realtime;
 mod recordings;
 
@@ -256,6 +257,13 @@ fn live_monitor(app: &mut App) -> u32 {
 /// Attach a live AMQP-capability mock connection.
 async fn connect_amqp(app: &mut App, id: u32, name: &str) -> ConnId {
     let handle = mock::amqp_handle(id, name).await;
+    app.handle_event(AppEvent::Connected { handle });
+    ConnId(id)
+}
+
+/// Attach a live RabbitMQ-capability mock connection and return its id.
+async fn connect_rabbitmq(app: &mut App, id: u32, name: &str) -> ConnId {
+    let handle = mock::rabbitmq_handle(id, name).await;
     app.handle_event(AppEvent::Connected { handle });
     ConnId(id)
 }

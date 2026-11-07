@@ -252,15 +252,23 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                         pairs
                     }
                 }
-            } else if app.active_conn().is_some_and(|c| !c.caps.uses_key_scan()) {
-                // The AMQP body is the curated destination list (left) over a
-                // peeked message list + body preview (right). The hints follow
-                // whether the keyboard is on the destinations or the message list.
-                // Moving between them (Ctrl-←/→) and into the tails (Ctrl-↓), the
-                // ↑↓ list movement and Esc-back are all basic navigation, so only
-                // the screen-specific keys (plus Tab to the tails) appear here.
+            } else if app.active_conn().is_some_and(|c| c.caps.has_destinations()) {
+                // The destination browser's body is the destination list (left)
+                // over a peeked message list + body preview (right). The hints
+                // follow whether the keyboard is on the destinations or the
+                // message list. Moving between them (Ctrl-←/→) and into the tails
+                // (Ctrl-↓), the ↑↓ list movement and Esc-back are all basic
+                // navigation, so only the screen-specific keys (plus Tab to the
+                // tails) appear here.
                 let on_messages = app.active_conn().is_some_and(|c| c.peek.focused);
-                if on_messages {
+                let curated = app
+                    .active_conn()
+                    .is_some_and(|c| c.caps.curates_destinations());
+                if !curated {
+                    // RabbitMQ: its list comes from the broker (nothing to add or
+                    // remove), and its taps start from the Tail anchor.
+                    owned(&[("Tab", "tails"), (":", "palette"), ("?", "help")])
+                } else if on_messages {
                     owned(&[
                         ("/", "filter"),
                         ("P", "publish"),
@@ -2105,6 +2113,20 @@ mod tests {
             "browser_amqp_message_preview",
             render_lines(&mut app, 90, 24)
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq() {
+        // The RabbitMQ browser with no management API: the destination pane
+        // points at the Tail anchor (AMQP 0.9.1 can't list destinations), and
+        // the footer offers none of AMQP's curated-list keys.
+        let (mut app, _rx) = test_app();
+        let handle = mock::rabbitmq_handle(1, "rabbit").await;
+        app.connections.push(Connection::new(handle));
+        app.active = Some(0);
+        pin_clock(&mut app);
+        app.screen = Screen::Browser;
+        insta::assert_snapshot!("browser_rabbitmq", render_lines(&mut app, 90, 24));
     }
 
     #[tokio::test]

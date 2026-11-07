@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 90, 24)"
+---
+┌ Destinations ─────────────────────────────┐┌ Messages ─────────────────────────────────┐
+│                                           ││Taps open as tabs in the panel below.      │
+│  Type exchange:name in the Tail tab       ││                                           │
+│  (press Tab) to tap an exchange.          ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
+│exchange:name or exchange:name/binding-key:                                             │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│Enter taps it · non-destructive copy via a temporary queue · key defaults to #          │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ Tab tails · : palette · ? help

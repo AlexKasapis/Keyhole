@@ -156,13 +156,15 @@ impl Capabilities {
         }
     }
 
-    /// RabbitMQ (AMQP 0.9.1): tail + record only for now (a non-destructive
-    /// exchange tap, see [`crate::broker::rabbitmq`]). The browser experience is
-    /// deferred to the RabbitMQ phase, so it stays on the Connections list.
+    /// RabbitMQ (AMQP 0.9.1): tail + record (a non-destructive exchange tap, see
+    /// [`crate::broker::rabbitmq`]). `can_browse` is true so it lands on the
+    /// Browser screen, whose bottom panel hosts the Tail anchor. AMQP 0.9.1 can't
+    /// list queues or exchanges, so the destination pane stays empty until the
+    /// management API fills it.
     pub fn rabbitmq() -> Self {
         Self {
             r#type: BrokerType::Rabbitmq,
-            can_browse: false,
+            can_browse: true,
             can_dashboard: false,
             can_console: false,
             can_publish: false,
@@ -178,11 +180,25 @@ impl Capabilities {
         matches!(self.r#type, BrokerType::Redis)
     }
 
+    /// Whether the Browser body is a destination list (AMQP 1.0, RabbitMQ) rather
+    /// than a Redis key table. Routes the keys pane's keys and the Tail anchor's
+    /// spec parsing.
+    pub fn has_destinations(&self) -> bool {
+        !self.uses_key_scan() && self.can_browse
+    }
+
+    /// Whether the destination list is user-curated: AMQP 1.0 can't enumerate
+    /// destinations, so the user adds (`a`) and removes (`x`) them, and `r` runs
+    /// Jolokia discovery. False for RabbitMQ, whose list comes from the broker.
+    pub fn curates_destinations(&self) -> bool {
+        matches!(self.r#type, BrokerType::Amqp)
+    }
+
     /// Whether the broker offers a live-tail bottom panel. Redis surfaces it
-    /// alongside its console; AMQP has tails without a console, so it qualifies
-    /// on broker type rather than [`Self::can_console`].
+    /// alongside its console; AMQP and RabbitMQ have tails without a console, so
+    /// they qualify on broker type rather than [`Self::can_console`].
     pub fn can_tail(&self) -> bool {
-        self.can_console || matches!(self.r#type, BrokerType::Amqp)
+        self.can_console || matches!(self.r#type, BrokerType::Amqp | BrokerType::Rabbitmq)
     }
 }
 
@@ -702,7 +718,7 @@ pub trait BrokerConnection: Send {
     async fn ping(&mut self) -> anyhow::Result<()>;
 
     /// List a page of entries. Default: unsupported (gated off via
-    /// [`Capabilities::can_browse`], so a broker without a browser skips it).
+    /// [`Capabilities::uses_key_scan`], so a broker without a key scan skips it).
     async fn browse(&mut self, _req: BrowseReq) -> anyhow::Result<BrowsePage> {
         anyhow::bail!("this broker does not support browsing")
     }
@@ -720,8 +736,8 @@ pub trait BrokerConnection: Send {
     /// Peek a bounded batch of the messages currently sitting in a destination
     /// (AMQP queue), returning them as [`BrokerEvent`]s so they render like a
     /// tail. The read is non-destructive, skipped, or destructive per
-    /// [`PeekReq::mode`]. Default: unsupported (gated off via
-    /// [`Capabilities::can_browse`] for brokers without a destination browser).
+    /// [`PeekReq::mode`]. Default: unsupported (only issued for a queue selected
+    /// in the destination browser, so a broker that lists none never gets one).
     async fn peek(&mut self, _req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
         anyhow::bail!("this broker does not support peeking messages")
     }
@@ -951,12 +967,20 @@ mod tests {
         assert!(!a.can_dashboard && !a.can_console);
         assert!(!a.uses_key_scan());
 
-        // RabbitMQ is tail + record only for now — its browser is deferred to the
-        // RabbitMQ phase, so it stays off the Browser screen.
+        assert!(a.has_destinations() && a.curates_destinations());
+
+        // RabbitMQ lands on the Browser for its tails: a destination pane (filled
+        // by the management API later) but no key scan, dashboard or console.
         let rmq = Capabilities::rabbitmq();
         assert_eq!(rmq.r#type, BrokerType::Rabbitmq);
-        assert!(!rmq.can_browse && !rmq.can_dashboard && !rmq.can_console);
+        assert!(rmq.can_browse && rmq.can_tail());
+        assert!(!rmq.can_dashboard && !rmq.can_console && !rmq.can_publish);
         assert!(!rmq.uses_key_scan());
+        // Its list comes from the broker, so it isn't user-curated.
+        assert!(rmq.has_destinations() && !rmq.curates_destinations());
+
+        // Redis browses keys, not destinations.
+        assert!(!r.has_destinations() && !r.curates_destinations());
     }
 
     #[test]

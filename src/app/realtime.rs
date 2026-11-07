@@ -327,8 +327,8 @@ impl App {
     }
 
     /// Whether the active connection can open realtime tails. Tails live in the
-    /// Browser's bottom panel, hosted by Redis (alongside its console) and AMQP
-    /// (its only panel). See [`Capabilities::can_tail`].
+    /// Browser's bottom panel, hosted by Redis (alongside its console) and AMQP /
+    /// RabbitMQ (their only panel). See [`Capabilities::can_tail`].
     pub(super) fn active_can_tail(&self) -> bool {
         self.active_conn()
             .map(|c| c.caps.can_tail())
@@ -342,13 +342,14 @@ impl App {
     pub(super) fn submit_subscribe(&mut self) {
         let raw = self.subscribe_buf.trim().to_string();
         self.subscribe_buf.clear();
-        let (panel, db, is_amqp) = match self.active_conn() {
-            Some(c) => (c.active_panel(), c.db, c.caps.r#type == BrokerType::Amqp),
+        let (panel, db, has_destinations) = match self.active_conn() {
+            Some(c) => (c.active_panel(), c.db, c.caps.has_destinations()),
             None => return,
         };
-        // AMQP's single Tail anchor accepts a full source spec (topic:name /
-        // queue:name); there is no separate Pub/Sub or stream-key shorthand.
-        if is_amqp {
+        // A destination browser's single Tail anchor accepts a full source spec
+        // (AMQP: topic:name / queue:name; RabbitMQ: exchange:name[/binding-key]);
+        // there is no separate Pub/Sub or stream-key shorthand.
+        if has_destinations {
             if matches!(panel, PanelTab::Tail) && !raw.is_empty() {
                 match SubSpec::parse(&raw, 0) {
                     Ok(spec) => self.start_subscribe(spec),

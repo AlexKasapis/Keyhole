@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the config. Existing profiles that pin `base = "dark"` or `"light"` are
   unaffected. The settings page's theme cycle now leads with gruvbox.
 
+### Fixed
+
+- **RabbitMQ exchange taps can be started from the TUI again.** A RabbitMQ
+  connection now opens on the Browser screen, whose Tail tab takes
+  `exchange:name` or `exchange:name/binding-key`. Since the AMQP 1.0 browser
+  landed, the tail panel lived only on the Browser screen, which RabbitMQ
+  connections never reached.
+
 ## [0.1.2] - 2026-06-26
 
 ### Changed
