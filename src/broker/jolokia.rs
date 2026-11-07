@@ -21,18 +21,11 @@
 //! (`tokio::task::spawn_blocking`) so it never stalls the async runtime.
 
 use std::collections::HashSet;
-use std::time::Duration;
 
-use base64::Engine as _;
 use serde_json::{json, Value};
 
+use super::http::{self, status_error};
 use super::SubSpec;
-
-/// How long to wait to connect to / read from the management API before giving
-/// up. Discovery is best-effort enrichment, so it fails fast rather than hanging
-/// the browser when the console is unreachable.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Internal ActiveMQ topics (broker advisories) are noise in a destination
 /// browser, so they are filtered out of the discovered set.
@@ -55,40 +48,19 @@ pub fn discover(
     // single round trip; Jolokia preserves request order in the reply.
     let body = json!([search_request("Topic"), search_request("Queue")]).to_string();
 
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(CONNECT_TIMEOUT))
-        .timeout_recv_response(Some(READ_TIMEOUT))
-        .timeout_recv_body(Some(READ_TIMEOUT))
-        // Non-2xx replies stay ordinary responses instead of becoming
-        // `Error::StatusCode`, which carries the code but not the body — and the
-        // body is what explains a rejection (see [`status_error`]).
-        .http_status_as_error(false)
-        // A console is an internal endpoint reached directly; ureq would
-        // otherwise route it through a `HTTP_PROXY` picked up from the
-        // environment.
-        .proxy(None)
-        .build()
-        .into();
-    let mut req = agent
+    let mut req = http::agent()
         .post(&url)
         .header("Origin", &origin)
         .header("Content-Type", "application/json");
     if let Some(user) = username {
-        let token = base64::engine::general_purpose::STANDARD
-            .encode(format!("{user}:{}", password.unwrap_or("")));
-        req = req.header("Authorization", format!("Basic {token}"));
+        req = req.header("Authorization", http::basic_auth(user, password));
     }
 
-    let mut resp = req
-        .send(body.as_str())
-        .map_err(|e| anyhow::anyhow!("could not reach the management API: {e}"))?;
-    let status = resp.status();
-    let text = resp
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| anyhow::anyhow!("could not read the management API response: {e}"))?;
-    if !status.is_success() {
-        return Err(status_error(status.as_u16(), &text));
+    let (status, text) = http::read_reply(req.send(body.as_str()))?;
+    // Jolokia's own errors ride inside a 200 (see [`parse_search_batch`]), so a
+    // non-2xx is an HTTP-level rejection — chiefly Jetty's BASIC-auth 401.
+    if !(200..300).contains(&status) {
+        return Err(status_error(status, &text));
     }
     let value: Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("management API returned a non-JSON response: {e}"))?;
@@ -104,26 +76,6 @@ fn search_request(destination_type: &str) -> Value {
             "org.apache.activemq:type=Broker,brokerName=*,destinationType={destination_type},destinationName=*"
         ),
     })
-}
-
-/// Turn a non-2xx reply into a user-facing message. Jolokia's own errors come
-/// back as HTTP 200 (handled in [`parse_search_batch`]), so this covers the
-/// HTTP-level rejections — chiefly Jetty's BASIC-auth 401 when the credentials
-/// are missing or wrong. Unreachable-console failures never get this far: they
-/// surface as a `ureq` transport error out of the request itself.
-fn status_error(code: u16, body: &str) -> anyhow::Error {
-    if code == 401 {
-        return anyhow::anyhow!(
-            "the management API rejected the credentials (HTTP 401) — set \
-             management_username/management_password"
-        );
-    }
-    let body = body.trim();
-    if body.is_empty() {
-        anyhow::anyhow!("the management API returned HTTP {code}")
-    } else {
-        anyhow::anyhow!("the management API returned HTTP {code}: {body}")
-    }
 }
 
 /// Parse a Jolokia batch reply (an array of per-request result objects) into the
@@ -196,11 +148,10 @@ fn destination_name(object_name: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
-    use std::thread::{self, JoinHandle};
 
     use super::*;
+    use crate::broker::http::stub::stub_console;
 
     /// A reply mirroring a real ActiveMQ Classic Jolokia batch search: a topic
     /// result (including broker advisories that must be filtered) and a queue
@@ -312,49 +263,6 @@ mod tests {
         let mbean = req["mbean"].as_str().unwrap();
         assert!(mbean.contains("brokerName=*"));
         assert!(mbean.contains("destinationType=Topic"));
-    }
-
-    /// A one-shot HTTP server on loopback: answers the next request with
-    /// `status`/`body`, then hands the raw request text back through its join
-    /// handle. Lets the tests below drive [`discover`] over a real socket — the
-    /// only way to cover the request the HTTP client actually puts on the wire.
-    fn stub_console(status: u16, body: &str) -> (String, JoinHandle<String>) {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
-        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
-        let response = format!(
-            "HTTP/1.1 {status} Jolokia\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        );
-        let handle = thread::spawn(move || {
-            let (mut sock, _) = listener.accept().expect("accept");
-            let mut reader = BufReader::new(sock.try_clone().expect("clone socket"));
-            // Read the request head, then exactly as many body bytes as it declares.
-            let mut head = String::new();
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).expect("read head") == 0 {
-                    break;
-                }
-                let blank = line == "\r\n";
-                head.push_str(&line);
-                if blank {
-                    break;
-                }
-            }
-            let len = head
-                .lines()
-                .filter_map(|l| l.split_once(':'))
-                .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-                .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-                .unwrap_or(0);
-            let mut buf = vec![0u8; len];
-            reader.read_exact(&mut buf).expect("read body");
-            sock.write_all(response.as_bytes()).expect("write response");
-            sock.flush().expect("flush response");
-            format!("{head}{}", String::from_utf8_lossy(&buf))
-        });
-        (base_url, handle)
     }
 
     #[test]

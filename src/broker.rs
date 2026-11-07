@@ -15,6 +15,7 @@
 pub mod actor;
 pub mod amqp;
 pub mod factory;
+mod http;
 pub mod jolokia;
 pub mod rabbitmq;
 pub mod redis;
