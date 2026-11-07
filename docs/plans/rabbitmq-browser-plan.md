@@ -530,9 +530,11 @@ on, so a broker NACK or `unroutable` (with `mandatory`) shows up in `AppEvent::P
 
 - `config.dev.toml`: add `management_url = "http://127.0.0.1:15673"` to `dev-rabbitmq`
   (the host port differs from the default).
-- `keyhole dev` (`dev/rabbitmq.rs`): also declare durable queues `keyhole.demo.orders`
+- ~~`keyhole dev` (`dev/rabbitmq.rs`): also declare durable queues `keyhole.demo.orders`
   (classic) and `keyhole.demo.audit` (quorum), bound to `keyhole.demo`, so the browser has
-  queues to peek. Add the names to `dev/fixtures.rs`.
+  queues to peek. Add the names to `dev/fixtures.rs`.~~ Done in Phase 4:
+  `fixtures::RABBITMQ_QUEUES` binds `keyhole.demo.orders` with `order.*` and
+  `keyhole.demo.audit` with `#`.
 - `docker-compose.yml`: consider `rabbitmq:4-management`, or a second profile that runs both
   versions, so the integration tests cover 4.x. Phase 0 found real differences between the
   versions: the quorum delivery count on peek, the vhost-denied status, and the 3.13

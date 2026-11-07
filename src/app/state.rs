@@ -12,9 +12,9 @@ use crate::broker::actor::ConnHandle;
 pub use crate::broker::DestKind;
 use crate::broker::{
     BrokerEvent, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId, DestinationInfo,
-    EntryMeta, ServerStats, SubSpec, Ttl, ValueType, ValueView,
+    EntryMeta, QueueType, ServerStats, SubSpec, Ttl, ValueType, ValueView,
 };
-use crate::config::ConnectionConfig;
+use crate::config::{ConnectionConfig, PeekMode};
 
 /// Which top-level screen is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -864,6 +864,23 @@ impl Destination {
     pub fn canonical(&self) -> String {
         self.spec().label()
     }
+
+    /// Whether this is a RabbitMQ stream queue, which can't be peeked (see
+    /// [`crate::broker::STREAM_PEEK_HINT`]).
+    pub fn is_stream(&self) -> bool {
+        self.info.as_ref().and_then(|i| i.queue_type.as_ref()) == Some(&QueueType::Stream)
+    }
+
+    /// The delivery limit a peek of this queue in `mode` counts toward, if
+    /// any: only a browse peek requeues, and only a RabbitMQ 3.x quorum queue
+    /// with a limit counts a requeue as a delivery (see
+    /// [`DestinationInfo::peek_delivery_limit`]).
+    pub fn peek_counts_toward(&self, mode: PeekMode) -> Option<i64> {
+        if mode != PeekMode::Browse {
+            return None;
+        }
+        self.info.as_ref()?.peek_delivery_limit
+    }
 }
 
 /// The left-pane destination browser for an AMQP 1.0 or RabbitMQ connection:
@@ -902,10 +919,11 @@ pub enum Listing {
     Failed(String),
 }
 
-/// The right-pane peek inspector for an AMQP connection: the messages from the
-/// last queue peek, which destination they belong to (a staleness guard, like
-/// [`ValueInspector::value_key`]), the list scroll offset, and whether a peek is
-/// in flight.
+/// The right-pane peek inspector for an AMQP 1.0 or RabbitMQ connection: the
+/// messages from the last queue peek, which destination they belong to (a
+/// staleness guard, like [`ValueInspector::value_key`]), the list scroll offset,
+/// and whether a peek is in flight. The pane shows them only while that
+/// destination is selected ([`Connection::peek_is_selected`]).
 ///
 /// The pane is a navigable *message list* over a *body preview* of the selected
 /// message (the analog of the Redis key list over its value pane), plus an
@@ -915,9 +933,16 @@ pub enum Listing {
 #[derive(Default)]
 pub struct PeekInspector {
     pub events: Vec<BrokerEvent>,
-    /// The destination the current `events` are from. A late-arriving peek for a
-    /// different destination (the user moved on) is discarded by comparing this.
+    /// The destination last peeked, which the current `events` are from; `None`
+    /// when no peek was sent (nothing selected, a topic, skip mode, a stream
+    /// queue). A late-arriving peek for a different destination (the user
+    /// peeked another one meanwhile) is discarded by comparing this.
     pub peeked: Option<SubSpec>,
+    /// Why the peek of `peeked` failed, shown in the pane in place of messages.
+    pub error: Option<String>,
+    /// The `delivery-limit` each browse peek of `peeked` counts toward (a
+    /// RabbitMQ 3.x quorum queue), warned about in the message list's title.
+    pub requeue_limit: Option<i64>,
     pub scroll: u16,
     pub pending: bool,
     /// Whether the message list (right) holds the keyboard. When false the
@@ -1065,9 +1090,10 @@ pub struct Connection {
     pub inspector: ValueInspector,
     /// Server-statistics dashboard band — populated for Redis.
     pub dashboard: StatsPanel,
-    /// Curated destination list (left pane) — populated for AMQP.
+    /// Destination list (left pane) — AMQP 1.0's curated list or RabbitMQ's
+    /// listed queues and exchanges.
     pub destinations: DestinationBrowser,
-    /// Queue message peek (right pane) — populated for AMQP.
+    /// Queue message peek (right pane) — AMQP 1.0 and RabbitMQ.
     pub peek: PeekInspector,
     /// Live tails for this connection. Pub/sub and stream tails each get their
     /// own tab in the Browser's bottom panel (after the Pub/Sub and Tail anchors
@@ -1127,6 +1153,19 @@ impl Connection {
             .table
             .selected()
             .and_then(|i| self.destinations.items.get(i))
+    }
+
+    /// Whether the peek inspector holds the selected destination's peek,
+    /// rather than that of a destination the cursor has since left (moving the
+    /// cursor never peeks).
+    pub fn peek_is_selected(&self) -> bool {
+        self.selected_destination()
+            .is_some_and(|d| self.peek.peeked.as_ref() == Some(&d.spec()))
+    }
+
+    /// Whether the selected destination has peeked messages to step into.
+    pub fn has_peeked_messages(&self) -> bool {
+        self.peek_is_selected() && !self.peek.events.is_empty()
     }
 
     /// Add `dest` to the curated list (deduped) and select it. Returns `true`

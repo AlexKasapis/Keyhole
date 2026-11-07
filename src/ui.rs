@@ -264,7 +264,15 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                 let curated = app
                     .active_conn()
                     .is_some_and(|c| c.caps.curates_destinations());
-                if !curated {
+                if !curated && on_messages {
+                    // RabbitMQ's peeked messages: filter them (no publish yet).
+                    owned(&[
+                        ("/", "filter"),
+                        ("Tab", "tails"),
+                        (":", "palette"),
+                        ("?", "help"),
+                    ])
+                } else if !curated {
                     // RabbitMQ: its list comes from the broker (nothing to add or
                     // remove), so `r` lists it again, and `t` taps an exchange.
                     owned(&[
@@ -355,7 +363,8 @@ fn hint_line(app: &App, theme: &Theme) -> Line<'static> {
 mod tests {
     use super::*;
     use crate::app::{
-        ConnForm, Connection, RecordState, ScanPhase, Status, StatusKind, SubState, Subscription,
+        ConnForm, Connection, DestKind, RecordState, ScanPhase, Status, StatusKind, SubState,
+        Subscription,
     };
     use crate::broker::actor::mock;
     use crate::broker::{
@@ -364,6 +373,7 @@ mod tests {
     };
     use crate::config::Config;
     use crate::event::AppEvent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
     use ratatui::Terminal;
@@ -2123,8 +2133,16 @@ mod tests {
     async fn rabbitmq_browser(
         result: Option<Result<DestinationList, String>>,
     ) -> (App, Receiver<AppEvent>) {
+        rabbitmq_browser_in(crate::config::PeekMode::Browse, result).await
+    }
+
+    /// [`rabbitmq_browser`] with the peek mode set to `mode`.
+    async fn rabbitmq_browser_in(
+        mode: crate::config::PeekMode,
+        result: Option<Result<DestinationList, String>>,
+    ) -> (App, Receiver<AppEvent>) {
         use crate::config::{ConnectionConfig, RabbitmqProfile};
-        let config = Config {
+        let mut config = Config {
             connections: vec![ConnectionConfig::Rabbitmq(RabbitmqProfile {
                 name: "rabbit".into(),
                 host: "127.0.0.1".into(),
@@ -2139,6 +2157,7 @@ mod tests {
             })],
             ..Default::default()
         };
+        config.settings.peek_mode = mode;
         let (tx, rx) = mpsc::channel(64);
         let mut app = App::new(
             config,
@@ -2293,6 +2312,204 @@ mod tests {
             !footer.contains("a add") && !footer.contains("remove"),
             "{footer}"
         );
+    }
+
+    /// Press `key`, as the terminal would deliver it.
+    fn press(app: &mut App, key: KeyEvent) {
+        app.handle_event(AppEvent::Input(crossterm::event::Event::Key(key)));
+    }
+
+    /// A plain-text message with no metadata.
+    fn broker_event(body: &str) -> BrokerEvent {
+        rabbitmq_message(Payload::Utf8(body.into()), &[])
+    }
+
+    /// A message as a RabbitMQ peek reports it.
+    fn rabbitmq_message(body: Payload, meta: &[(&str, &str)]) -> BrokerEvent {
+        BrokerEvent {
+            ts: OffsetDateTime::UNIX_EPOCH,
+            source: "payments".into(),
+            payload: body,
+            meta: meta
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    /// The RabbitMQ browser with `name` selected and a peek of it returned
+    /// (through the real keys and reply path), the listing's `payments` being a
+    /// 3.x quorum queue whose peeks count toward a delivery limit of 3.
+    async fn rabbitmq_peeked(name: &str, result: Result<Vec<BrokerEvent>, String>) -> App {
+        let mut list = mock::sample_destinations();
+        let payments = list
+            .items
+            .iter_mut()
+            .find(|d| d.name == "payments")
+            .unwrap();
+        payments.peek_delivery_limit = Some(3);
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(list))).await;
+        select_destination(&mut app, name);
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
+        app.handle_event(AppEvent::Peeked {
+            id: ConnId(1),
+            spec: SubSpec::Queue(name.into()),
+            result,
+        });
+        app
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_peek() {
+        // A peeked quorum queue: its messages over the selected one's body and
+        // metadata, and the title warning that each peek counts toward the
+        // delivery limit (RabbitMQ 3.x).
+        let mut app = rabbitmq_peeked(
+            "payments",
+            Ok(vec![
+                rabbitmq_message(
+                    Payload::Json(r#"{"order":1001,"total":42}"#.into()),
+                    &[
+                        ("exchange", "keyhole.demo"),
+                        ("routing_key", "order.created"),
+                        ("redelivered", "true"),
+                        ("content_type", "application/json"),
+                        ("message_id", "msg-0001"),
+                        ("delivery_mode", "2 (persistent)"),
+                        ("headers.x-delivery-count", "1"),
+                    ],
+                ),
+                rabbitmq_message(
+                    Payload::Utf8("plain text".into()),
+                    &[
+                        ("exchange", "(default)"),
+                        ("routing_key", "payments"),
+                        ("redelivered", "false"),
+                    ],
+                ),
+            ]),
+        )
+        .await;
+        // Ctrl-→ steps into the messages.
+        press(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL),
+        );
+        assert!(app.active_conn().unwrap().peek.focused);
+        let text = render_lines(&mut app, 160, 44);
+        assert!(
+            text.contains("payments · 2 msgs · each peek counts toward delivery-limit 3"),
+            "{text}"
+        );
+        assert!(text.lines().last().unwrap().contains("/ filter"), "{text}");
+        insta::assert_snapshot!("browser_rabbitmq_peek", text);
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_queue_details_say_what_enter_does_in_each_peek_mode() {
+        use crate::config::PeekMode;
+        for (mode, expect) in [
+            (PeekMode::Browse, "flagged redelivered"),
+            (PeekMode::Destructive, "they are removed"),
+            (PeekMode::Skip, "Peek mode is skip"),
+        ] {
+            let (mut app, _rx) =
+                rabbitmq_browser_in(mode, Some(Ok(mock::sample_destinations()))).await;
+            select_destination(&mut app, "orders");
+            let text = render_lines(&mut app, 200, 30);
+            assert!(text.contains(expect), "{mode:?}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_quorum_warning_shows_only_when_a_peek_counts_toward_a_limit() {
+        use crate::config::PeekMode;
+        const WARNING: &str = "delivery-limit of 3";
+        let mut list = mock::sample_destinations();
+        let payments = list
+            .items
+            .iter_mut()
+            .find(|d| d.name == "payments")
+            .unwrap();
+        payments.peek_delivery_limit = Some(3);
+        // Before the peek: payments' details warn in browse mode only (a
+        // destructive read doesn't requeue).
+        for (mode, warns) in [(PeekMode::Browse, true), (PeekMode::Destructive, false)] {
+            let (mut app, _rx) = rabbitmq_browser_in(mode, Some(Ok(list.clone()))).await;
+            select_destination(&mut app, "payments");
+            let text = render_lines(&mut app, 200, 30);
+            assert_eq!(text.contains(WARNING), warns, "{mode:?}: {text}");
+        }
+        // A queue whose peeks count toward nothing (no limit, or 4.x): no
+        // warning, before or after its peek.
+        let mut app = rabbitmq_peeked("orders", Ok(vec![broker_event("m")])).await;
+        let text = render_lines(&mut app, 200, 30);
+        assert!(text.contains("orders · 1 msgs"), "{text}");
+        assert!(!text.contains("delivery-limit"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_stream_queue_shows_why_it_isnt_peeked() {
+        // Known from the listing's type: Enter sends nothing, the pane says why.
+        let mut app = rabbitmq_peeked("orders", Ok(Vec::new())).await;
+        select_destination(&mut app, "audit");
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
+        let text = render_lines(&mut app, 200, 30);
+        assert!(text.contains("Stream queues can't be peeked"), "{text}");
+        assert!(text.contains("tap an exchange that routes to it"), "{text}");
+
+        // A stream the listing didn't know about: the broker's refusal comes
+        // back as the same hint.
+        let mut app =
+            rabbitmq_peeked("orders", Err(crate::broker::STREAM_PEEK_HINT.to_string())).await;
+        let text = render_lines(&mut app, 200, 30);
+        assert!(text.contains("Stream queues can't be peeked"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_pane_states_of_a_peek() {
+        let mut app = rabbitmq_peeked("orders", Ok(Vec::new())).await;
+        assert!(render_lines(&mut app, 160, 30).contains("The queue was empty when peeked."));
+
+        let mut app = rabbitmq_peeked(
+            "orders",
+            Err("reading queue `orders`: permission denied (HTTP 401)".into()),
+        )
+        .await;
+        let text = render_lines(&mut app, 160, 30);
+        assert!(text.contains("permission denied (HTTP 401)"), "{text}");
+        assert!(text.contains("Press Enter to peek again."), "{text}");
+
+        // In flight.
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        press(&mut app, KeyEvent::from(KeyCode::Enter));
+        assert!(render_lines(&mut app, 160, 30).contains("Peeking…"));
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_pane_shows_a_peek_only_while_its_queue_is_selected() {
+        let mut app = rabbitmq_peeked("orders", Ok(vec![broker_event("from orders")])).await;
+        assert!(render_lines(&mut app, 160, 30).contains("from orders"));
+        // Another queue shows its own details, not orders' messages.
+        select_destination(&mut app, "payments");
+        let text = render_lines(&mut app, 160, 30);
+        assert!(!text.contains("from orders"), "{text}");
+        assert!(text.contains("quorum queue"), "{text}");
+        // Back on orders, its peek is still there: nothing was read again.
+        select_destination(&mut app, "orders");
+        assert!(render_lines(&mut app, 160, 30).contains("from orders"));
+    }
+
+    #[tokio::test]
+    async fn amqp_pane_never_shows_one_queues_peek_under_another() {
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        app.screen = Screen::Browser;
+        app.connections[0]
+            .add_destination(crate::app::Destination::new("billing", DestKind::Queue));
+        let text = render_lines(&mut app, 90, 24);
+        assert!(text.contains("billing"), "{text}");
+        assert!(text.contains("Press Enter to peek its messages."), "{text}");
+        assert!(!text.contains("order #1"), "{text}");
     }
 
     #[tokio::test]

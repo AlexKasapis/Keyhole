@@ -41,8 +41,8 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 pub enum ConnCommand {
     Browse(BrowseReq),
     Inspect(InspectReq),
-    /// Peek a bounded batch of the messages currently in a destination (AMQP
-    /// queue). The reply is an [`AppEvent::Peeked`].
+    /// Peek a bounded batch of the messages currently in a queue (AMQP 1.0 or
+    /// RabbitMQ). The reply is an [`AppEvent::Peeked`].
     Peek {
         spec: SubSpec,
         mode: crate::config::PeekMode,
@@ -473,18 +473,19 @@ async fn process(
         }
         ConnCommand::Peek { spec, mode, limit } => {
             let reply_spec = spec.clone();
-            match conn.peek(PeekReq { spec, mode, limit }).await {
-                Ok(events_batch) => {
-                    events
-                        .send(AppEvent::Peeked {
-                            id,
-                            spec: reply_spec,
-                            events: events_batch,
-                        })
-                        .await
-                }
-                Err(e) => emit_error(events, id, "peek", e).await,
-            }
+            // `{:#}`: the cause chain explains a refusal (e.g. the management
+            // API's reason behind "reading queue `q`").
+            let result = conn
+                .peek(PeekReq { spec, mode, limit })
+                .await
+                .map_err(|e| format!("{e:#}"));
+            events
+                .send(AppEvent::Peeked {
+                    id,
+                    spec: reply_spec,
+                    result,
+                })
+                .await
         }
         ConnCommand::Publish { spec, body } => {
             let target = spec.label();
@@ -735,6 +736,7 @@ pub(crate) mod mock {
             queue_type: Some(queue_type),
             exchange_type: None,
             publish_rate: None,
+            peek_delivery_limit: None,
             internal: false,
         }
     }
@@ -751,6 +753,7 @@ pub(crate) mod mock {
             queue_type: None,
             exchange_type: Some(exchange_type),
             publish_rate: None,
+            peek_delivery_limit: None,
             internal: false,
         }
     }
@@ -1098,18 +1101,18 @@ mod tests {
             limit: 10,
         });
         match next(&mut rx).await {
-            Some(AppEvent::Peeked { spec, events, .. }) => {
+            Some(AppEvent::Peeked { spec, result, .. }) => {
                 // The reply echoes the requested destination (the UI's staleness
                 // guard) and carries the batch.
                 assert_eq!(spec, SubSpec::Queue("orders".into()));
-                assert_eq!(events.len(), 2);
+                assert_eq!(result.expect("the batch").len(), 2);
             }
             other => panic!("expected Peeked, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn peek_error_emits_conn_error() {
+    async fn peek_error_is_reported_with_the_peeked_destination() {
         let mut mock = MockBroker::new();
         mock.peek_err = Some("boom".into());
         let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("peekerr")).await;
@@ -1119,11 +1122,14 @@ mod tests {
             limit: 10,
         });
         match next(&mut rx).await {
-            Some(AppEvent::ConnError { context, error, .. }) => {
-                assert_eq!(context, "peek");
+            // Tied to its destination, so the pane can show why that peek
+            // came back empty.
+            Some(AppEvent::Peeked { spec, result, .. }) => {
+                assert_eq!(spec, SubSpec::Queue("q".into()));
+                let error = result.expect_err("the peek failed");
                 assert!(error.contains("boom"), "error was {error:?}");
             }
-            other => panic!("expected ConnError, got {other:?}"),
+            other => panic!("expected Peeked, got {other:?}"),
         }
     }
 

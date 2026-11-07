@@ -50,7 +50,7 @@ impl App {
             AppEvent::Disconnected { id, reason } => self.on_disconnected(id, reason),
             AppEvent::KeysPage { id, page } => self.on_keys_page(id, page),
             AppEvent::ValueLoaded { id, key, value } => self.on_value(id, key, value),
-            AppEvent::Peeked { id, spec, events } => self.on_peeked(id, spec, events),
+            AppEvent::Peeked { id, spec, result } => self.on_peeked(id, spec, result),
             AppEvent::Published { id, target, result } => self.on_published(id, target, result),
             AppEvent::DestinationsDiscovered { id, result } => {
                 self.on_destinations_discovered(id, result)
@@ -248,21 +248,41 @@ impl App {
         }
     }
 
-    pub(super) fn on_peeked(&mut self, id: ConnId, spec: SubSpec, events: Vec<BrokerEvent>) {
-        if let Some(conn) = self.conn_by_id_mut(id) {
-            // Drop a stale peek: the user may have moved to another destination
-            // before this batch returned (mirrors `on_value`'s key guard).
-            if conn.peek.peeked.as_ref() == Some(&spec) {
-                // A full batch means the queue likely holds more than we read, so
-                // the count line can flag that the view is truncated.
+    pub(super) fn on_peeked(
+        &mut self,
+        id: ConnId,
+        spec: SubSpec,
+        result: Result<Vec<BrokerEvent>, String>,
+    ) {
+        if let Err(error) = &result {
+            // The footer reports every failed peek, as it always has; the pane
+            // below explains the current one in full.
+            self.set_status(format!("[{}] peek: {error}", id.0), true);
+        }
+        let Some(conn) = self.conn_by_id_mut(id) else {
+            return;
+        };
+        // Drop a stale reply: the user may have peeked another destination
+        // before this one returned (mirrors `on_value`'s key guard).
+        if conn.peek.peeked.as_ref() != Some(&spec) {
+            return;
+        }
+        conn.peek.pending = false;
+        conn.peek.scroll = 0;
+        // A fresh batch resets the message-list cursor and the search filter.
+        conn.peek.selected = 0;
+        conn.peek.filter.clear();
+        match result {
+            Ok(events) => {
+                // A full batch means the queue likely holds more than we read,
+                // so the count line can flag that the view is truncated.
                 conn.peek.limit_hit = events.len() >= VALUE_LIMIT;
                 conn.peek.events = events;
-                conn.peek.pending = false;
-                conn.peek.scroll = 0;
-                // A fresh batch resets the message-list cursor and the search
-                // filter.
-                conn.peek.selected = 0;
-                conn.peek.filter.clear();
+                conn.peek.error = None;
+            }
+            Err(error) => {
+                conn.peek.events.clear();
+                conn.peek.error = Some(error);
             }
         }
     }
@@ -329,6 +349,11 @@ impl App {
             }
             Err(e) => Listing::Failed(e),
         };
+        // The peeked queue was deleted and the cursor moved on: the message
+        // list it had the keyboard in is gone. Nothing is peeked again.
+        if !conn.peek_is_selected() {
+            conn.peek.focused = false;
+        }
     }
 
     /// A publish completed: confirm or report it, and re-peek when the message

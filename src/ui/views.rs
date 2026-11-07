@@ -21,9 +21,9 @@ use crate::app::{
 };
 use crate::broker::{
     BrokerEvent, BrokerType, ClientInfo, ExchangeType, Payload, QueueType, ServerStats, Ttl,
-    ValueView, DESTINATION_LIST_CAP,
+    ValueView, DESTINATION_LIST_CAP, STREAM_PEEK_HINT,
 };
-use crate::config::{AnimationSpeed, ConnectionConfig};
+use crate::config::{AnimationSpeed, ConnectionConfig, PeekMode};
 use crate::theme::Theme;
 
 /// The merged home area: a single bordered box whose title is the tab strip
@@ -220,6 +220,8 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let panel_h = panel_band_height(frame.area().height);
     // RabbitMQ's empty list names the vhost it looked in.
     let vhost = active_vhost(app);
+    // The peek pane says what opening a queue would do.
+    let peek_mode = app.peek_mode();
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
             .style(theme.dim)
@@ -277,7 +279,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(body_area);
         amqp_destination_pane(frame, conn, focus, theme, table_area, vhost.as_deref());
-        amqp_peek_pane(frame, conn, theme, value_area);
+        amqp_peek_pane(frame, conn, peek_mode, theme, value_area);
         if let Some(panel_area) = panel_area {
             panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
         }
@@ -840,9 +842,16 @@ fn wrapped_rows(line: &Line, width: u16) -> u16 {
     rows.try_into().unwrap_or(u16::MAX)
 }
 
-/// RabbitMQ's right pane: the selected queue's or exchange's details, and
-/// what `t` (and Enter) do with it.
-fn rabbitmq_details_pane(frame: &mut Frame, dest: &Destination, theme: &Theme, area: Rect) {
+/// RabbitMQ's right pane before a peek: the selected queue's or exchange's
+/// details, and what Enter and `t` do with it. A queue's notes follow the peek
+/// `mode`.
+fn rabbitmq_details_pane(
+    frame: &mut Frame,
+    dest: &Destination,
+    mode: PeekMode,
+    theme: &Theme,
+    area: Rect,
+) {
     let field = |label: &str, value: String| {
         Line::from(vec![
             Span::styled(format!("{label:<11}"), theme.accent),
@@ -852,6 +861,7 @@ fn rabbitmq_details_pane(frame: &mut Frame, dest: &Destination, theme: &Theme, a
     let info = dest.info.as_ref();
     let rate = rate_label(info.and_then(|i| i.publish_rate));
     let mut lines = Vec::new();
+    let mut notes = Vec::new();
     let hint = match dest.kind {
         DestKind::Exchange => {
             let exchange_type = info.and_then(|i| i.exchange_type.clone());
@@ -918,11 +928,30 @@ fn rabbitmq_details_pane(frame: &mut Frame, dest: &Destination, theme: &Theme, a
                     .map_or_else(|| "—".to_string(), |n| n.to_string()),
             ));
             lines.push(field("Publish", rate));
-            "Tailing a queue would consume its messages. To watch them, tap an exchange \
-             that routes to it."
-                .to_string()
+            if dest.is_stream() {
+                STREAM_PEEK_HINT.to_string()
+            } else {
+                notes.push(queue_peek_note(mode, theme));
+                if let Some(limit) = dest.peek_counts_toward(mode) {
+                    notes.push(Line::styled(
+                        format!(
+                            "Each peek counts toward this quorum queue's delivery-limit of \
+                             {limit}: RabbitMQ 3.x raises x-delivery-count on every requeue, \
+                             and a message past the limit is dropped or dead-lettered."
+                        ),
+                        theme.warning,
+                    ));
+                }
+                "Tailing a queue would consume its messages. To watch them, tap an exchange \
+                 that routes to it."
+                    .to_string()
+            }
         }
     };
+    for note in notes {
+        lines.push(Line::from(""));
+        lines.push(note);
+    }
     lines.push(Line::from(""));
     lines.push(Line::styled(hint, theme.dim));
     let para = Paragraph::new(lines)
@@ -936,25 +965,93 @@ fn rabbitmq_details_pane(frame: &mut Frame, dest: &Destination, theme: &Theme, a
     frame.render_widget(para, area);
 }
 
-/// The browser's right pane. RabbitMQ shows the selected row's details
-/// ([`rabbitmq_details_pane`]). AMQP 1.0 shows the messages from the last
-/// queue peek (the analog of the Redis value pane): a topic shows a tail hint
-/// (topics don't retain); a queue with messages shows a navigable, filterable
-/// message list (upper) over a body preview of the selected message (lower) —
-/// the analog of the Redis key list + value pane. An empty / pending queue
-/// shows a hint.
-fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area: Rect) {
+/// What pressing Enter on a (non-stream) RabbitMQ queue does in peek `mode`.
+fn queue_peek_note(mode: PeekMode, theme: &Theme) -> Line<'static> {
+    match mode {
+        PeekMode::Browse => Line::styled(
+            "Press Enter to peek its messages. RabbitMQ puts each one back on the queue, \
+             flagged redelivered.",
+            theme.dim,
+        ),
+        PeekMode::Destructive => Line::styled(
+            "Press Enter to read its messages. Peek mode is destructive: they are removed \
+             from the queue.",
+            theme.warning,
+        ),
+        PeekMode::Skip => Line::styled(
+            "Peek mode is skip, so its messages aren't read. Change it on the Settings page \
+             (: opens the palette).",
+            theme.dim,
+        ),
+    }
+}
+
+/// RabbitMQ's right pane. An exchange, a stream queue, and a queue that
+/// hasn't been peeked since the cursor reached it show their details
+/// ([`rabbitmq_details_pane`]); a peeked queue shows its messages like AMQP
+/// 1.0's ([`amqp_peek_pane`]), with a delivery-limit warning in the title when
+/// each peek counts toward one.
+fn rabbitmq_peek_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    mode: PeekMode,
+    theme: &Theme,
+    area: Rect,
+) {
+    let Some(dest) = conn.selected_destination() else {
+        return render_peek_hint(
+            frame,
+            theme,
+            area,
+            None,
+            "Taps open as tabs in the panel below.",
+        );
+    };
+    if dest.kind != DestKind::Queue || dest.is_stream() || !conn.peek_is_selected() {
+        return rabbitmq_details_pane(frame, dest, mode, theme, area);
+    }
+    let name = dest.name.clone();
+    if conn.peek.pending {
+        return render_peek_hint(frame, theme, area, Some(&name), "Peeking…");
+    }
+    if let Some(error) = &conn.peek.error {
+        return render_peek_error(frame, theme, area, &name, error);
+    }
+    if conn.peek.events.is_empty() {
+        return render_peek_hint(
+            frame,
+            theme,
+            area,
+            Some(&name),
+            "The queue was empty when peeked. Press Enter to peek again.",
+        );
+    }
+    let note = conn
+        .peek
+        .requeue_limit
+        .map(|limit| format!("each peek counts toward delivery-limit {limit} "));
+    let [list_area, preview_area] =
+        Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
+    amqp_message_list(frame, conn, theme, list_area, &name, note);
+    amqp_body_preview(frame, conn, theme, preview_area);
+}
+
+/// The browser's right pane. RabbitMQ draws its own ([`rabbitmq_peek_pane`]).
+/// AMQP 1.0 shows the messages from the last queue peek (the analog of the
+/// Redis value pane): a topic shows a tail hint (topics don't retain); a
+/// peeked queue with messages shows a navigable, filterable message list
+/// (upper) over a body preview of the selected message (lower) — the analog of
+/// the Redis key list + value pane. A queue not peeked since the cursor
+/// reached it, or an empty, pending or failed peek, shows a hint.
+fn amqp_peek_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    mode: PeekMode,
+    theme: &Theme,
+    area: Rect,
+) {
     if conn.caps.r#type == BrokerType::Rabbitmq {
-        return match conn.selected_destination() {
-            Some(dest) => rabbitmq_details_pane(frame, dest, theme, area),
-            None => render_peek_hint(
-                frame,
-                theme,
-                area,
-                None,
-                "Taps open as tabs in the panel below.",
-            ),
-        };
+        return rabbitmq_peek_pane(frame, conn, mode, theme, area);
     }
     let sel = conn.selected_destination().map(|d| (d.canonical(), d.kind));
     let queue_name = match sel.as_ref().map(|(name, kind)| (name.clone(), *kind)) {
@@ -969,45 +1066,50 @@ fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area:
         }
         Some((name, DestKind::Queue)) => name,
         None => {
-            let hint = match conn.caps.r#type {
-                BrokerType::Rabbitmq => "Taps open as tabs in the panel below.",
-                _ => "Add a destination with 'a'.",
-            };
-            return render_peek_hint(frame, theme, area, None, hint);
+            return render_peek_hint(frame, theme, area, None, "Add a destination with 'a'.");
         }
     };
 
+    const NOTHING_SHOWN: &str = "No messages to show (empty queue, or peek mode is off).";
+    if !conn.peek_is_selected() {
+        // Moving the cursor doesn't peek, so another queue's messages may be
+        // in the inspector: never show them under this queue's name.
+        let hint = match mode {
+            PeekMode::Skip => NOTHING_SHOWN,
+            _ => "Press Enter to peek its messages.",
+        };
+        return render_peek_hint(frame, theme, area, Some(&queue_name), hint);
+    }
     if conn.peek.pending {
         return render_peek_hint(frame, theme, area, Some(&queue_name), "Peeking…");
     }
+    if let Some(error) = &conn.peek.error {
+        return render_peek_error(frame, theme, area, &queue_name, error);
+    }
     if conn.peek.events.is_empty() {
-        return render_peek_hint(
-            frame,
-            theme,
-            area,
-            Some(&queue_name),
-            "No messages to show (empty queue, or peek mode is off).",
-        );
+        return render_peek_hint(frame, theme, area, Some(&queue_name), NOTHING_SHOWN);
     }
 
     // The message list sits over a body preview of the selected message, the
     // analog of the Redis key list + value pane.
     let [list_area, preview_area] =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
-    amqp_message_list(frame, conn, theme, list_area, &queue_name);
+    amqp_message_list(frame, conn, theme, list_area, &queue_name, None);
     amqp_body_preview(frame, conn, theme, preview_area);
 }
 
-/// The AMQP message list (upper-right pane): the peeked messages as a navigable,
-/// filterable list with a count/limit/filter title and a selection highlight
-/// shown only while the list holds the keyboard. Auto-follows the cursor when
-/// focused; otherwise the manual scroll is clamped against the content height.
+/// The message list (upper-right pane): the peeked messages as a navigable,
+/// filterable list with a count/limit/filter title — plus a warning `note`,
+/// when given — and a selection highlight shown only while the list holds the
+/// keyboard. Auto-follows the cursor when focused; otherwise the manual scroll
+/// is clamped against the content height.
 fn amqp_message_list(
     frame: &mut Frame,
     conn: &mut Connection,
     theme: &Theme,
     area: Rect,
     queue_name: &str,
+    note: Option<String>,
 ) {
     let total = conn.peek.events.len();
     let shown = conn.peek.filtered_len();
@@ -1059,11 +1161,14 @@ fn amqp_message_list(
     }
     conn.peek.scroll = conn.peek.scroll.min(max_scroll(lines.len(), inner_h));
 
+    let mut title = vec![Span::styled(title, theme.heading)];
+    if let Some(note) = note {
+        title.push(Span::styled(format!("· {note}"), theme.warning));
+    }
     let para = Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(title)
-                .title_style(theme.heading)
+                .title(Line::from(title))
                 .border_style(border_style(theme, focused)),
         )
         .scroll((conn.peek.scroll, 0));
@@ -1081,6 +1186,26 @@ fn render_peek_hint(frame: &mut Frame, theme: &Theme, area: Rect, name: Option<&
         .block(
             Block::bordered()
                 .title(title)
+                .title_style(theme.heading)
+                .border_style(theme.border),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(para, area);
+}
+
+/// A failed peek in place of the message list: why, in full, under the
+/// queue's name.
+fn render_peek_error(frame: &mut Frame, theme: &Theme, area: Rect, name: &str, error: &str) {
+    let mut lines = vec![Line::styled(error.to_owned(), theme.error)];
+    // Peeking a stream again would only be refused again.
+    if error != STREAM_PEEK_HINT {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("Press Enter to peek again.", theme.dim));
+    }
+    let para = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(format!(" {name} "))
                 .title_style(theme.heading)
                 .border_style(theme.border),
         )
@@ -2431,7 +2556,8 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::styled("AMQP / RabbitMQ browser", theme.heading),
         Line::from("  Enter open · t tail · Ctrl-→ messages · Ctrl-← destinations"),
         Line::from("  AMQP: a add · r discover · x/d remove · P publish · / filter"),
-        Line::from("  RabbitMQ: r refresh · t/Enter tap (direct: asks for a key)"),
+        Line::from("  RabbitMQ: Enter peek queue · t/Enter tap exchange · r refresh"),
+        Line::from("  (a direct exchange asks for a key) · / filter messages"),
         Line::from(""),
         Line::styled("Global keys (any pane)", theme.heading),
         Line::from("  : palette · ? help · m mouse · Esc back · Ctrl-C quit"),

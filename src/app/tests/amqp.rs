@@ -348,3 +348,60 @@ async fn amqp_on_published_reports_success_and_failure() {
     assert!(status.is_error);
     assert!(status.message.contains("broker refused"));
 }
+
+#[tokio::test]
+async fn amqp_enter_peeks_the_selected_queue_not_the_one_last_peeked() {
+    let (mut app, _rx) = test_app();
+    let (handle, mut cmds) = mock::capture_handle(1, "mq", Capabilities::amqp());
+    app.handle_event(AppEvent::Connected { handle });
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+    app.add_amqp_destination(SubSpec::Queue("billing".into()));
+    // Peek `orders` and get its messages back.
+    app.active_conn_mut()
+        .unwrap()
+        .destinations
+        .table
+        .select(Some(0));
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_event(AppEvent::Peeked {
+        id: ConnId(1),
+        spec: SubSpec::Queue("orders".into()),
+        result: Ok(vec![broker_event("o1")]),
+    });
+    while cmds.try_recv().is_ok() {}
+
+    // On `billing`, `orders`' messages aren't billing's: Ctrl-→ doesn't step
+    // into them, and Enter peeks billing.
+    app.handle_key(key(KeyCode::Down));
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert!(!app.active_conn().unwrap().peek.focused);
+    app.handle_key(key(KeyCode::Enter));
+    match cmds.try_recv() {
+        Ok(ConnCommand::Peek { spec, .. }) => assert_eq!(spec, SubSpec::Queue("billing".into())),
+        other => panic!("expected a Peek of billing, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn amqp_peek_error_clears_the_pending_peek() {
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 1, "mq").await;
+    app.add_amqp_destination(SubSpec::Queue("orders".into()));
+    assert!(app.active_conn().unwrap().peek.pending);
+    app.handle_event(AppEvent::Peeked {
+        id: ConnId(1),
+        spec: SubSpec::Queue("orders".into()),
+        result: Err("opening peek connection: refused".into()),
+    });
+    let peek = &app.active_conn().unwrap().peek;
+    assert!(!peek.pending, "the pane stops saying Peeking…");
+    assert_eq!(
+        peek.error.as_deref(),
+        Some("opening peek connection: refused")
+    );
+    // The footer reports it as it always has.
+    assert_eq!(
+        app.status.as_ref().unwrap().message,
+        "[1] peek: opening peek connection: refused"
+    );
+}

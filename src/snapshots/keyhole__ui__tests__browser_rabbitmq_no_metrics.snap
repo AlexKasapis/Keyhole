@@ -8,11 +8,11 @@ expression: "render_lines(&mut app, 160, 20)"
 │▶ orders                  queue          —              —          —         —││Consumers  —                                                                  │
 │  payments                quorum         —              —          —         —││Publish    —                                                                  │
 │  audit                   stream         —              —          —         —││                                                                              │
-│  amq.direct              direct                                             —││Tailing a queue would consume its messages. To watch them, tap an exchange    │
-│  amq.fanout              fanout                                             —││that routes to it.                                                            │
+│  amq.direct              direct                                             —││Press Enter to peek its messages. RabbitMQ puts each one back on the queue,   │
+│  amq.fanout              fanout                                             —││flagged redelivered.                                                          │
 │  amq.headers             headers                                            —││                                                                              │
-│  amq.rabbitmq.trace      topic                                              —││                                                                              │
-│  keyhole.demo            topic                                              —││                                                                              │
+│  amq.rabbitmq.trace      topic                                              —││Tailing a queue would consume its messages. To watch them, tap an exchange    │
+│  keyhole.demo            topic                                              —││that routes to it.                                                            │
 │                                                                              ││                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
 ┌ Tail ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐

@@ -363,8 +363,9 @@ pub struct Settings {
     /// settings page.
     #[serde(default)]
     pub animation: AnimationSpeed,
-    /// How peeking an AMQP queue reads its messages: a non-destructive browse,
-    /// skipped entirely, or a destructive consume. Cycled from the settings page.
+    /// How peeking a queue (AMQP 1.0 or RabbitMQ) reads its messages: a
+    /// browse that leaves them in the queue, skipped entirely, or a destructive
+    /// consume. Cycled from the settings page.
     #[serde(default)]
     pub peek_mode: PeekMode,
 }
@@ -435,21 +436,25 @@ impl AnimationSpeed {
     }
 }
 
-/// How peeking an AMQP queue reads the messages currently sitting in it. The
-/// original app was non-destructive only; this knob opens that up per the user's
-/// choice. The default, `Browse`, preserves the non-destructive behaviour.
+/// How peeking a queue (AMQP 1.0 or RabbitMQ) reads the messages currently
+/// sitting in it. The original app was non-destructive only; this knob opens
+/// that up per the user's choice. The default, `Browse`, leaves every message
+/// in the queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PeekMode {
-    /// Read copies of the messages without removing them (distribution-mode
-    /// `copy`). Non-destructive; the broker may flip a redelivery flag.
+    /// Read the messages without removing them. AMQP 1.0 reads copies
+    /// (distribution-mode `copy`); RabbitMQ takes them and puts them straight
+    /// back (`ack_requeue_true`), so they're flagged `redelivered`, and on a 3.x
+    /// quorum queue each peek counts toward its `delivery-limit`.
     #[default]
     Browse,
     /// Don't read queue contents at all — the destination list and live tails
-    /// still work, but selecting a queue shows nothing.
+    /// still work, but opening a queue shows nothing.
     Skip,
-    /// Consume the messages as they are read (a normal receiver that accepts
-    /// each delivery). Destructive: peeked messages are removed from the queue.
+    /// Consume the messages as they are read (AMQP 1.0: a normal receiver that
+    /// accepts each delivery; RabbitMQ: `ack_requeue_false`). Destructive:
+    /// peeked messages are removed from the queue.
     Destructive,
 }
 

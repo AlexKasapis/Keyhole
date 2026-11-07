@@ -6,7 +6,6 @@ expression: "render_lines(&mut app, 90, 40)"
 │                                                                                        │
 │                                  No saved connections.                                 │
 │                                                                                        │
-│                                  Press 'a' to add one.                                 │
 │           ┌ Help ──────────────────────────────────────────────────────────┐           │
 │           │Moving around — one model everywhere                            │           │
 │           │  ↑↓ move / scroll · Home/End ends · mouse wheel moves          │           │
@@ -32,7 +31,8 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │AMQP / RabbitMQ browser                                         │           │
 │           │  Enter open · t tail · Ctrl-→ messages · Ctrl-← destinations   │           │
 │           │  AMQP: a add · r discover · x/d remove · P publish · / filter  │           │
-│           │  RabbitMQ: r refresh · t/Enter tap (direct: asks for a key)    │           │
+│           │  RabbitMQ: Enter peek queue · t/Enter tap exchange · r refresh │           │
+│           │  (a direct exchange asks for a key) · / filter messages        │           │
 │           │                                                                │           │
 │           │Global keys (any pane)                                          │           │
 │           │  : palette · ? help · m mouse · Esc back · Ctrl-C quit         │           │

@@ -461,43 +461,53 @@ impl App {
         }
     }
 
-    // -- AMQP destination browser -------------------------------------------
+    // -- Destination browser (AMQP 1.0 / RabbitMQ) ----------------------------
 
-    /// Peek the connection's currently selected destination (AMQP). A queue is
-    /// peeked per the configured [`Self::peek_mode`]; a topic (which doesn't
-    /// retain) or `Skip` mode clears the inspector instead of issuing a read.
+    /// Peek the connection's selected destination. Only an explicit open runs
+    /// this — never a cursor move or a list refresh — because a RabbitMQ peek
+    /// requeues (browse) or removes (destructive) the messages it reads. A queue
+    /// is peeked per the configured [`Self::peek_mode`]; a topic (which doesn't
+    /// retain), `Skip` mode and a RabbitMQ stream queue (which refuses
+    /// `basic.get`) send nothing, and the pane says why.
     pub(super) fn request_peek(&mut self, id: ConnId) {
         let mode = self.peek_mode();
-        if let Some(conn) = self.conn_by_id_mut(id) {
-            // Selecting a destination always returns focus to the list and drops
-            // the search filter from the previous selection.
-            conn.peek.focused = false;
-            conn.peek.selected = 0;
-            conn.peek.filter.clear();
-            conn.peek.limit_hit = false;
-            let Some(dest) = conn.selected_destination().cloned() else {
-                // Empty list / nothing selected: nothing to show.
-                conn.peek.events.clear();
-                conn.peek.peeked = None;
-                conn.peek.pending = false;
-                return;
-            };
+        let Some(conn) = self.conn_by_id_mut(id) else {
+            return;
+        };
+        // Opening a destination always returns focus to the list and drops the
+        // previous peek, its search filter and its outcome.
+        conn.peek.focused = false;
+        conn.peek.selected = 0;
+        conn.peek.filter.clear();
+        conn.peek.limit_hit = false;
+        conn.peek.events.clear();
+        conn.peek.scroll = 0;
+        conn.peek.peeked = None;
+        conn.peek.pending = false;
+        conn.peek.error = None;
+        conn.peek.requeue_limit = None;
+        let Some(dest) = conn.selected_destination().cloned() else {
+            return;
+        };
+        let peekable = conn.caps.peeks_queues()
+            && matches!(dest.kind, DestKind::Queue)
+            && mode != config::PeekMode::Skip
+            && !dest.is_stream();
+        if peekable {
             let spec = dest.spec();
-            let peekable = conn.caps.peeks_queues()
-                && matches!(dest.kind, DestKind::Queue)
-                && mode != config::PeekMode::Skip;
-            // Reset the inspector to the freshly selected destination.
             conn.peek.peeked = Some(spec.clone());
-            conn.peek.events.clear();
-            conn.peek.scroll = 0;
-            conn.peek.pending = peekable;
-            if peekable {
-                conn.handle.send(ConnCommand::Peek {
-                    spec,
-                    mode,
-                    limit: VALUE_LIMIT,
-                });
-            }
+            conn.peek.pending = true;
+            // Warned about in the pane title: each browse peek of a 3.x quorum
+            // queue with a delivery limit counts toward it.
+            conn.peek.requeue_limit = dest.peek_counts_toward(mode);
+            conn.handle.send(ConnCommand::Peek {
+                spec,
+                mode,
+                limit: VALUE_LIMIT,
+            });
+        } else if dest.is_stream() {
+            // The pane explains why and what to do instead.
+            self.set_status("can't peek a stream queue".to_string(), true);
         }
     }
 

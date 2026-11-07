@@ -23,6 +23,31 @@ pub const RABBITMQ_EXCHANGE: &str = "keyhole.demo";
 /// Routing keys the RabbitMQ publisher rotates through.
 pub const RABBITMQ_ROUTING_KEYS: [&str; 3] = ["order.created", "order.shipped", "order.cancelled"];
 
+/// A durable queue `keyhole dev` declares and binds to [`RABBITMQ_EXCHANGE`],
+/// so the RabbitMQ browser has queues holding messages to peek.
+pub struct RabbitmqQueue {
+    pub name: &'static str,
+    /// The topic binding key; it must match some of [`RABBITMQ_ROUTING_KEYS`].
+    pub binding_key: &'static str,
+    /// A quorum queue rather than a classic one.
+    pub quorum: bool,
+}
+
+/// The demo queues: a classic queue of the order events, and a quorum queue
+/// that audits everything published to the exchange.
+pub const RABBITMQ_QUEUES: [RabbitmqQueue; 2] = [
+    RabbitmqQueue {
+        name: "keyhole.demo.orders",
+        binding_key: "order.*",
+        quorum: false,
+    },
+    RabbitmqQueue {
+        name: "keyhole.demo.audit",
+        binding_key: "#",
+        quorum: true,
+    },
+];
+
 /// The AMQP destination specs exactly as they must appear in `config.dev.toml`'s
 /// `dev-activemq` profile — the single source of truth the consistency test
 /// checks the committed file against. Test-only: the publisher works from the
@@ -232,6 +257,41 @@ mod tests {
         assert!(RABBITMQ_ROUTING_KEYS
             .iter()
             .all(|k| !k.is_empty() && k.contains('.')));
+    }
+
+    /// Whether a topic exchange routes `key` to a binding of `pattern`: `*`
+    /// matches one dot-separated word, `#` zero or more.
+    fn topic_matches(pattern: &[&str], key: &[&str]) -> bool {
+        match (pattern.split_first(), key.split_first()) {
+            (None, None) => true,
+            (Some((&"#", rest)), _) => {
+                topic_matches(rest, key) || (!key.is_empty() && topic_matches(pattern, &key[1..]))
+            }
+            (Some((p, prest)), Some((k, krest))) => {
+                (*p == "*" || p == k) && topic_matches(prest, krest)
+            }
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn every_demo_queue_receives_what_the_publisher_sends() {
+        let words = |s: &'static str| s.split('.').collect::<Vec<_>>();
+        assert!(topic_matches(&words("order.*"), &words("order.created")));
+        assert!(!topic_matches(&words("order.*"), &words("order.a.b")));
+        assert!(topic_matches(&words("#"), &words("a.b.c")));
+        for queue in &RABBITMQ_QUEUES {
+            for key in RABBITMQ_ROUTING_KEYS {
+                assert!(
+                    topic_matches(&words(queue.binding_key), &words(key)),
+                    "{} misses {key}",
+                    queue.name
+                );
+            }
+        }
+        // One of each kind the browser shows differently.
+        assert!(RABBITMQ_QUEUES.iter().any(|q| q.quorum));
+        assert!(RABBITMQ_QUEUES.iter().any(|q| !q.quorum));
     }
 
     /// Guard the committed example config against drift: its profiles must point

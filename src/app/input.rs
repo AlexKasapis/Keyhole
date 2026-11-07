@@ -283,7 +283,7 @@ impl App {
     /// harmless on a topic or an empty/unpeeked queue).
     fn focus_messages(&mut self) {
         self.with_active_conn(|conn| {
-            if !conn.peek.events.is_empty() {
+            if conn.has_peeked_messages() {
                 conn.peek.focused = true;
                 conn.peek.clamp_selection();
                 conn.peek.scroll = 0;
@@ -377,7 +377,8 @@ impl App {
 
     /// Open the highlighted destination: a queue steps into its message pane when
     /// it already has peeked messages, otherwise it (re)issues the peek; a topic
-    /// (which doesn't retain) opens a live tail.
+    /// (which doesn't retain) opens a live tail, and an exchange a tap. This is
+    /// the one key that peeks a queue: moving the cursor never does.
     fn open_selected_destination(&mut self) {
         let Some(id) = self.active_id() else { return };
         match self
@@ -385,9 +386,8 @@ impl App {
             .and_then(|c| c.selected_destination().map(|d| d.kind))
         {
             Some(DestKind::Queue) => {
-                let has_messages = self
-                    .conn_by_id(id)
-                    .is_some_and(|c| !c.peek.events.is_empty());
+                // The peek shown must be this queue's, not one the cursor left.
+                let has_messages = self.conn_by_id(id).is_some_and(|c| c.has_peeked_messages());
                 if has_messages {
                     self.focus_messages();
                 } else {
@@ -892,13 +892,14 @@ impl App {
                         );
                         conn.browser.table.select(next);
                     } else {
-                        // AMQP: move through the curated destination list.
+                        // AMQP / RabbitMQ: move through the destination list.
                         let next = move_selection(
                             conn.destinations.table.selected(),
                             conn.destinations.items.len(),
                             delta,
                         );
                         conn.destinations.table.select(next);
+                        leave_peeked_messages(conn);
                     }
                 }
                 // Redis loads the selected key's value as the highlight moves
@@ -945,6 +946,7 @@ impl App {
                                 .table
                                 .select(Some(if top { 0 } else { len - 1 }));
                         }
+                        leave_peeked_messages(conn);
                     }
                 }
                 if let Some(id) = self.active_id() {
@@ -1057,5 +1059,14 @@ impl App {
         self.confirm = ConfirmState::None;
         self.rename_buf.clear();
         self.recordings_focus = RecordingsFocus::List;
+    }
+}
+
+/// Hand the keyboard back to the destination list once the cursor has left the
+/// peeked destination (the mouse wheel moves it even while the message list is
+/// focused): that destination's messages are no longer on screen.
+fn leave_peeked_messages(conn: &mut Connection) {
+    if !conn.peek_is_selected() {
+        conn.peek.focused = false;
     }
 }

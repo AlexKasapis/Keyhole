@@ -1,0 +1,48 @@
+---
+source: src/ui.rs
+expression: text
+---
+┌ Destinations ────────────────────────────────────────────────────────────────┐┌ payments · 2 msgs · each peek counts toward delivery-limit 3 ────────────────┐
+│  Name                    Kind        Msgs  Ready/Unacked  Consumers      Rate││▶ 00:00:00.000  payments           order.created {"order":1001,"total":42}    │
+│  orders                  queue       1980        1960/20          2     9.6/s││  00:00:00.000  payments           payments plain text                        │
+│▶ payments                quorum         3            3/0          0         —││                                                                              │
+│  audit                   stream         0            0/0          0         —││                                                                              │
+│  amq.direct              direct                                             —││                                                                              │
+│  amq.fanout              fanout                                             —││                                                                              │
+│  amq.headers             headers                                            —││                                                                              │
+│  amq.rabbitmq.trace      topic                                              —││                                                                              │
+│  keyhole.demo            topic                                         19.6/s││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              ││                                                                              │
+│                                                                              │└──────────────────────────────────────────────────────────────────────────────┘
+│                                                                              │┌ message 1/2 ─────────────────────────────────────────────────────────────────┐
+│                                                                              ││{                                                                             │
+│                                                                              ││  "order": 1001,                                                              │
+│                                                                              ││  "total": 42                                                                 │
+│                                                                              ││}                                                                             │
+│                                                                              ││                                                                              │
+│                                                                              ││── metadata ──                                                                │
+│                                                                              ││received: 00:00:00.000                                                        │
+│                                                                              ││exchange: keyhole.demo                                                        │
+│                                                                              ││routing_key: order.created                                                    │
+│                                                                              ││redelivered: true                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+┌ Tail ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│exchange:name or exchange:name/binding-key:                                                                                                                   │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│Enter taps it · non-destructive copy via a temporary queue · key defaults to #                                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ / filter · Tab tails · : palette · ? help

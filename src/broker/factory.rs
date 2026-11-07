@@ -13,8 +13,8 @@ use crate::config::ConnectionConfig;
 /// Build the broker connection for `profile`, with its `password` already
 /// resolved. `management_password` is the resolved password for RabbitMQ's
 /// management API (other brokers ignore it). `preview_bytes` bounds how much of
-/// a value the Redis inspector fetches; brokers without a value inspector
-/// ignore it.
+/// a value the Redis inspector fetches, and of each message body a RabbitMQ
+/// peek fetches; AMQP 1.0 ignores it.
 ///
 /// The returned connection is not yet open — the caller drives
 /// [`BrokerConnection::connect`].
@@ -27,9 +27,12 @@ pub fn connection_for(
     let conn: Box<dyn BrokerConnection> = match profile {
         ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview_bytes)),
         ConnectionConfig::Amqp(p) => Box::new(AmqpConnection::new(p, password)),
-        ConnectionConfig::Rabbitmq(p) => {
-            Box::new(RabbitmqConnection::new(p, password, management_password))
-        }
+        ConnectionConfig::Rabbitmq(p) => Box::new(RabbitmqConnection::new(
+            p,
+            password,
+            management_password,
+            preview_bytes,
+        )),
     };
     Ok(conn)
 }

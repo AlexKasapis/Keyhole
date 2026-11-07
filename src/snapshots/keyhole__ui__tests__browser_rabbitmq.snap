@@ -8,11 +8,11 @@ expression: "render_lines(&mut app, 160, 30)"
 │  payments                quorum         3            3/0          0         —││Consumers  2                                                                  │
 │  audit                   stream         0            0/0          0         —││Publish    9.6/s                                                              │
 │  amq.direct              direct                                             —││                                                                              │
-│  amq.fanout              fanout                                             —││Tailing a queue would consume its messages. To watch them, tap an exchange    │
-│  amq.headers             headers                                            —││that routes to it.                                                            │
+│  amq.fanout              fanout                                             —││Press Enter to peek its messages. RabbitMQ puts each one back on the queue,   │
+│  amq.headers             headers                                            —││flagged redelivered.                                                          │
 │  amq.rabbitmq.trace      topic                                              —││                                                                              │
-│  keyhole.demo            topic                                         19.6/s││                                                                              │
-│                                                                              ││                                                                              │
+│  keyhole.demo            topic                                         19.6/s││Tailing a queue would consume its messages. To watch them, tap an exchange    │
+│                                                                              ││that routes to it.                                                            │
 │                                                                              ││                                                                              │
 │                                                                              ││                                                                              │
 │                                                                              ││                                                                              │

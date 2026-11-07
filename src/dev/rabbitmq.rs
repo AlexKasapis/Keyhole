@@ -1,14 +1,17 @@
 //! RabbitMQ (AMQP 0.9.1) live publisher for `keyhole dev`.
 //!
-//! The app's RabbitMQ broker only taps exchanges (it has no publish path), so
-//! this uses the raw `lapin` client to declare a durable topic exchange and
-//! publish to it. Tap it in the TUI via `exchange:keyhole.demo`.
+//! The app's RabbitMQ broker has no publish path, so this uses the raw `lapin`
+//! client to declare a durable topic exchange, with durable queues bound to it
+//! ([`fixtures::RABBITMQ_QUEUES`]), and publish to it. Tap the exchange in the
+//! TUI via `exchange:keyhole.demo`, or open a queue to peek what it collected.
 
 use std::time::Duration;
 
 use anyhow::Context;
-use lapin::options::{BasicPublishOptions, ExchangeDeclareOptions};
-use lapin::types::FieldTable;
+use lapin::options::{
+    BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
+};
+use lapin::types::{AMQPValue, FieldTable};
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use tokio_util::sync::CancellationToken;
@@ -32,7 +35,8 @@ fn url(profile: &RabbitmqProfile, password: Option<&str>) -> String {
 }
 
 /// Open a connection + channel and declare the demo topic exchange (durable, so
-/// the TUI's passive declare in the tap succeeds).
+/// the TUI's passive declare in the tap succeeds) and the demo queues bound to
+/// it.
 async fn open(
     profile: &RabbitmqProfile,
     password: Option<&str>,
@@ -53,7 +57,45 @@ async fn open(
         )
         .await
         .with_context(|| format!("declaring exchange `{}`", fixtures::RABBITMQ_EXCHANGE))?;
+    for queue in &fixtures::RABBITMQ_QUEUES {
+        declare_queue(&channel, queue).await?;
+    }
     Ok((conn, channel))
+}
+
+/// Declare a durable demo queue (a quorum queue when asked) and bind it to the
+/// demo exchange. Declaring an existing queue with the same settings is a
+/// no-op, so every run can do it.
+async fn declare_queue(channel: &Channel, queue: &fixtures::RabbitmqQueue) -> anyhow::Result<()> {
+    let mut args = FieldTable::default();
+    if queue.quorum {
+        args.insert(
+            "x-queue-type".into(),
+            AMQPValue::LongString("quorum".into()),
+        );
+    }
+    channel
+        .queue_declare(
+            queue.name.into(),
+            QueueDeclareOptions {
+                durable: true,
+                ..Default::default()
+            },
+            args,
+        )
+        .await
+        .with_context(|| format!("declaring queue `{}`", queue.name))?;
+    channel
+        .queue_bind(
+            queue.name.into(),
+            fixtures::RABBITMQ_EXCHANGE.into(),
+            queue.binding_key.into(),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .with_context(|| format!("binding queue `{}`", queue.name))?;
+    Ok(())
 }
 
 /// Continuous: publish fake messages to the demo exchange until `token` is
@@ -65,11 +107,13 @@ pub async fn publish(
     token: CancellationToken,
 ) -> anyhow::Result<()> {
     let (conn, channel) = open(&profile, password.as_deref()).await?;
+    let queues: Vec<&str> = fixtures::RABBITMQ_QUEUES.iter().map(|q| q.name).collect();
     println!(
-        "rabbitmq → {}:{} (exchange:{}) every {interval:?}",
+        "rabbitmq → {}:{} (exchange:{}, queues {}) every {interval:?}",
         profile.host,
         profile.port,
-        fixtures::RABBITMQ_EXCHANGE
+        fixtures::RABBITMQ_EXCHANGE,
+        queues.join(", ")
     );
     let mut seq: u64 = 0;
     loop {
@@ -191,15 +235,54 @@ mod integration_tests {
         }
     }
 
+    /// The messages `queue` holds, from a passive declare.
+    async fn depth(channel: &Channel, queue: &str) -> u32 {
+        channel
+            .queue_declare(
+                queue.into(),
+                QueueDeclareOptions {
+                    passive: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("queue `{queue}` exists: {e:#}"))
+            .message_count()
+    }
+
     #[tokio::test]
-    async fn declares_the_exchange_and_publishes() {
+    async fn declares_the_exchange_and_queues_and_publishes() {
+        // A second run re-declares everything without a conflict.
+        let (first, _) = open(&test_profile(), Some("keyhole"))
+            .await
+            .expect("first open");
+        first.close(200, "bye".into()).await.ok();
         let (conn, channel) = open(&test_profile(), Some("keyhole"))
             .await
-            .expect("connect + declare exchange");
+            .expect("connect + declare exchange and queues");
+        let before: Vec<u32> = futures_util::future::join_all(
+            fixtures::RABBITMQ_QUEUES
+                .iter()
+                .map(|q| depth(&channel, q.name)),
+        )
+        .await;
         for seq in 1..=3 {
             publish_once(&channel, seq)
                 .await
                 .unwrap_or_else(|e| panic!("publish seq {seq}: {e:#}"));
+        }
+        // Each queue's binding matches every routing key the publisher uses.
+        // (At least: a running `keyhole dev` may publish too.) Without
+        // publisher confirms the last publish may still be routing, so poll.
+        for (queue, before) in fixtures::RABBITMQ_QUEUES.iter().zip(before) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let mut after = depth(&channel, queue.name).await;
+            while after < before + 3 && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                after = depth(&channel, queue.name).await;
+            }
+            assert!(after >= before + 3, "{}: {before} → {after}", queue.name);
         }
         conn.close(200, "bye".into()).await.ok();
     }

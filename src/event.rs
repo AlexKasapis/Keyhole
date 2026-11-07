@@ -35,13 +35,14 @@ pub enum AppEvent {
         key: String,
         value: ValueView,
     },
-    /// The result of a queue peek (AMQP): a bounded batch of the messages
-    /// currently in `spec`. `spec` lets the UI discard a stale peek (the user
-    /// moved to another destination before it returned).
+    /// The result of a queue peek (AMQP 1.0 or RabbitMQ): a bounded batch of
+    /// the messages currently in `spec`, or why the peek failed. `spec` lets
+    /// the UI discard a stale reply (the user peeked another destination
+    /// before it returned).
     Peeked {
         id: ConnId,
         spec: SubSpec,
-        events: Vec<BrokerEvent>,
+        result: Result<Vec<BrokerEvent>, String>,
     },
     /// The result of a publish (AMQP): `Ok` when the broker accepted the
     /// message, `Err` with a reason otherwise. `target` is the destination label

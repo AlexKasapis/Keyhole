@@ -22,15 +22,21 @@
 //! Listing queues and exchanges, peeking and stats need the HTTP management API
 //! ([`mgmt`]), which `connect` probes after the AMQP login. A failed probe leaves
 //! the connection usable for tails.
+//!
+//! A **queue peek** ([`RabbitmqConnection::peek`]) is the one read that touches
+//! a real queue: the management API's `/get` takes the messages off the queue
+//! and, in browse mode, puts them straight back (`ack_requeue_true`) flagged
+//! `redelivered`. It only runs when the user opens a queue.
 
-// The browser lists queues and exchanges through the client; peek, stats and
-// the connection/consumer rosters use the rest of it in later phases. `expect`
-// fails the build once everything is used, so this can't outlive its reason.
+// The browser lists queues and exchanges and peeks queues through the client;
+// stats and the connection/consumer rosters use the rest of it in later
+// phases. `expect` fails the build once everything is used, so this can't
+// outlive its reason.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "peek, stats and rosters don't call the management client yet"
+        reason = "stats and the connection/consumer rosters don't call the management client yet"
     )
 )]
 mod mgmt;
@@ -41,6 +47,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use lapin::message::Delivery;
@@ -50,12 +57,15 @@ use lapin::options::{
 use lapin::types::FieldTable;
 use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
 
-use self::mgmt::{ApiError, ExchangeInfo, Management, MgmtClient, QueueInfo};
+use self::mgmt::{
+    AckMode, ApiError, ExchangeInfo, GetMessage, Management, MessageProperties, MgmtClient,
+    QueueInfo,
+};
 use super::{
     BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, DestKind, DestinationInfo,
-    DestinationList, ExchangeType, Payload, SubSpec,
+    DestinationList, ExchangeType, Payload, PeekReq, QueueType, SubSpec, STREAM_PEEK_HINT,
 };
-use crate::config::RabbitmqProfile;
+use crate::config::{PeekMode, RabbitmqProfile};
 
 /// The username and password lapin logs in with when the AMQP URL has none (the
 /// AMQP URI spec's default). The management login defaults the same way, so both
@@ -74,16 +84,21 @@ pub struct RabbitmqConnection {
     /// Each exchange's type from the last listing, so a tap's advisory can
     /// tell whether the default `#` binding key fits the exchange.
     exchange_types: HashMap<String, ExchangeType>,
+    /// The most body bytes a peek fetches per message (the
+    /// `value_preview_bytes` setting); longer bodies come back truncated.
+    preview_bytes: usize,
 }
 
 impl RabbitmqConnection {
-    /// Build a connection from a profile, its resolved AMQP password, and the
+    /// Build a connection from a profile, its resolved AMQP password, the
     /// resolved management API password (`management_password`, else the AMQP
-    /// password). Call [`BrokerConnection::connect`] to actually establish it.
+    /// password), and the most body bytes a peek shows per message. Call
+    /// [`BrokerConnection::connect`] to actually establish it.
     pub fn new(
         profile: RabbitmqProfile,
         password: Option<String>,
         management_password: Option<String>,
+        preview_bytes: usize,
     ) -> Self {
         let mgmt = Management::new(management_client(&profile, management_password));
         Self {
@@ -92,7 +107,13 @@ impl RabbitmqConnection {
             conn: None,
             mgmt,
             exchange_types: HashMap::new(),
+            preview_bytes: preview_bytes.max(1),
         }
+    }
+
+    /// Why the management API can't be used, naming where it was looked for.
+    fn unavailable(&self) -> String {
+        format!("management API unavailable at {}", self.mgmt.base_url())
     }
 
     /// Build an `amqp[s]://[user[:pass]@]host:port/vhost` URL with
@@ -169,11 +190,17 @@ impl BrokerConnection for RabbitmqConnection {
         if reprobe && self.mgmt.error().is_some() {
             self.mgmt.run_probe().await;
         }
-        let base_url = self.mgmt.base_url().to_string();
-        let unavailable = || format!("management API unavailable at {base_url}");
+        let unavailable = self.unavailable();
         // A failed probe answers here without touching the network.
-        let client = self.mgmt.client().with_context(unavailable)?.clone();
-        let stats_disabled = self.mgmt.probe().is_some_and(|p| p.stats_disabled);
+        let client = self.mgmt.client().context(unavailable.clone())?.clone();
+        let probe = self.mgmt.probe();
+        let stats_disabled = probe.is_some_and(|p| p.stats_disabled);
+        // Only 3.x counts a requeue toward a quorum queue's delivery limit. An
+        // unknown version is assumed to count, so the warning errs on the side
+        // of showing.
+        let requeue_counts = probe
+            .and_then(mgmt::Probe::major_version)
+            .is_none_or(|major| major < 4);
         let fetched = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             Ok((client.queues()?, client.exchanges()?))
         })
@@ -187,16 +214,59 @@ impl BrokerConnection for RabbitmqConnection {
                 if e.downcast_ref::<ApiError>().is_none() {
                     self.mgmt.mark_unreachable(&e);
                 }
-                return Err(e.context(unavailable()));
+                return Err(e.context(unavailable));
             }
         };
-        let list = destination_list(queues, exchanges, stats_disabled);
+        let list = destination_list(queues, exchanges, stats_disabled, requeue_counts);
         self.exchange_types = list
             .items
             .iter()
             .filter_map(|d| Some((d.name.clone(), d.exchange_type.clone()?)))
             .collect();
         Ok(list)
+    }
+
+    /// Peek a queue through the management API's `/get`: browse mode puts the
+    /// messages back (`ack_requeue_true`, which RabbitMQ flags `redelivered`),
+    /// destructive mode removes them (`ack_requeue_false`). Bodies are capped at
+    /// `preview_bytes`. A stream queue refuses `/get`; that comes back as the
+    /// [`STREAM_PEEK_HINT`].
+    async fn peek(&mut self, req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
+        let queue = match &req.spec {
+            SubSpec::Queue(q) => q.clone(),
+            other => anyhow::bail!(
+                "{} can't be peeked: only a queue holds messages",
+                other.label()
+            ),
+        };
+        let Some(ackmode) = ack_mode(req.mode) else {
+            return Ok(Vec::new());
+        };
+        let unavailable = self.unavailable();
+        // A failed probe answers here without touching the network.
+        let client = self.mgmt.client().context(unavailable.clone())?.clone();
+        let (limit, truncate) = (req.limit, self.preview_bytes);
+        let name = queue.clone();
+        let fetched =
+            tokio::task::spawn_blocking(move || client.get(&name, limit, ackmode, Some(truncate)))
+                .await
+                .context("the peek task failed")?;
+        match fetched {
+            Ok(messages) => Ok(messages
+                .into_iter()
+                .map(|m| peek_event(&queue, m))
+                .collect()),
+            Err(e) => Err(match e.downcast_ref::<ApiError>() {
+                // The listing didn't say it's a stream, but the broker did.
+                Some(api) if is_stream_refusal(api) => anyhow::anyhow!(STREAM_PEEK_HINT),
+                Some(_) => e,
+                // No reply at all: later calls fail fast until a re-probe.
+                None => {
+                    self.mgmt.mark_unreachable(&e);
+                    e.context(unavailable)
+                }
+            }),
+        }
     }
 
     async fn tail_notice(&mut self, spec: &SubSpec) -> Option<String> {
@@ -236,20 +306,148 @@ impl BrokerConnection for RabbitmqConnection {
     }
 }
 
+/// The `/get` settlement for a peek `mode`; `None` for [`PeekMode::Skip`],
+/// which reads nothing.
+fn ack_mode(mode: PeekMode) -> Option<AckMode> {
+    match mode {
+        // Never worse than `reject_requeue_true`, and on 4.x it doesn't raise
+        // a quorum queue's delivery count (checked on 3.13 and 4.4).
+        PeekMode::Browse => Some(AckMode::AckRequeueTrue),
+        PeekMode::Destructive => Some(AckMode::AckRequeueFalse),
+        PeekMode::Skip => None,
+    }
+}
+
+/// Whether a `/get` refusal is a stream queue's: a 400 whose reason is `540
+/// basic.get not supported by stream queues …` (3.13 and 4.4 alike).
+fn is_stream_refusal(error: &ApiError) -> bool {
+    error.status == 400
+        && error
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("basic.get not supported"))
+}
+
+/// A message `/get` fetched from `queue`, as an event: the queue is the source,
+/// and how the message arrived (exchange, routing key, redelivery) plus its
+/// properties and headers ride along as metadata for the inspector's preview
+/// and filter.
+fn peek_event(queue: &str, msg: GetMessage) -> BrokerEvent {
+    let mut body = msg.body().unwrap_or_else(|e| {
+        // RabbitMQ sends valid base64. Should a body still not decode, show it
+        // as sent rather than fail the whole batch: a destructive peek has
+        // already taken it off the queue.
+        tracing::debug!(error = %e, queue, "undecodable peeked body");
+        msg.payload.clone().into_bytes()
+    });
+    // `truncate` cuts the body before encoding; `payload_bytes` is its full size.
+    let full = msg.payload_bytes.unwrap_or(body.len() as u64);
+    let truncated = (body.len() as u64) < full;
+    if truncated {
+        drop_cut_character(&mut body);
+    }
+    let exchange = if msg.exchange.is_empty() {
+        "(default)".to_string()
+    } else {
+        msg.exchange
+    };
+    let mut meta = vec![
+        ("exchange".to_string(), exchange),
+        ("routing_key".to_string(), msg.routing_key),
+        ("redelivered".to_string(), msg.redelivered.to_string()),
+    ];
+    if truncated {
+        meta.push((
+            "truncated".to_string(),
+            format!("showing {} of {full} bytes", body.len()),
+        ));
+    }
+    meta.extend(property_meta(msg.properties));
+    BrokerEvent {
+        ts: OffsetDateTime::now_utc(),
+        source: queue.to_string(),
+        payload: Payload::classify(body),
+        meta,
+    }
+}
+
+/// Drop a multi-byte character that truncation cut in half, so a truncated
+/// text body still reads as text rather than binary.
+fn drop_cut_character(body: &mut Vec<u8>) {
+    if let Err(e) = std::str::from_utf8(body) {
+        // `error_len() == None`: the bytes only stop mid-character.
+        if e.error_len().is_none() {
+            body.truncate(e.valid_up_to());
+        }
+    }
+}
+
+/// The properties a message carries, as metadata (only those it set), then
+/// each header as `headers.<name>`.
+fn property_meta(p: MessageProperties) -> Vec<(String, String)> {
+    let timestamp = p.timestamp.map(|secs| {
+        i64::try_from(secs)
+            .ok()
+            .and_then(|s| OffsetDateTime::from_unix_timestamp(s).ok())
+            .and_then(|t| t.format(&Rfc3339).ok())
+            .unwrap_or_else(|| secs.to_string())
+    });
+    let delivery_mode = p.delivery_mode.map(|m| match m {
+        1 => "1 (transient)".to_string(),
+        2 => "2 (persistent)".to_string(),
+        other => other.to_string(),
+    });
+    let fields = [
+        ("content_type", p.content_type),
+        ("message_id", p.message_id),
+        ("correlation_id", p.correlation_id),
+        ("delivery_mode", delivery_mode),
+        ("content_encoding", p.content_encoding),
+        ("priority", p.priority.map(|n| n.to_string())),
+        ("timestamp", timestamp),
+        ("type", p.message_type),
+        ("app_id", p.app_id),
+        ("user_id", p.user_id),
+        ("reply_to", p.reply_to),
+        ("expiration", p.expiration),
+    ];
+    let mut meta: Vec<(String, String)> = fields
+        .into_iter()
+        .filter_map(|(key, value)| Some((key.to_string(), value?)))
+        .collect();
+    meta.extend(
+        p.headers
+            .into_iter()
+            .map(|(name, value)| (format!("headers.{name}"), header_text(value))),
+    );
+    meta
+}
+
+/// A header value as text: a string as itself, anything else (a number, a
+/// bool, an array, a nested table such as `x-death`) as compact JSON.
+fn header_text(value: serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
 /// The destination list from the management API's queue and exchange
 /// listings: queues first, then exchanges, each in the API's name order. The
 /// default exchange (`""`) is left out: it can't be bound, so it can't be
-/// tapped.
+/// tapped. `requeue_counts` says whether the broker counts a requeue toward a
+/// quorum queue's delivery limit (3.x).
 fn destination_list(
     queues: mgmt::Listing<QueueInfo>,
     exchanges: mgmt::Listing<ExchangeInfo>,
     stats_disabled: bool,
+    requeue_counts: bool,
 ) -> DestinationList {
     let truncated = queues.truncated || exchanges.truncated;
     let items = queues
         .items
         .into_iter()
-        .map(queue_info)
+        .map(|q| queue_info(q, requeue_counts))
         .chain(
             exchanges
                 .items
@@ -265,8 +463,13 @@ fn destination_list(
     }
 }
 
-fn queue_info(q: QueueInfo) -> DestinationInfo {
+fn queue_info(q: QueueInfo, requeue_counts: bool) -> DestinationInfo {
+    // Only 3.x lacks the `delivery_limit` field; a broker that reports it is
+    // 4.x, where a requeue doesn't count either way.
+    let counts = requeue_counts && q.queue_type == QueueType::Quorum && q.delivery_limit.is_none();
+    let peek_delivery_limit = counts.then(|| configured_delivery_limit(&q)).flatten();
     DestinationInfo {
+        peek_delivery_limit,
         name: q.name,
         kind: DestKind::Queue,
         messages: q.messages,
@@ -278,6 +481,22 @@ fn queue_info(q: QueueInfo) -> DestinationInfo {
         publish_rate: q.message_stats.publish_rate,
         internal: false,
     }
+}
+
+/// A 3.x quorum queue's delivery limit: its `x-delivery-limit` argument or a
+/// `delivery-limit` policy, the lower one when both are set (as the broker
+/// applies it). 3.x has no default limit. A negative limit means unlimited.
+fn configured_delivery_limit(q: &QueueInfo) -> Option<i64> {
+    let argument = q.arguments.get("x-delivery-limit").and_then(|v| v.as_i64());
+    let policy = q
+        .effective_policy_definition
+        .get("delivery-limit")
+        .and_then(|v| v.as_i64());
+    let limit = match (argument, policy) {
+        (Some(a), Some(p)) => Some(a.min(p)),
+        (a, p) => a.or(p),
+    };
+    limit.filter(|&n| n >= 0)
 }
 
 fn exchange_info(e: ExchangeInfo) -> DestinationInfo {
@@ -293,6 +512,7 @@ fn exchange_info(e: ExchangeInfo) -> DestinationInfo {
         // Published into the exchange by clients (`publish_out` is what it
         // routed on to queues).
         publish_rate: e.message_stats.publish_in_rate,
+        peek_delivery_limit: None,
         internal: e.internal,
     }
 }
@@ -470,7 +690,9 @@ fn build_event(exchange: &str, routing_key: &str, redelivered: bool, data: Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::broker::QueueType;
+
+    /// The body bytes a test connection's peek fetches per message.
+    const PREVIEW: usize = 4096;
 
     fn profile(tls: bool) -> RabbitmqProfile {
         RabbitmqProfile {
@@ -489,14 +711,14 @@ mod tests {
 
     #[test]
     fn url_includes_scheme_encoded_credentials_and_default_vhost() {
-        let conn = RabbitmqConnection::new(profile(false), Some("p@ss/word".into()), None);
+        let conn = RabbitmqConnection::new(profile(false), Some("p@ss/word".into()), None, PREVIEW);
         // The default vhost "/" must be percent-encoded to %2F (not a bare slash,
         // which would select the empty vhost).
         assert_eq!(
             conn.url(),
             "amqp://user:p%40ss%2Fword@rabbit.example.com:5672/%2F"
         );
-        let tls = RabbitmqConnection::new(profile(true), Some("x".into()), None);
+        let tls = RabbitmqConnection::new(profile(true), Some("x".into()), None, PREVIEW);
         assert!(tls.url().starts_with("amqps://"));
         assert!(tls.url().ends_with(":5671/%2F"));
     }
@@ -506,7 +728,7 @@ mod tests {
         let mut p = profile(false);
         p.username = None;
         p.vhost = "my/host".into();
-        let conn = RabbitmqConnection::new(p, None, None);
+        let conn = RabbitmqConnection::new(p, None, None, PREVIEW);
         assert_eq!(conn.url(), "amqp://rabbit.example.com:5672/my%2Fhost");
     }
 
@@ -532,7 +754,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_binding_key_tap_warns_about_non_topic_exchanges() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
         // The catch-all `#` default → advisory that direct exchanges
         // need an explicit key (else the tail is silently empty).
         let notice = conn
@@ -569,6 +791,7 @@ mod tests {
             profile,
             Some("amqp-pw".into()),
             management_password.map(str::to_string),
+            PREVIEW,
         );
         conn.mgmt.run_probe().await;
         assert!(conn.mgmt.probe().is_some(), "{:?}", conn.mgmt.error());
@@ -615,19 +838,28 @@ mod tests {
         stats_disabled: bool,
         replies: Vec<(u16, String)>,
     ) -> (RabbitmqConnection, std::thread::JoinHandle<Vec<String>>) {
+        probed_conn("4.4.0", stats_disabled, replies).await
+    }
+
+    /// [`listing_conn`] for a broker reporting `version`.
+    async fn probed_conn(
+        version: &str,
+        stats_disabled: bool,
+        replies: Vec<(u16, String)>,
+    ) -> (RabbitmqConnection, std::thread::JoinHandle<Vec<String>>) {
         use crate::broker::http::stub::stub_server;
         let mut all = vec![
             (200, fixture!("whoami.administrator.v4")),
             (
                 200,
-                format!(r#"{{"rabbitmq_version":"4.4.0","disable_stats":{stats_disabled}}}"#),
+                format!(r#"{{"rabbitmq_version":"{version}","disable_stats":{stats_disabled}}}"#),
             ),
         ];
         all.extend(replies);
         let (base_url, server) = stub_server(all);
         let mut p = profile(false);
         p.management_url = Some(base_url);
-        let mut conn = RabbitmqConnection::new(p, None, Some("pw".into()));
+        let mut conn = RabbitmqConnection::new(p, None, Some("pw".into()), PREVIEW);
         conn.mgmt.run_probe().await;
         assert!(conn.mgmt.probe().is_some(), "{:?}", conn.mgmt.error());
         (conn, server)
@@ -726,7 +958,7 @@ mod tests {
 
     #[tokio::test]
     async fn listing_before_a_good_probe_fails_fast_and_names_the_url() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
         let err = conn.list_destinations(false).await.unwrap_err();
         assert_eq!(
             format!("{err:#}"),
@@ -746,7 +978,7 @@ mod tests {
         ]);
         let mut p = profile(false);
         p.management_url = Some(base_url);
-        let mut conn = RabbitmqConnection::new(p, None, None);
+        let mut conn = RabbitmqConnection::new(p, None, None, PREVIEW);
         assert!(conn.mgmt.error().is_some(), "not probed yet");
 
         // Without `reprobe` the recorded error comes straight back.
@@ -820,9 +1052,339 @@ mod tests {
         assert_eq!(conn.tail_notice(&tap("spike.direct", "k")).await, None);
     }
 
+    #[tokio::test]
+    async fn only_3x_quorum_queues_with_a_limit_count_peeks_toward_it() {
+        let limits = |list: &DestinationList| -> Vec<(String, Option<i64>)> {
+            list.items
+                .iter()
+                .filter(|d| d.kind == DestKind::Queue)
+                .map(|d| (d.name.clone(), d.peek_delivery_limit))
+                .filter(|(_, limit)| limit.is_some())
+                .collect()
+        };
+
+        // 3.x: a requeue raises `x-delivery-count`, so the queues with a limit
+        // by argument or by policy are marked. The default quorum queue has no
+        // limit on 3.x, and classic queues have none at all.
+        let (mut conn, server) = probed_conn(
+            "3.13.7",
+            false,
+            vec![
+                (200, fixture!("queues.v3")),
+                (200, fixture!("exchanges.v3")),
+            ],
+        )
+        .await;
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        assert_eq!(
+            limits(&list),
+            [
+                ("spike.quorum.limit".to_string(), Some(3)),
+                ("spike.quorum.limit.dlx".to_string(), Some(3)),
+                ("spike.quorum.policy".to_string(), Some(5)),
+                ("spike.quorum.reject".to_string(), Some(3)),
+            ]
+        );
+
+        // 4.x: `ack_requeue_true` raises only `x-acquired-count`, so no peek
+        // counts toward a limit, the default 20 included.
+        let (mut conn, server) = listing_conn(
+            false,
+            vec![
+                (200, fixture!("queues.v4")),
+                (200, fixture!("exchanges.v4")),
+            ],
+        )
+        .await;
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        assert!(limits(&list).is_empty(), "{:?}", limits(&list));
+    }
+
+    #[test]
+    fn a_3x_delivery_limit_is_the_lower_of_argument_and_policy() {
+        let queue = |json: &str| -> QueueInfo { serde_json::from_str(json).unwrap() };
+        let both = queue(
+            r#"{"name":"q","type":"quorum","arguments":{"x-delivery-limit":7},
+                "effective_policy_definition":{"delivery-limit":4}}"#,
+        );
+        assert_eq!(configured_delivery_limit(&both), Some(4));
+        // An Erlang empty proplist (`[]`) and a negative (unlimited) value.
+        let none = queue(
+            r#"{"name":"q","type":"quorum","arguments":{"x-delivery-limit":-1},
+                "effective_policy_definition":[]}"#,
+        );
+        assert_eq!(configured_delivery_limit(&none), None);
+        // A 3.x broker counts it; an unknown version is assumed to.
+        assert_eq!(queue_info(both.clone(), true).peek_delivery_limit, Some(4));
+        assert_eq!(queue_info(both, false).peek_delivery_limit, None);
+    }
+
+    // -- peek ------------------------------------------------------------------
+
+    /// The events a `/get` fixture maps to, peeked from queue `q`.
+    fn peeked(json: &str) -> Vec<BrokerEvent> {
+        let messages: Vec<GetMessage> = serde_json::from_str(json).expect("get reply parses");
+        messages.into_iter().map(|m| peek_event("q", m)).collect()
+    }
+
+    #[test]
+    fn peeked_messages_carry_their_bodies_properties_and_headers() {
+        for json in [fixture!("get.classic.v3"), fixture!("get.classic.v4")] {
+            let events = peeked(&json);
+            assert_eq!(events.len(), 3);
+            let [json_body, binary, plain] = &events[..] else {
+                unreachable!()
+            };
+            for ev in &events {
+                assert_eq!(ev.source, "q", "the source is the queue");
+                assert_eq!(ev.meta("exchange"), Some("(default)"));
+                assert_eq!(ev.meta("routing_key"), Some("spike.classic"));
+                assert_eq!(ev.meta("truncated"), None);
+            }
+
+            // A JSON body with every property and typed headers.
+            assert_eq!(
+                json_body.payload,
+                Payload::Json(
+                    r#"{"order_id":42,"status":"created","items":[{"sku":"A-1","qty":2}],"note":"café"}"#
+                        .into()
+                )
+            );
+            for (key, value) in [
+                ("redelivered", "true"),
+                ("content_type", "application/json"),
+                ("message_id", "msg-0001"),
+                ("correlation_id", "corr-abc"),
+                ("delivery_mode", "2 (persistent)"),
+                ("content_encoding", "utf-8"),
+                ("priority", "5"),
+                ("timestamp", "2025-11-07T07:20:00Z"),
+                ("type", "order.created"),
+                ("app_id", "keyhole-spike"),
+                ("user_id", "keyhole"),
+                ("reply_to", "spike.replies"),
+                ("expiration", "3600000"),
+                // Header values: a string as itself, the rest as compact JSON.
+                ("headers.x-source", "spike"),
+                ("headers.x-attempt", "1"),
+                ("headers.x-flag", "true"),
+                ("headers.x-ratio", "0.5"),
+                ("headers.x-tags", r#"["a","b"]"#),
+                ("headers.x-nested", r#"{"k":"v"}"#),
+            ] {
+                assert_eq!(json_body.meta(key), Some(value), "{key}");
+            }
+
+            // A non-UTF-8 body stays binary.
+            assert_eq!(
+                binary.payload,
+                Payload::Binary(b"\x00\x01\x02\xff\xfe\x80keyhole\xc3(".to_vec())
+            );
+            assert_eq!(binary.meta("delivery_mode"), Some("1 (transient)"));
+            assert_eq!(binary.meta("redelivered"), Some("false"));
+
+            // `properties: []`: only how the message arrived.
+            assert_eq!(
+                plain.payload,
+                Payload::Utf8("plain text body, no properties".into())
+            );
+            let keys: Vec<&str> = plain.meta.iter().map(|(k, _)| k.as_str()).collect();
+            assert_eq!(keys, ["exchange", "routing_key", "redelivered"]);
+        }
+    }
+
+    #[test]
+    fn a_truncated_body_says_how_much_is_shown() {
+        for json in [fixture!("get.truncated.v3"), fixture!("get.truncated.v4")] {
+            let ev = &peeked(&json)[0];
+            // The first 10 of 81 bytes: no longer valid JSON, so plain text.
+            assert_eq!(ev.payload, Payload::Utf8(r#"{"order_id"#.into()));
+            assert_eq!(ev.meta("truncated"), Some("showing 10 of 81 bytes"));
+        }
+
+        // A cut through a multi-byte character drops its first half, so the
+        // body still reads as text: "caf" plus half of "é", of 5 bytes.
+        let cut = peeked(
+            r#"[{"payload":"Y2Fmww==","payload_encoding":"base64","payload_bytes":5,
+                 "redelivered":false,"exchange":"ex","routing_key":"k","properties":[]}]"#,
+        );
+        assert_eq!(cut[0].payload, Payload::Utf8("caf".into()));
+        assert_eq!(cut[0].meta("truncated"), Some("showing 3 of 5 bytes"));
+        assert_eq!(cut[0].meta("exchange"), Some("ex"));
+    }
+
+    #[test]
+    fn dead_lettered_and_requeued_messages_show_their_headers() {
+        for json in [
+            fixture!("get.dead-lettered.v3"),
+            fixture!("get.dead-lettered.v4"),
+        ] {
+            let ev = &peeked(&json)[0];
+            assert_eq!(ev.meta("exchange"), Some("spike.dlx"));
+            assert_eq!(
+                ev.meta("headers.x-first-death-reason"),
+                Some("delivery_limit")
+            );
+            let death = ev.meta("headers.x-death").expect("x-death");
+            let parsed: serde_json::Value = serde_json::from_str(death).expect("compact JSON");
+            assert_eq!(parsed[0]["reason"], "delivery_limit");
+            assert!(!death.contains('\n'), "compact: {death}");
+        }
+        // The count a requeue raises: `x-delivery-count` on 3.x,
+        // `x-acquired-count` on 4.x.
+        let v3 = peeked(&fixture!("get.quorum.requeued.v3"));
+        assert!(v3.iter().all(|e| e.meta("redelivered") == Some("true")));
+        assert_eq!(v3[2].meta("headers.x-delivery-count"), Some("1"));
+        let v4 = peeked(&fixture!("get.quorum.requeued.v4"));
+        assert_eq!(v4[2].meta("headers.x-acquired-count"), Some("1"));
+        assert_eq!(v4[2].meta("headers.x-delivery-count"), None);
+    }
+
+    fn peek_req(spec: SubSpec, mode: PeekMode) -> PeekReq {
+        PeekReq {
+            spec,
+            mode,
+            limit: 200,
+        }
+    }
+
+    fn queue_peek(mode: PeekMode) -> PeekReq {
+        peek_req(SubSpec::Queue("spike.classic".into()), mode)
+    }
+
+    #[tokio::test]
+    async fn each_peek_mode_sends_its_ackmode() {
+        use crate::broker::http::stub::header;
+        for (mode, ackmode) in [
+            (PeekMode::Browse, "ack_requeue_true"),
+            (PeekMode::Destructive, "ack_requeue_false"),
+        ] {
+            let (mut conn, server) =
+                listing_conn(false, vec![(200, fixture!("get.classic.v4"))]).await;
+            let events = conn.peek(queue_peek(mode)).await.expect("peeks");
+            assert_eq!(events.len(), 3);
+            let raw = server.join().unwrap().pop().unwrap();
+            // Every non-alphanumeric byte of the vhost and queue is encoded.
+            assert!(
+                raw.starts_with("POST /api/queues/%2F/spike%2Eclassic/get "),
+                "{raw}"
+            );
+            assert_eq!(header(&raw, "connection"), Some("close"));
+            let body: serde_json::Value =
+                serde_json::from_str(raw.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            // The batch limit, and bodies capped at the preview size.
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "count": 200, "ackmode": ackmode, "encoding": "base64", "truncate": PREVIEW
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn skip_mode_sends_no_request() {
+        // The stub answers only the probe: a `/get` would find it gone.
+        let (mut conn, server) = listing_conn(false, Vec::new()).await;
+        let events = conn.peek(queue_peek(PeekMode::Skip)).await.expect("skips");
+        assert!(events.is_empty());
+        assert_eq!(server.join().unwrap().len(), 2, "only the probe's requests");
+    }
+
+    #[tokio::test]
+    async fn an_empty_queue_peeks_to_nothing() {
+        let (mut conn, server) = listing_conn(false, vec![(200, fixture!("get.empty.v4"))]).await;
+        let events = conn
+            .peek(queue_peek(PeekMode::Browse))
+            .await
+            .expect("peeks");
+        server.join().unwrap();
+        assert!(events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stream_refusal_reads_as_the_stream_hint() {
+        for json in [
+            fixture!("error.400.stream-get.v3"),
+            fixture!("error.400.stream-get.v4"),
+        ] {
+            let (mut conn, server) = listing_conn(false, vec![(400, json)]).await;
+            let err = conn
+                .peek(queue_peek(PeekMode::Browse))
+                .await
+                .expect_err("streams refuse /get");
+            server.join().unwrap();
+            assert_eq!(format!("{err:#}"), STREAM_PEEK_HINT);
+            assert!(
+                conn.mgmt.client().is_ok(),
+                "a refusal leaves the API usable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_peek_gives_the_brokers_reason() {
+        let (mut conn, server) = listing_conn(
+            false,
+            vec![(401, fixture!("error.401.queue-read-refused.v4"))],
+        )
+        .await;
+        let err = conn.peek(queue_peek(PeekMode::Browse)).await.unwrap_err();
+        server.join().unwrap();
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with(
+                "reading queue `spike.classic`: permission denied (HTTP 401): ACCESS_REFUSED"
+            ),
+            "{err}"
+        );
+        assert!(conn.mgmt.client().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_peek_before_a_good_probe_fails_fast_and_an_unreachable_one_is_recorded() {
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let err = conn.peek(queue_peek(PeekMode::Browse)).await.unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "management API unavailable at http://rabbit.example.com:15672: the management \
+             API has not been probed yet"
+        );
+
+        // The API answers the probe, then stops listening.
+        let (mut conn, server) = listing_conn(false, Vec::new()).await;
+        server.join().unwrap();
+        let err = format!(
+            "{:#}",
+            conn.peek(queue_peek(PeekMode::Browse)).await.unwrap_err()
+        );
+        assert!(err.starts_with("management API unavailable at"), "{err}");
+        assert!(err.contains("could not reach the management API"), "{err}");
+        assert!(conn.mgmt.error().is_some(), "later calls fail fast");
+    }
+
+    #[tokio::test]
+    async fn only_a_queue_is_peeked() {
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let exchange = SubSpec::Exchange {
+            exchange: "ex".into(),
+            binding_key: "#".into(),
+        };
+        let err = conn
+            .peek(peek_req(exchange, PeekMode::Browse))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("only a queue holds messages"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn management_client_targets_the_profile_url_and_starts_unprobed() {
-        let conn = RabbitmqConnection::new(profile(true), None, None);
+        let conn = RabbitmqConnection::new(profile(true), None, None, PREVIEW);
         assert_eq!(conn.mgmt.base_url(), "https://rabbit.example.com:15671");
         assert!(conn.mgmt.probe().is_none());
         assert!(
@@ -841,13 +1403,15 @@ mod integration_tests {
     //! sees the host connection arriving from the bridge network. Each test uses
     //! a uniquely-named exchange so the suite is parallel-safe. The management
     //! API is on `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_MGMT_PORT` (default 15673).
-    use super::mgmt::AckMode;
     use super::*;
     use crate::broker::SubSpec;
+
+    /// The body bytes a test connection's peek fetches per message.
+    const PREVIEW: usize = 4096;
     use lapin::options::{
         BasicGetOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueDeclareOptions,
     };
-    use lapin::{BasicProperties, Connection, ConnectionProperties};
+    use lapin::{BasicProperties, Channel, Connection, ConnectionProperties};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::time::timeout;
@@ -904,6 +1468,7 @@ mod integration_tests {
             profile,
             Some("keyhole".to_string()),
             Some(mgmt_password.to_string()),
+            PREVIEW,
         );
         let caps = conn.connect().await.expect("connect to test RabbitMQ");
         assert_eq!(caps.r#type, crate::broker::BrokerType::Rabbitmq);
@@ -1330,6 +1895,200 @@ mod integration_tests {
                 Payload::Utf8("without headers".into()),
             ]
         );
+    }
+
+    /// A throwaway connection and channel for setting up a test's queues.
+    async fn setup_channel() -> (Connection, Channel) {
+        let connection = Connection::connect(url().as_str(), ConnectionProperties::default())
+            .await
+            .unwrap();
+        let channel = connection.create_channel().await.unwrap();
+        (connection, channel)
+    }
+
+    /// Declare `queue` with `args`. Unless it's durable, it expires a minute
+    /// after its last use, so a failed run cleans up too.
+    async fn declare_queue(channel: &Channel, queue: &str, durable: bool, mut args: FieldTable) {
+        if !durable {
+            args.insert("x-expires".into(), lapin::types::AMQPValue::LongInt(60_000));
+        }
+        channel
+            .queue_declare(
+                queue.into(),
+                QueueDeclareOptions {
+                    durable,
+                    ..Default::default()
+                },
+                args,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("declaring {queue}: {e:#}"));
+    }
+
+    /// Peek `queue` in `mode`.
+    async fn peek_queue(
+        conn: &mut RabbitmqConnection,
+        queue: &str,
+        mode: PeekMode,
+    ) -> anyhow::Result<Vec<BrokerEvent>> {
+        conn.peek(PeekReq {
+            spec: SubSpec::Queue(queue.to_string()),
+            mode,
+            limit: 200,
+        })
+        .await
+    }
+
+    /// Drain `queue` over `channel` (auto-ack), waiting for `n` messages:
+    /// each body and whether it was redelivered, in queue order.
+    async fn drain(channel: &Channel, queue: &str, n: usize) -> Vec<(String, bool)> {
+        timeout(Duration::from_secs(5), async {
+            let mut out = Vec::new();
+            while out.len() < n {
+                match channel
+                    .basic_get(queue.into(), BasicGetOptions { no_ack: true })
+                    .await
+                {
+                    Ok(Some(msg)) => out.push((
+                        String::from_utf8(msg.data.clone()).unwrap(),
+                        msg.redelivered,
+                    )),
+                    Ok(None) => tokio::time::sleep(Duration::from_millis(100)).await,
+                    Err(e) => panic!("basic_get on {queue} failed: {e}"),
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{queue} should hold {n} messages"))
+    }
+
+    fn bodies(events: &[BrokerEvent]) -> Vec<String> {
+        events.iter().map(|e| e.payload.as_text()).collect()
+    }
+
+    #[tokio::test]
+    async fn browse_peek_leaves_every_message_on_the_queue_flagged_redelivered() {
+        let queue = unique("keyhole.it.peek");
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        for body in ["first", "second", "third"] {
+            publish("", &queue, body).await;
+        }
+
+        let mut conn = connected().await;
+        let events = peek_queue(&mut conn, &queue, PeekMode::Browse)
+            .await
+            .expect("browse peek");
+        assert_eq!(bodies(&events), ["first", "second", "third"]);
+        for ev in &events {
+            assert_eq!(ev.source, queue);
+            assert_eq!(ev.meta("exchange"), Some("(default)"));
+            assert_eq!(ev.meta("routing_key"), Some(queue.as_str()));
+            assert_eq!(ev.meta("redelivered"), Some("false"));
+        }
+        // A second peek reads the same messages, in order, now flagged.
+        let again = peek_queue(&mut conn, &queue, PeekMode::Browse)
+            .await
+            .expect("second peek");
+        assert_eq!(bodies(&again), ["first", "second", "third"]);
+        assert!(again.iter().all(|e| e.meta("redelivered") == Some("true")));
+
+        // The real queue still holds every message, in order, flagged
+        // redelivered: the peeks took nothing.
+        assert_eq!(
+            drain(&channel, &queue, 3).await,
+            [
+                ("first".to_string(), true),
+                ("second".to_string(), true),
+                ("third".to_string(), true),
+            ]
+        );
+        let rest = channel
+            .basic_get(queue.as_str().into(), BasicGetOptions { no_ack: true })
+            .await
+            .unwrap();
+        assert!(rest.is_none(), "and nothing more");
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn destructive_peek_takes_the_messages_off_the_queue() {
+        let queue = unique("keyhole.it.peekd");
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        publish("", &queue, "one").await;
+        publish("", &queue, "two").await;
+
+        let mut conn = connected().await;
+        let events = peek_queue(&mut conn, &queue, PeekMode::Destructive)
+            .await
+            .expect("destructive peek");
+        assert_eq!(bodies(&events), ["one", "two"]);
+        let empty = peek_queue(&mut conn, &queue, PeekMode::Browse)
+            .await
+            .expect("peek again");
+        assert!(empty.is_empty(), "the destructive peek removed them");
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn peeking_a_stream_queue_explains_why_not() {
+        use lapin::options::QueueDeleteOptions;
+        let queue = unique("keyhole.it.stream");
+        let (setup, channel) = setup_channel().await;
+        let mut args = FieldTable::default();
+        args.insert(
+            "x-queue-type".into(),
+            lapin::types::AMQPValue::LongString("stream".into()),
+        );
+        declare_queue(&channel, &queue, true, args).await;
+
+        let mut conn = connected().await;
+        let err = peek_queue(&mut conn, &queue, PeekMode::Browse).await;
+        channel
+            .queue_delete(queue.as_str().into(), QueueDeleteOptions::default())
+            .await
+            .ok();
+        setup.close(200, "bye".into()).await.ok();
+        let err = err.expect_err("a stream refuses basic.get");
+        assert_eq!(format!("{err:#}"), STREAM_PEEK_HINT);
+    }
+
+    #[tokio::test]
+    async fn the_listing_marks_a_limited_quorum_queue_on_3x_only() {
+        use crate::broker::QueueType;
+        use lapin::options::QueueDeleteOptions;
+        let queue = unique("keyhole.it.quorum");
+        let (setup, channel) = setup_channel().await;
+        let mut args = FieldTable::default();
+        args.insert(
+            "x-queue-type".into(),
+            lapin::types::AMQPValue::LongString("quorum".into()),
+        );
+        args.insert(
+            "x-delivery-limit".into(),
+            lapin::types::AMQPValue::LongInt(3),
+        );
+        declare_queue(&channel, &queue, true, args).await;
+
+        let mut conn = connected().await;
+        let major = conn.mgmt.probe().and_then(mgmt::Probe::major_version);
+        let list = conn.list_destinations(false).await;
+        channel
+            .queue_delete(queue.as_str().into(), QueueDeleteOptions::default())
+            .await
+            .ok();
+        setup.close(200, "bye".into()).await.ok();
+        let list = list.expect("lists");
+        let row = list
+            .items
+            .iter()
+            .find(|d| d.name == queue)
+            .expect("the quorum queue is listed");
+        assert_eq!(row.queue_type, Some(QueueType::Quorum));
+        let expected = if major == Some(3) { Some(3) } else { None };
+        assert_eq!(row.peek_delivery_limit, expected, "RabbitMQ {major:?}");
     }
 
     /// Poll `fetch` on the blocking pool until `done` holds (the stats behind

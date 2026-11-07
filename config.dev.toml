@@ -7,6 +7,8 @@
 # Ports are the docker-compose HOST ports, not Keyhole's 5672 defaults.
 # RabbitMQ tap target (type it in the TUI): exchange:keyhole.demo
 #                                       or  exchange:keyhole.demo/order.*
+# RabbitMQ queues to peek (Enter in the browser): keyhole.demo.orders (classic,
+# bound with order.*) and keyhole.demo.audit (quorum, bound with #).
 
 [[connection]]
 type = "redis"

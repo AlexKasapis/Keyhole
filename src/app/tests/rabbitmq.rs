@@ -378,19 +378,267 @@ async fn rabbitmq_t_on_a_queue_explains_why_not() {
     assert!(app.active_conn().unwrap().subs.is_empty());
 }
 
+fn queue(name: &str) -> SubSpec {
+    SubSpec::Queue(name.into())
+}
+
+/// Deliver a peek reply for connection 1.
+fn peeked(app: &mut App, name: &str, result: Result<Vec<BrokerEvent>, String>) {
+    app.handle_event(AppEvent::Peeked {
+        id: ConnId(1),
+        spec: queue(name),
+        result,
+    });
+}
+
+/// The `Peek` commands among `cmds`, as `(queue, mode)`.
+fn peeks(cmds: &[ConnCommand]) -> Vec<(SubSpec, config::PeekMode)> {
+    cmds.iter()
+        .filter_map(|c| match c {
+            ConnCommand::Peek { spec, mode, .. } => Some((spec.clone(), *mode)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tokio::test]
-async fn rabbitmq_enter_on_a_queue_sends_no_peek() {
+async fn rabbitmq_enter_on_a_queue_peeks_it_in_the_configured_mode() {
+    for mode in [config::PeekMode::Browse, config::PeekMode::Destructive] {
+        let (mut app, _rx, mut cmds) = listed_app();
+        app.config.settings.peek_mode = mode;
+        select_row(&mut app, "orders");
+        app.handle_key(key(KeyCode::Enter));
+        match sent(&mut cmds).as_slice() {
+            [ConnCommand::Peek {
+                spec,
+                mode: sent_mode,
+                limit,
+            }] => {
+                assert_eq!(*spec, queue("orders"));
+                assert_eq!(*sent_mode, mode);
+                assert_eq!(*limit, VALUE_LIMIT);
+            }
+            other => panic!("expected one Peek in {mode:?}, got {other:?}"),
+        }
+        let peek = &app.active_conn().unwrap().peek;
+        assert!(peek.pending);
+        assert_eq!(peek.peeked, Some(queue("orders")));
+    }
+}
+
+#[tokio::test]
+async fn rabbitmq_skip_mode_sends_nothing() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    app.config.settings.peek_mode = config::PeekMode::Skip;
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(sent(&mut cmds).is_empty());
+    let peek = &app.active_conn().unwrap().peek;
+    assert!(!peek.pending && peek.peeked.is_none());
+}
+
+#[tokio::test]
+async fn rabbitmq_cursor_moves_and_list_refreshes_never_peek() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    app.browse_refresh_ticks = 2;
+    // Moving over the queues — keys and mouse wheel — sends nothing.
+    for k in [
+        KeyCode::Down,
+        KeyCode::Down,
+        KeyCode::Up,
+        KeyCode::End,
+        KeyCode::Home,
+    ] {
+        app.handle_key(key(k));
+    }
+    app.handle_mouse(MouseEventKind::ScrollDown);
+    app.handle_mouse(MouseEventKind::ScrollUp);
+    assert!(sent(&mut cmds).is_empty(), "moving the cursor never peeks");
+
+    // Peek `orders`, then let the list refresh around it several times.
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(vec![broker_event("m1")]));
+    assert_eq!(peeks(&sent(&mut cmds)).len(), 1);
+    for _ in 0..3 {
+        app.on_tick();
+        app.on_tick();
+        listed(&mut app, Ok(mock::sample_destinations()));
+    }
+    let after = sent(&mut cmds);
+    assert!(
+        after
+            .iter()
+            .all(|c| matches!(c, ConnCommand::ListDestinations { reprobe: false })),
+        "the refresh clock only lists: {after:?}"
+    );
+    assert_eq!(after.len(), 3);
+    assert_eq!(app.active_conn().unwrap().peek.events.len(), 1, "kept");
+}
+
+#[tokio::test]
+async fn rabbitmq_enter_steps_into_a_peeked_queue_and_peeks_one_that_isnt() {
     let (mut app, _rx, mut cmds) = listed_app();
     select_row(&mut app, "orders");
     app.handle_key(key(KeyCode::Enter));
-    app.handle_key(key(KeyCode::Down));
-    app.handle_key(key(KeyCode::Enter));
-    assert!(
-        sent(&mut cmds).is_empty(),
-        "RabbitMQ queues aren't peeked: the broker couldn't answer a Peek"
+    peeked(
+        &mut app,
+        "orders",
+        Ok(vec![broker_event("a"), broker_event("b")]),
     );
-    assert!(app.status.is_none());
-    assert!(!app.active_conn().unwrap().peek.pending);
+    sent(&mut cmds);
+
+    // Enter again steps into its messages instead of reading them again.
+    app.handle_key(key(KeyCode::Enter));
+    assert!(sent(&mut cmds).is_empty());
+    assert!(app.active_conn().unwrap().peek.focused);
+    app.handle_key(ctrl_key(KeyCode::Left));
+
+    // On another queue, the inspector still holds `orders`: Ctrl-→ has
+    // nothing to step into, and Enter peeks this one.
+    select_row(&mut app, "payments");
+    assert!(!app.active_conn().unwrap().peek_is_selected());
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert!(!app.active_conn().unwrap().peek.focused);
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        peeks(&sent(&mut cmds)),
+        [(queue("payments"), config::PeekMode::Browse)]
+    );
+    peeked(&mut app, "payments", Ok(vec![broker_event("p")]));
+
+    // Back on `orders`, Enter reads it again: the second peek.
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        peeks(&sent(&mut cmds)),
+        [(queue("orders"), config::PeekMode::Browse)]
+    );
+}
+
+#[tokio::test]
+async fn rabbitmq_scrolling_off_the_peeked_queue_returns_the_keyboard_to_the_list() {
+    let (mut app, _rx, _cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(vec![broker_event("a")]));
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert!(app.active_conn().unwrap().peek.focused);
+    // The wheel moves the destination cursor even from the message list.
+    app.handle_mouse(MouseEventKind::ScrollDown);
+    assert!(!app.active_conn().unwrap().peek.focused);
+}
+
+#[tokio::test]
+async fn rabbitmq_an_empty_or_failed_peek_is_retried_with_enter() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(Vec::new()));
+    app.handle_key(key(KeyCode::Enter));
+    peeked(
+        &mut app,
+        "orders",
+        Err("reading queue `orders`: boom".into()),
+    );
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(peeks(&sent(&mut cmds)).len(), 3);
+}
+
+#[tokio::test]
+async fn rabbitmq_peek_error_is_kept_for_the_pane() {
+    let (mut app, _rx, _cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(
+        &mut app,
+        "orders",
+        Err("reading queue `orders`: permission denied (HTTP 401): ACCESS_REFUSED".into()),
+    );
+    let peek = &app.active_conn().unwrap().peek;
+    assert!(!peek.pending, "no longer peeking");
+    assert!(peek.events.is_empty());
+    assert!(peek.error.as_deref().unwrap().contains("ACCESS_REFUSED"));
+    assert!(app.status.as_ref().unwrap().is_error);
+
+    // A later successful peek clears it.
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(vec![broker_event("m")]));
+    assert_eq!(app.active_conn().unwrap().peek.error, None);
+}
+
+#[tokio::test]
+async fn rabbitmq_a_reply_for_a_queue_no_longer_peeked_is_dropped() {
+    let (mut app, _rx, _cmds) = listed_app();
+    select_row(&mut app, "orders");
+    app.handle_key(key(KeyCode::Enter));
+    select_row(&mut app, "payments");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "orders", Ok(vec![broker_event("late")]));
+    let peek = &app.active_conn().unwrap().peek;
+    assert!(peek.pending, "still waiting for payments");
+    assert!(peek.events.is_empty());
+}
+
+#[tokio::test]
+async fn rabbitmq_stream_queue_is_not_peeked() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "audit");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(sent(&mut cmds).is_empty(), "a stream refuses basic.get");
+    let status = app.status.as_ref().expect("status set");
+    assert_eq!(status.message, "can't peek a stream queue");
+    let peek = &app.active_conn().unwrap().peek;
+    assert!(!peek.pending && peek.peeked.is_none());
+}
+
+#[tokio::test]
+async fn rabbitmq_browse_peek_of_a_limited_quorum_queue_records_the_limit() {
+    let mut list = mock::sample_destinations();
+    let payments = list
+        .items
+        .iter_mut()
+        .find(|d| d.name == "payments")
+        .unwrap();
+    payments.peek_delivery_limit = Some(5);
+    for (mode, expect) in [
+        (config::PeekMode::Browse, Some(5)),
+        // A destructive read doesn't requeue, so nothing counts.
+        (config::PeekMode::Destructive, None),
+    ] {
+        let (mut app, _rx, _cmds) = listed_app();
+        listed(&mut app, Ok(list.clone()));
+        app.config.settings.peek_mode = mode;
+        select_row(&mut app, "payments");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.active_conn().unwrap().peek.requeue_limit,
+            expect,
+            "{mode:?}"
+        );
+        // A queue without a limit warns of none.
+        select_row(&mut app, "orders");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.active_conn().unwrap().peek.requeue_limit, None);
+    }
+}
+
+#[tokio::test]
+async fn rabbitmq_a_refresh_that_drops_the_peeked_queue_leaves_its_messages() {
+    let (mut app, _rx, mut cmds) = listed_app();
+    select_row(&mut app, "payments");
+    app.handle_key(key(KeyCode::Enter));
+    peeked(&mut app, "payments", Ok(vec![broker_event("p")]));
+    app.handle_key(ctrl_key(KeyCode::Right));
+    assert!(app.active_conn().unwrap().peek.focused);
+    sent(&mut cmds);
+
+    let mut list = mock::sample_destinations();
+    list.items.retain(|d| d.name != "payments");
+    listed(&mut app, Ok(list));
+    let conn = app.active_conn().unwrap();
+    assert!(!conn.peek.focused, "the keyboard returns to the list");
+    assert!(sent(&mut cmds).is_empty(), "nothing is peeked in its place");
 }
 
 #[tokio::test]

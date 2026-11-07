@@ -188,10 +188,11 @@ impl Capabilities {
         matches!(self.r#type, BrokerType::Redis | BrokerType::Rabbitmq)
     }
 
-    /// Whether selecting a queue in the destination browser peeks its messages.
-    /// AMQP 1.0 browses them; RabbitMQ lists its queues without peeking them.
+    /// Whether opening a queue in the destination browser peeks its messages:
+    /// AMQP 1.0 browses them over a `copy` link, RabbitMQ reads them through its
+    /// management API (see [`BrokerConnection::peek`]).
     pub fn peeks_queues(&self) -> bool {
-        matches!(self.r#type, BrokerType::Amqp)
+        matches!(self.r#type, BrokerType::Amqp | BrokerType::Rabbitmq)
     }
 
     /// Whether the Browser body is a destination list (AMQP 1.0, RabbitMQ) rather
@@ -333,9 +334,10 @@ pub struct InspectReq {
     pub limit: usize,
 }
 
-/// A request to peek the current messages sitting in a destination (AMQP). The
-/// [`mode`](crate::config::PeekMode) decides whether the read is non-destructive
-/// (browse), skipped, or consumes the messages (destructive).
+/// A request to peek the current messages sitting in a queue (AMQP 1.0 or
+/// RabbitMQ). The [`mode`](crate::config::PeekMode) decides whether the read
+/// leaves the messages in the queue (browse), is skipped, or consumes them
+/// (destructive).
 #[derive(Debug, Clone)]
 pub struct PeekReq {
     /// The destination to peek. Only a queue is peekable; a topic does not retain
@@ -406,6 +408,12 @@ impl From<String> for QueueType {
         }
     }
 }
+
+/// Why a RabbitMQ stream queue isn't peeked, and what to do instead. A peek
+/// reads through `basic.get`, which streams don't support (the broker answers
+/// `540 basic.get not supported by stream queues`).
+pub const STREAM_PEEK_HINT: &str = "Stream queues can't be peeked: RabbitMQ doesn't \
+    support basic.get on a stream. To watch its messages, tap an exchange that routes to it.";
 
 impl QueueType {
     /// The destination list's Kind label. A classic queue is plain `queue`.
@@ -483,6 +491,12 @@ pub struct DestinationInfo {
     pub exchange_type: Option<ExchangeType>,
     /// Messages published per second, into a queue or into an exchange.
     pub publish_rate: Option<f64>,
+    /// The `delivery-limit` that a browse peek of this queue counts toward:
+    /// set only for a RabbitMQ 3.x quorum queue with a limit (by argument or
+    /// policy), where each requeue raises `x-delivery-count` and a message
+    /// past the limit is dropped or dead-lettered. A 4.x requeue raises only
+    /// `x-acquired-count`, so it never reaches the limit and this is `None`.
+    pub peek_delivery_limit: Option<i64>,
     /// An internal exchange (e.g. `amq.rabbitmq.trace`). Clients can't publish
     /// to it, but a tap can still bind to it.
     pub internal: bool,
@@ -889,11 +903,12 @@ pub trait BrokerConnection: Send {
         anyhow::bail!("this broker does not support a stats dashboard")
     }
 
-    /// Peek a bounded batch of the messages currently sitting in a destination
-    /// (AMQP queue), returning them as [`BrokerEvent`]s so they render like a
-    /// tail. The read is non-destructive, skipped, or destructive per
-    /// [`PeekReq::mode`]. Default: unsupported (only issued for a queue selected
-    /// in the destination browser, so a broker that lists none never gets one).
+    /// Peek a bounded batch of the messages currently sitting in a queue (AMQP
+    /// 1.0 or RabbitMQ), returning them as [`BrokerEvent`]s so they render like
+    /// a tail. The read leaves the messages in the queue, is skipped, or
+    /// consumes them per [`PeekReq::mode`]. Only issued when the user opens a
+    /// queue in the destination browser ([`Capabilities::peeks_queues`]).
+    /// Default: unsupported.
     async fn peek(&mut self, _req: PeekReq) -> anyhow::Result<Vec<BrokerEvent>> {
         anyhow::bail!("this broker does not support peeking messages")
     }
@@ -1149,9 +1164,9 @@ mod tests {
         assert!(!r.has_destinations() && !r.curates_destinations());
 
         // The broker-supplied lists refresh themselves; AMQP's curated one
-        // doesn't. Only AMQP 1.0 peeks queues.
+        // doesn't. Both destination browsers peek queues; Redis has none.
         assert!(r.auto_refresh() && rmq.auto_refresh() && !a.auto_refresh());
-        assert!(a.peeks_queues() && !rmq.peeks_queues() && !r.peeks_queues());
+        assert!(a.peeks_queues() && rmq.peeks_queues() && !r.peeks_queues());
     }
 
     #[test]
