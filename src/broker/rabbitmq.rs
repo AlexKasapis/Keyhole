@@ -23,17 +23,19 @@
 //! ([`mgmt`]), which `connect` probes after the AMQP login. A failed probe leaves
 //! the connection usable for tails.
 
-// The app consumes the client from the browser phases on (listing, peek, stats,
-// rosters); until then only the probe runs outside tests. `expect` fails the
-// build once everything is used, so this can't outlive its reason.
+// The browser lists queues and exchanges through the client; peek, stats and
+// the connection/consumer rosters use the rest of it in later phases. `expect`
+// fails the build once everything is used, so this can't outlive its reason.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the browser doesn't call the management client yet"
+        reason = "peek, stats and rosters don't call the management client yet"
     )
 )]
 mod mgmt;
+
+use std::collections::HashMap;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -48,8 +50,11 @@ use lapin::options::{
 use lapin::types::FieldTable;
 use lapin::{Channel, Connection, ConnectionProperties, Consumer, ExchangeKind};
 
-use self::mgmt::{Management, MgmtClient};
-use super::{BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, Payload, SubSpec};
+use self::mgmt::{ApiError, ExchangeInfo, Management, MgmtClient, QueueInfo};
+use super::{
+    BrokerConnection, BrokerEvent, BrokerEventStream, Capabilities, DestKind, DestinationInfo,
+    DestinationList, ExchangeType, Payload, SubSpec,
+};
 use crate::config::RabbitmqProfile;
 
 /// The username and password lapin logs in with when the AMQP URL has none (the
@@ -66,6 +71,9 @@ pub struct RabbitmqConnection {
     /// The HTTP management API and what its last probe found (tags, version,
     /// or the `mgmt_error` that disables it).
     mgmt: Management,
+    /// Each exchange's type from the last listing, so a tap's advisory can
+    /// tell whether the default `#` binding key fits the exchange.
+    exchange_types: HashMap<String, ExchangeType>,
 }
 
 impl RabbitmqConnection {
@@ -83,6 +91,7 @@ impl RabbitmqConnection {
             password,
             conn: None,
             mgmt,
+            exchange_types: HashMap::new(),
         }
     }
 
@@ -156,22 +165,139 @@ impl BrokerConnection for RabbitmqConnection {
         open_exchange_tap(&self.url(), self.conn_props(), exchange, binding_key).await
     }
 
+    async fn list_destinations(&mut self, reprobe: bool) -> anyhow::Result<DestinationList> {
+        if reprobe && self.mgmt.error().is_some() {
+            self.mgmt.run_probe().await;
+        }
+        let base_url = self.mgmt.base_url().to_string();
+        let unavailable = || format!("management API unavailable at {base_url}");
+        // A failed probe answers here without touching the network.
+        let client = self.mgmt.client().with_context(unavailable)?.clone();
+        let stats_disabled = self.mgmt.probe().is_some_and(|p| p.stats_disabled);
+        let fetched = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+            Ok((client.queues()?, client.exchanges()?))
+        })
+        .await
+        .context("the listing task failed")?;
+        let (queues, exchanges) = match fetched {
+            Ok(lists) => lists,
+            Err(e) => {
+                // A refusal (an HTTP error reply) is cheap to repeat; a call that
+                // got no reply would cost the timeouts again on every refresh.
+                if e.downcast_ref::<ApiError>().is_none() {
+                    self.mgmt.mark_unreachable(&e);
+                }
+                return Err(e.context(unavailable()));
+            }
+        };
+        let list = destination_list(queues, exchanges, stats_disabled);
+        self.exchange_types = list
+            .items
+            .iter()
+            .filter_map(|d| Some((d.name.clone(), d.exchange_type.clone()?)))
+            .collect();
+        Ok(list)
+    }
+
     async fn tail_notice(&mut self, spec: &SubSpec) -> Option<String> {
         // The default `#` binding key matches every routing key on a *topic*
-        // exchange and is ignored by a *fanout* exchange, but on a *direct* or
-        // *headers* exchange it matches nothing — so the tap would attach
-        // successfully yet stay permanently silent. AMQP 0.9.1 can't report an
-        // exchange's type without redeclaring it, so flag the ambiguity whenever
-        // the catch-all default is in use (mirroring the Redis keyspace notice).
-        match spec {
-            SubSpec::Exchange { binding_key, .. } if binding_key == "#" => Some(
-                "binding key `#` matches all keys on a topic/fanout exchange, but \
-                 nothing on a direct/headers exchange — give an explicit key \
-                 (exchange:name/key) if this tail stays silent"
+        // exchange and is ignored by a *fanout* exchange, but a *direct* exchange
+        // matches it only against the literal key `#` — so the tap could attach
+        // yet stay silent. A *headers* exchange ignores the key too, and a
+        // binding without header arguments matches every message, so the tap
+        // gets everything (checked on 3.13). The last listing knows each
+        // exchange's type; without it (no management API, or an exchange it
+        // hasn't listed) flag the ambiguity whenever the catch-all default is
+        // in use (mirroring the Redis keyspace notice).
+        let SubSpec::Exchange {
+            exchange,
+            binding_key,
+        } = spec
+        else {
+            return None;
+        };
+        if binding_key != "#" {
+            return None;
+        }
+        match self.exchange_types.get(exchange) {
+            Some(ExchangeType::Topic | ExchangeType::Fanout) => None,
+            Some(ExchangeType::Direct) => Some(format!(
+                "`{exchange}` is a direct exchange: binding key `#` only matches messages \
+                 routed with the key `#` — tap exchange:{exchange}/<routing-key> instead"
+            )),
+            Some(ExchangeType::Headers) => Some(format!(
+                "`{exchange}` is a headers exchange: a tap can't filter on headers, so it \
+                 gets every message"
+            )),
+            Some(ExchangeType::Other(_)) | None => Some(
+                "binding key `#` matches every key on a topic exchange and is ignored by \
+                 fanout and headers exchanges, but on a direct exchange it matches only the \
+                 key `#` — give an explicit key (exchange:name/key) if this tail stays \
+                 silent"
                     .to_string(),
             ),
-            _ => None,
         }
+    }
+}
+
+/// The destination list from the management API's queue and exchange
+/// listings: queues first, then exchanges, each in the API's name order. The
+/// default exchange (`""`) is left out: it can't be bound, so it can't be
+/// tapped.
+fn destination_list(
+    queues: mgmt::Listing<QueueInfo>,
+    exchanges: mgmt::Listing<ExchangeInfo>,
+    stats_disabled: bool,
+) -> DestinationList {
+    let truncated = queues.truncated || exchanges.truncated;
+    let items = queues
+        .items
+        .into_iter()
+        .map(queue_info)
+        .chain(
+            exchanges
+                .items
+                .into_iter()
+                .filter(|e| !e.name.is_empty())
+                .map(exchange_info),
+        )
+        .collect();
+    DestinationList {
+        items,
+        truncated,
+        stats_disabled,
+    }
+}
+
+fn queue_info(q: QueueInfo) -> DestinationInfo {
+    DestinationInfo {
+        name: q.name,
+        kind: DestKind::Queue,
+        messages: q.messages,
+        ready: q.messages_ready,
+        unacked: q.messages_unacknowledged,
+        consumers: q.consumers,
+        queue_type: Some(q.queue_type),
+        exchange_type: None,
+        publish_rate: q.message_stats.publish_rate,
+        internal: false,
+    }
+}
+
+fn exchange_info(e: ExchangeInfo) -> DestinationInfo {
+    DestinationInfo {
+        name: e.name,
+        kind: DestKind::Exchange,
+        messages: None,
+        ready: None,
+        unacked: None,
+        consumers: None,
+        queue_type: None,
+        exchange_type: Some(ExchangeType::from(e.exchange_type)),
+        // Published into the exchange by clients (`publish_out` is what it
+        // routed on to queues).
+        publish_rate: e.message_stats.publish_in_rate,
+        internal: e.internal,
     }
 }
 
@@ -348,6 +474,7 @@ fn build_event(exchange: &str, routing_key: &str, redelivered: bool, data: Vec<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::QueueType;
 
     fn profile(tls: bool) -> RabbitmqProfile {
         RabbitmqProfile {
@@ -410,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn default_binding_key_tap_warns_about_non_topic_exchanges() {
         let mut conn = RabbitmqConnection::new(profile(false), None, None);
-        // The catch-all `#` default → advisory that direct/headers exchanges
+        // The catch-all `#` default → advisory that direct exchanges
         // need an explicit key (else the tail is silently empty).
         let notice = conn
             .tail_notice(&SubSpec::Exchange {
@@ -419,7 +546,7 @@ mod tests {
             })
             .await
             .expect("default `#` key should produce a notice");
-        assert!(notice.contains("direct/headers"));
+        assert!(notice.contains("direct exchange"), "{notice}");
         // An explicit binding key → the user chose it, so no advisory.
         let none = conn
             .tail_notice(&SubSpec::Exchange {
@@ -476,6 +603,225 @@ mod tests {
             management_login(anon, None).await,
             basic_auth("guest", Some("guest"))
         );
+    }
+
+    /// A Phase 0 fixture from `rabbitmq/testdata/` (real broker replies).
+    macro_rules! fixture {
+        ($name:literal) => {
+            include_str!(concat!("rabbitmq/testdata/", $name, ".json")).to_string()
+        };
+    }
+
+    /// A connection whose management API is a stub answering `replies` in
+    /// order, after the probe's two (`stats_disabled` as the overview says).
+    /// The join handle yields the raw requests.
+    async fn listing_conn(
+        stats_disabled: bool,
+        replies: Vec<(u16, String)>,
+    ) -> (RabbitmqConnection, std::thread::JoinHandle<Vec<String>>) {
+        use crate::broker::http::stub::stub_server;
+        let mut all = vec![
+            (200, fixture!("whoami.administrator.v4")),
+            (
+                200,
+                format!(r#"{{"rabbitmq_version":"4.4.0","disable_stats":{stats_disabled}}}"#),
+            ),
+        ];
+        all.extend(replies);
+        let (base_url, server) = stub_server(all);
+        let mut p = profile(false);
+        p.management_url = Some(base_url);
+        let mut conn = RabbitmqConnection::new(p, None, Some("pw".into()));
+        conn.mgmt.run_probe().await;
+        assert!(conn.mgmt.probe().is_some(), "{:?}", conn.mgmt.error());
+        (conn, server)
+    }
+
+    fn find<'a>(list: &'a DestinationList, name: &str, kind: DestKind) -> &'a DestinationInfo {
+        list.items
+            .iter()
+            .find(|d| d.name == name && d.kind == kind)
+            .unwrap_or_else(|| panic!("{name} listed"))
+    }
+
+    #[tokio::test]
+    async fn lists_queues_then_exchanges_without_the_default_exchange() {
+        let (mut conn, server) = listing_conn(
+            false,
+            vec![
+                (200, fixture!("queues.v4")),
+                (200, fixture!("exchanges.v4")),
+            ],
+        )
+        .await;
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+
+        // 17 queues, then the 13 exchanges less the default one.
+        assert_eq!(list.items.len(), 17 + 12);
+        assert!(!list.truncated && !list.stats_disabled);
+        let first_exchange = list
+            .items
+            .iter()
+            .position(|d| d.kind == DestKind::Exchange)
+            .unwrap();
+        assert_eq!(first_exchange, 17, "queues come first");
+        assert!(list.items[first_exchange..]
+            .iter()
+            .all(|d| d.kind == DestKind::Exchange));
+        assert!(
+            list.items.iter().all(|d| !d.name.is_empty()),
+            "the default exchange can't be bound, so it isn't listed"
+        );
+
+        let busy = find(&list, "spike.consumed", DestKind::Queue);
+        assert_eq!(busy.queue_type, Some(QueueType::Classic));
+        assert_eq!(busy.exchange_type, None);
+        assert_eq!(
+            (busy.messages, busy.ready, busy.unacked, busy.consumers),
+            (Some(1895), Some(1875), Some(20), Some(2))
+        );
+        assert_eq!(busy.publish_rate, Some(9.8));
+        // `type` decides the kind (4.x puts `x-queue-type` in every queue's
+        // arguments).
+        let quorum = find(&list, "spike.quorum", DestKind::Queue);
+        assert_eq!(quorum.queue_type, Some(QueueType::Quorum));
+        let stream = find(&list, "spike.stream", DestKind::Queue);
+        assert_eq!(stream.queue_type, Some(QueueType::Stream));
+
+        let topic = find(&list, "spike.topic", DestKind::Exchange);
+        assert_eq!(topic.exchange_type, Some(ExchangeType::Topic));
+        assert_eq!(topic.publish_rate, Some(9.8), "publish_in, not publish_out");
+        assert_eq!(topic.messages, None);
+        let headers = find(&list, "amq.headers", DestKind::Exchange);
+        assert_eq!(headers.exchange_type, Some(ExchangeType::Headers));
+        // `amq.*` stays, internal ones marked.
+        let trace = find(&list, "amq.rabbitmq.trace", DestKind::Exchange);
+        assert!(trace.internal);
+        assert!(!find(&list, "amq.topic", DestKind::Exchange).internal);
+    }
+
+    #[tokio::test]
+    async fn lists_with_metrics_disabled_carry_no_counts_or_rates() {
+        let (mut conn, server) = listing_conn(
+            true,
+            vec![
+                (200, fixture!("queues.no-metrics.v4")),
+                (200, fixture!("exchanges.no-metrics.v4")),
+            ],
+        )
+        .await;
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        assert!(list.stats_disabled, "the probe's overview said why");
+        assert_eq!(list.items.len(), 17 + 12);
+        for d in &list.items {
+            assert_eq!(
+                (d.messages, d.ready, d.unacked, d.consumers, d.publish_rate),
+                (None, None, None, None, None),
+                "{}",
+                d.name
+            );
+        }
+        // The kinds still come through.
+        let stream = find(&list, "spike.stream", DestKind::Queue);
+        assert_eq!(stream.queue_type, Some(QueueType::Stream));
+    }
+
+    #[tokio::test]
+    async fn listing_before_a_good_probe_fails_fast_and_names_the_url() {
+        let mut conn = RabbitmqConnection::new(profile(false), None, None);
+        let err = conn.list_destinations(false).await.unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "management API unavailable at http://rabbit.example.com:15672: the management \
+             API has not been probed yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refresh_reprobes_a_failed_api_and_the_periodic_one_does_not() {
+        use crate::broker::http::stub::stub_server;
+        let (base_url, server) = stub_server(vec![
+            (200, fixture!("whoami.administrator.v3")),
+            (200, r#"{"rabbitmq_version":"3.13.7"}"#.to_string()),
+            (200, fixture!("queues.empty-vhost.v4")),
+            (200, fixture!("queues.empty-vhost.v4")),
+        ]);
+        let mut p = profile(false);
+        p.management_url = Some(base_url);
+        let mut conn = RabbitmqConnection::new(p, None, None);
+        assert!(conn.mgmt.error().is_some(), "not probed yet");
+
+        // Without `reprobe` the recorded error comes straight back.
+        conn.list_destinations(false).await.unwrap_err();
+        assert!(conn.mgmt.error().is_some());
+        // With it, the API is probed again and then listed.
+        let list = conn.list_destinations(true).await.expect("lists");
+        assert!(list.items.is_empty() && !list.truncated);
+        assert_eq!(server.join().unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn an_api_that_stops_answering_fails_fast_until_a_reprobe() {
+        // The stub answers the probe, then stops listening.
+        let (mut conn, server) = listing_conn(false, Vec::new()).await;
+        server.join().unwrap();
+        let err = format!("{:#}", conn.list_destinations(false).await.unwrap_err());
+        assert!(err.contains("could not reach the management API"), "{err}");
+        assert!(
+            conn.mgmt.error().is_some(),
+            "the next listing won't wait on the timeouts again"
+        );
+        let again = format!("{:#}", conn.list_destinations(false).await.unwrap_err());
+        assert!(
+            again.starts_with("management API unavailable at"),
+            "{again}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_listing_keeps_the_api_usable() {
+        let (mut conn, server) =
+            listing_conn(false, vec![(401, fixture!("error.401.vhost-access.v3"))]).await;
+        let err = format!("{:#}", conn.list_destinations(false).await.unwrap_err());
+        server.join().unwrap();
+        assert!(err.contains("no permissions on vhost"), "{err}");
+        assert!(conn.mgmt.client().is_ok(), "a refusal is cheap to retry");
+    }
+
+    #[tokio::test]
+    async fn tap_notice_follows_the_listed_exchange_type() {
+        let (mut conn, server) = listing_conn(
+            false,
+            vec![
+                (200, fixture!("queues.v4")),
+                (200, fixture!("exchanges.v4")),
+            ],
+        )
+        .await;
+        conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        let tap = |name: &str, key: &str| SubSpec::Exchange {
+            exchange: name.into(),
+            binding_key: key.into(),
+        };
+        // `#` fits a topic or fanout exchange.
+        assert_eq!(conn.tail_notice(&tap("spike.topic", "#")).await, None);
+        assert_eq!(conn.tail_notice(&tap("spike.fanout", "#")).await, None);
+        // A known direct or headers exchange gets a specific advisory.
+        let direct = conn.tail_notice(&tap("spike.direct", "#")).await.unwrap();
+        assert!(direct.contains("direct exchange"), "{direct}");
+        let headers = conn.tail_notice(&tap("spike.headers", "#")).await.unwrap();
+        assert!(headers.contains("gets every message"), "{headers}");
+        // An exchange the listing didn't include: the type is unknown.
+        let unknown = conn.tail_notice(&tap("elsewhere", "#")).await.unwrap();
+        assert!(
+            unknown.contains("direct exchange it matches only"),
+            "{unknown}"
+        );
+        // An explicit key is the user's choice: no advisory.
+        assert_eq!(conn.tail_notice(&tap("spike.direct", "k")).await, None);
     }
 
     #[test]
@@ -822,6 +1168,97 @@ mod integration_tests {
         assert!(error.contains("management_password"), "{error}");
     }
 
+    #[tokio::test]
+    async fn list_destinations_lists_a_real_queue_and_the_exchanges() {
+        use crate::broker::QueueType;
+        use lapin::options::QueueDeleteOptions;
+
+        // A uniquely named queue holding one message. It expires a minute after
+        // its last use, so a failed run cleans up too.
+        let queue = unique("keyhole.it.listed");
+        let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
+            .await
+            .unwrap();
+        let channel = setup.create_channel().await.unwrap();
+        let mut args = FieldTable::default();
+        args.insert("x-expires".into(), lapin::types::AMQPValue::LongInt(60_000));
+        channel
+            .queue_declare(queue.as_str().into(), QueueDeclareOptions::default(), args)
+            .await
+            .unwrap();
+        publish("", &queue, "count me").await;
+
+        let mut conn = connected().await;
+        // The count lands with the broker's next stats emission (every 5 s).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let list = loop {
+            let list = conn.list_destinations(false).await.expect("lists");
+            let counted = list
+                .items
+                .iter()
+                .any(|d| d.name == queue && d.messages == Some(1));
+            if counted || tokio::time::Instant::now() > deadline {
+                break list;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        };
+        assert!(!list.stats_disabled);
+        let row = list
+            .items
+            .iter()
+            .find(|d| d.name == queue)
+            .expect("the new queue is listed");
+        assert_eq!(row.kind, DestKind::Queue);
+        assert_eq!(row.queue_type, Some(QueueType::Classic));
+        assert_eq!((row.messages, row.ready), (Some(1), Some(1)));
+
+        // Queues come first, then the exchanges — `amq.*` included, the
+        // default `""` left out.
+        let first_exchange = list
+            .items
+            .iter()
+            .position(|d| d.kind == DestKind::Exchange)
+            .expect("exchanges are listed");
+        assert!(list.items[..first_exchange]
+            .iter()
+            .all(|d| d.kind == DestKind::Queue));
+        let exchange_type = |name: &str| {
+            list.items
+                .iter()
+                .find(|d| d.kind == DestKind::Exchange && d.name == name)
+                .and_then(|d| d.exchange_type.clone())
+        };
+        assert_eq!(exchange_type("amq.topic"), Some(ExchangeType::Topic));
+        assert_eq!(exchange_type("amq.direct"), Some(ExchangeType::Direct));
+        assert_eq!(exchange_type("amq.fanout"), Some(ExchangeType::Fanout));
+        assert_eq!(exchange_type("amq.headers"), Some(ExchangeType::Headers));
+        assert!(list.items.iter().all(|d| !d.name.is_empty()));
+
+        // Deleted on the server, it drops out of the next listing.
+        channel
+            .queue_delete(queue.as_str().into(), QueueDeleteOptions::default())
+            .await
+            .unwrap();
+        let list = conn.list_destinations(false).await.expect("lists again");
+        assert!(list.items.iter().all(|d| d.name != queue));
+        setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn an_internal_exchange_can_be_tapped() {
+        // Clients can't publish to an internal exchange, but a tap only binds
+        // a queue to it. The firehose tracer is off, so nothing arrives; the
+        // tap just has to attach.
+        let mut conn = connected().await;
+        let tap = conn
+            .subscribe(SubSpec::Exchange {
+                exchange: "amq.rabbitmq.trace".into(),
+                binding_key: "#".into(),
+            })
+            .await;
+        assert!(tap.is_ok(), "{:#}", tap.err().unwrap());
+    }
+
     /// Poll `fetch` on the blocking pool until `done` holds (the stats behind
     /// connection and consumer lists land a moment after the event).
     async fn eventually<T: Send + 'static>(
@@ -872,7 +1309,7 @@ mod integration_tests {
             .iter()
             .find(|q| q.name == queue)
             .expect("the new queue is listed");
-        assert_eq!(row.queue_type, mgmt::QueueType::Classic);
+        assert_eq!(row.queue_type, crate::broker::QueueType::Classic);
 
         // A requeueing get reads the message and puts it back, flagged.
         for redelivered in [false, true] {

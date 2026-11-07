@@ -43,3 +43,6 @@ username = "keyhole"
 # A secret spec, not a literal: export KEYHOLE_DEV_RABBITMQ_PASSWORD=keyhole
 # (the `just dev` recipe sets it for the publisher inline).
 password = "env:KEYHOLE_DEV_RABBITMQ_PASSWORD"
+# The management API (queue/exchange list) logs in with the same user. Compose
+# maps it to host port 15673, not the derived default :15672.
+management_url = "http://127.0.0.1:15673"

@@ -18,10 +18,13 @@ mod settings;
 
 pub use state::{
     ConfirmState, ConnForm, ConnHealth, Connection, Console, ConsoleEntry, DestKind, Destination,
-    InputMode, PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState, RecordingFile,
-    RecordingsFocus, ScanPhase, ScanStep, Screen, SettingsRow, SettingsState, Status, StatusKind,
-    SubState, Subscription, ViewRow,
+    InputMode, Listing, PaletteCommand, PaletteState, PaneFocus, PanelTab, RecordState,
+    RecordingFile, RecordingsFocus, ScanStep, Screen, SettingsRow, SettingsState, Status,
+    StatusKind, SubState, Subscription, ViewRow,
 };
+// Only the tests inspect a scan's phase from outside `state`.
+#[cfg(test)]
+pub use state::ScanPhase;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -37,8 +40,8 @@ use crate::app::action::Action;
 use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle, SpawnParams};
 use crate::broker::factory::connection_for;
 use crate::broker::{
-    BrokerEvent, BrokerType, BrowsePage, Capabilities, ConnId, InspectReq, ServerStats, SubSpec,
-    ValueType, ValueView,
+    BrokerEvent, BrokerType, BrowsePage, Capabilities, ConnId, DestinationList, ExchangeType,
+    InspectReq, ServerStats, SubSpec, ValueType, ValueView,
 };
 use crate::config::{self, AmqpProfile, Config, ConnectionConfig, RabbitmqProfile, RedisProfile};
 use crate::event::AppEvent;

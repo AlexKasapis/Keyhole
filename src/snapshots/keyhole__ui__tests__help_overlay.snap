@@ -29,10 +29,10 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │  Console: Enter runs · ↑↓ / Ctrl-P/N history · Ctrl-L clear    │           │
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │                                                                │           │
-│           │AMQP browser                                                    │           │
-│           │  Ctrl-→ messages · Ctrl-← destinations · ↑↓ pick message       │           │
-│           │  a add · r discover · x/d remove · Enter open · t tail         │           │
-│           │  P publish · / filter · the selected body previews below       │           │
+│           │AMQP / RabbitMQ browser                                         │           │
+│           │  Enter open · t tail · Ctrl-→ messages · Ctrl-← destinations   │           │
+│           │  AMQP: a add · r discover · x/d remove · P publish · / filter  │           │
+│           │  RabbitMQ: r refresh · t/Enter tap (direct: asks for a key)    │           │
 │           │                                                                │           │
 │           │Global keys (any pane)                                          │           │
 │           │  : palette · ? help · m mouse · Esc back · Ctrl-C quit         │           │

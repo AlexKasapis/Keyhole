@@ -25,11 +25,11 @@ use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
-use crate::broker::http;
+use crate::broker::{http, QueueType, DESTINATION_LIST_CAP};
 
 /// The most queue or exchange rows one listing collects. A vhost with more
 /// reports the listing as truncated.
-pub const LIST_CAP: usize = 5_000;
+pub const LIST_CAP: usize = DESTINATION_LIST_CAP;
 
 /// Rows per page: the server's maximum (`page_size=501` is a 400).
 const PAGE_SIZE: usize = 500;
@@ -96,15 +96,16 @@ impl MgmtClient {
     }
 
     /// Check that the API answers and accepts the credentials, and learn what
-    /// the connection needs up front: the user's tags (`/api/whoami`) and the
-    /// broker version (`/api/overview`).
+    /// the connection needs up front: the user's tags (`/api/whoami`), the
+    /// broker version and whether its metrics are off (`/api/overview`).
     pub fn probe(&self) -> anyhow::Result<Probe> {
         let me = self.whoami()?;
-        let version = self.rabbitmq_version()?;
+        let overview = self.probe_overview()?;
         Ok(Probe {
             user: me.name,
             tags: me.tags,
-            version,
+            version: overview.rabbitmq_version,
+            stats_disabled: overview.disable_stats,
         })
     }
 
@@ -113,12 +114,14 @@ impl MgmtClient {
         self.get_json("/api/whoami", Scope::Cluster)
     }
 
-    /// The broker's `rabbitmq_version`, read from `/api/overview` trimmed to
-    /// that one column.
-    pub fn rabbitmq_version(&self) -> anyhow::Result<Option<String>> {
-        let overview: Overview =
-            self.get_json("/api/overview?columns=rabbitmq_version", Scope::Cluster)?;
-        Ok(overview.rabbitmq_version)
+    /// The probe's two `/api/overview` fields, `rabbitmq_version` and
+    /// `disable_stats`, trimmed to those columns. The metrics setting needs a
+    /// node restart to change, so the probe's answer holds for the connection.
+    fn probe_overview(&self) -> anyhow::Result<Overview> {
+        self.get_json(
+            "/api/overview?columns=rabbitmq_version,disable_stats",
+            Scope::Cluster,
+        )
     }
 
     /// `GET /api/overview`: cluster-wide versions, totals and rates.
@@ -393,6 +396,9 @@ pub struct Probe {
     /// The broker's `rabbitmq_version`, e.g. `3.13.7`. Peek semantics differ
     /// between 3.x and 4.x.
     pub version: Option<String>,
+    /// Whether the node's metrics collector is off (`disable_stats`), so
+    /// listings carry no counts or rates.
+    pub stats_disabled: bool,
 }
 
 impl Probe {
@@ -462,6 +468,14 @@ impl Management {
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("the management probe task failed: {e}")));
         self.record(outcome);
+    }
+
+    /// Mark the API unusable after a call that never got a reply (unreachable,
+    /// timed out, or not the API at all), so later calls fail fast with this
+    /// error instead of waiting out the timeouts again. The next
+    /// [`Self::run_probe`] clears it.
+    pub fn mark_unreachable(&mut self, error: &anyhow::Error) {
+        self.record(Err(anyhow::anyhow!("{error:#}")));
     }
 
     fn record(&mut self, outcome: anyhow::Result<Probe>) {
@@ -571,30 +585,6 @@ pub struct NodeInfo {
     /// Nodes this one is partitioned from.
     #[serde(default)]
     pub partitions: Vec<String>,
-}
-
-/// A queue's kind, from its `type` field. (4.x also puts `x-queue-type` in
-/// every queue's `arguments`, so the arguments can't tell.)
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(from = "String")]
-pub enum QueueType {
-    /// Also what a broker too old to report `type` has.
-    #[default]
-    Classic,
-    Quorum,
-    Stream,
-    Other(String),
-}
-
-impl From<String> for QueueType {
-    fn from(s: String) -> Self {
-        match s.as_str() {
-            "classic" => QueueType::Classic,
-            "quorum" => QueueType::Quorum,
-            "stream" => QueueType::Stream,
-            _ => QueueType::Other(s),
-        }
-    }
 }
 
 /// One queue row. Counts and rates are missing when metrics are off.
@@ -880,6 +870,7 @@ mod tests {
                 user: me.name,
                 tags: me.tags,
                 version: None,
+                stats_disabled: false,
             };
             assert_eq!(probe.can_monitor(), monitors, "{tag}");
         }
@@ -900,6 +891,7 @@ mod tests {
             user: "u".into(),
             tags: Vec::new(),
             version: v.map(str::to_string),
+            stats_disabled: false,
         };
         assert_eq!(probe(Some("3.13.7")).major_version(), Some(3));
         assert_eq!(probe(Some("4.4.0")).major_version(), Some(4));
@@ -1322,7 +1314,7 @@ mod tests {
     fn probe_asks_whoami_then_the_version_with_basic_auth() {
         let (base_url, server) = stub_server(vec![
             ok(fixture!("whoami.monitoring.v4")),
-            ok(r#"{"rabbitmq_version":"4.4.0"}"#),
+            ok(r#"{"rabbitmq_version":"4.4.0","disable_stats":false}"#),
         ]);
         let probe = client(&base_url, "/").probe().expect("probe succeeds");
         assert_eq!(
@@ -1331,13 +1323,14 @@ mod tests {
                 user: "spike-mon".into(),
                 tags: vec!["monitoring".into()],
                 version: Some("4.4.0".into()),
+                stats_disabled: false,
             }
         );
         let requests = server.join().unwrap();
         assert_eq!(request_line(&requests[0]), "GET /api/whoami");
         assert_eq!(
             request_line(&requests[1]),
-            "GET /api/overview?columns=rabbitmq_version"
+            "GET /api/overview?columns=rabbitmq_version,disable_stats"
         );
         for raw in &requests {
             assert_eq!(
@@ -1636,6 +1629,45 @@ mod tests {
         assert!(probe.can_monitor());
         assert!(mgmt.client().is_ok());
         assert_eq!(server.join().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn probe_learns_that_metrics_are_disabled() {
+        // The overview trimmed to the probe's columns, from a 4.x node with the
+        // metrics collector off.
+        let full: Value = serde_json::from_str(fixture!("overview.no-metrics.v4")).unwrap();
+        let trimmed = json!({
+            "rabbitmq_version": full["rabbitmq_version"],
+            "disable_stats": full["disable_stats"],
+        })
+        .to_string();
+        let (base_url, server) = stub_server(vec![
+            ok(fixture!("whoami.administrator.v4")),
+            (200, trimmed),
+        ]);
+        let probe = client(&base_url, "/").probe().expect("probe succeeds");
+        assert!(probe.stats_disabled);
+        assert_eq!(probe.major_version(), Some(4));
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_listing_makes_later_calls_fail_fast() {
+        let (base_url, server) = stub_server(vec![
+            ok(fixture!("whoami.administrator.v3")),
+            ok(r#"{"rabbitmq_version":"3.13.7"}"#),
+        ]);
+        let mut mgmt = Management::new(client(&base_url, "/"));
+        mgmt.run_probe().await;
+        assert!(mgmt.client().is_ok());
+        server.join().unwrap();
+
+        mgmt.mark_unreachable(&anyhow::anyhow!(
+            "could not reach the management API: refused"
+        ));
+        let err = mgmt.client().err().expect("fails fast");
+        assert!(err.to_string().contains("refused"), "{err}");
+        assert!(mgmt.probe().is_none(), "a re-probe is needed");
     }
 
     #[tokio::test]

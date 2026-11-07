@@ -54,6 +54,12 @@ pub enum ConnCommand {
         spec: SubSpec,
         body: Vec<u8>,
     },
+    /// List the broker's queues and exchanges (RabbitMQ). The reply is an
+    /// [`AppEvent::DestinationsListed`]. `reprobe` retries a management API
+    /// the broker found unusable first (the user's explicit refresh).
+    ListDestinations {
+        reprobe: bool,
+    },
     RefreshStats,
     Ping,
     /// Open a tail for `spec`; start recording immediately if `record`.
@@ -92,10 +98,16 @@ pub struct ConnHandle {
 
 impl ConnHandle {
     /// Best-effort command send. Never blocks the render loop: if the actor's
-    /// inbox is full or gone, the command is dropped (the UI stays responsive).
-    pub fn send(&self, cmd: ConnCommand) {
-        if let Err(err) = self.cmd_tx.try_send(cmd) {
-            tracing::debug!(conn = self.id.0, %err, "dropped connection command");
+    /// inbox is full or gone, the command is dropped (the UI stays responsive)
+    /// and this returns `false`, so a caller tracking a reply in flight can
+    /// tell that none is coming.
+    pub fn send(&self, cmd: ConnCommand) -> bool {
+        match self.cmd_tx.try_send(cmd) {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::debug!(conn = self.id.0, %err, "dropped connection command");
+                false
+            }
         }
     }
 
@@ -484,6 +496,16 @@ async fn process(
                 .send(AppEvent::Published { id, target, result })
                 .await
         }
+        ConnCommand::ListDestinations { reprobe } => {
+            // `{:#}`: the management API's cause chain is the explanation.
+            let result = conn
+                .list_destinations(reprobe)
+                .await
+                .map_err(|e| format!("{e:#}"));
+            events
+                .send(AppEvent::DestinationsListed { id, result })
+                .await
+        }
         ConnCommand::RefreshStats => match conn.stats().await {
             Ok(stats) => events.send(AppEvent::StatsUpdated { id, stats }).await,
             Err(e) => emit_error(events, id, "stats", e).await,
@@ -561,7 +583,8 @@ pub(crate) mod mock {
     use super::{spawn_connection, ConnCommand, ConnHandle, SpawnParams};
     use crate::broker::{
         BrokerConnection, BrokerEvent, BrokerEventStream, BrowsePage, BrowseReq, Capabilities,
-        ConnId, InspectReq, PeekReq, ServerStats, SubSpec, ValueView,
+        ConnId, DestKind, DestinationInfo, DestinationList, ExchangeType, InspectReq, PeekReq,
+        QueueType, ServerStats, SubSpec, ValueView,
     };
     use crate::event::AppEvent;
 
@@ -594,6 +617,10 @@ pub(crate) mod mock {
         pub sub: Option<SubBehavior>,
         /// Advisory returned from `tail_notice` (e.g. keyspace notifications off).
         pub notice: Option<String>,
+        /// The queues and exchanges `list_destinations` returns.
+        pub list: DestinationList,
+        /// When set, `list_destinations` fails with this message instead.
+        pub list_err: Option<String>,
     }
 
     impl MockBroker {
@@ -612,6 +639,8 @@ pub(crate) mod mock {
                 peek_err: None,
                 sub: None,
                 notice: None,
+                list: DestinationList::default(),
+                list_err: None,
             }
         }
 
@@ -685,6 +714,97 @@ pub(crate) mod mock {
         async fn tail_notice(&mut self, _spec: &SubSpec) -> Option<String> {
             self.notice.clone()
         }
+
+        async fn list_destinations(&mut self, _reprobe: bool) -> anyhow::Result<DestinationList> {
+            if let Some(e) = &self.list_err {
+                anyhow::bail!("{e}");
+            }
+            Ok(self.list.clone())
+        }
+    }
+
+    /// A queue row as a RabbitMQ listing reports it.
+    pub fn queue_row(name: &str, queue_type: QueueType, messages: u64) -> DestinationInfo {
+        DestinationInfo {
+            name: name.to_string(),
+            kind: DestKind::Queue,
+            messages: Some(messages),
+            ready: Some(messages),
+            unacked: Some(0),
+            consumers: Some(0),
+            queue_type: Some(queue_type),
+            exchange_type: None,
+            publish_rate: None,
+            internal: false,
+        }
+    }
+
+    /// An exchange row as a RabbitMQ listing reports it.
+    pub fn exchange_row(name: &str, exchange_type: ExchangeType) -> DestinationInfo {
+        DestinationInfo {
+            name: name.to_string(),
+            kind: DestKind::Exchange,
+            messages: None,
+            ready: None,
+            unacked: None,
+            consumers: None,
+            queue_type: None,
+            exchange_type: Some(exchange_type),
+            publish_rate: None,
+            internal: false,
+        }
+    }
+
+    /// A RabbitMQ listing with one queue of each type and one exchange of each
+    /// type (queues first, as the broker lists them).
+    pub fn sample_destinations() -> DestinationList {
+        let mut orders = queue_row("orders", QueueType::Classic, 1_980);
+        orders.ready = Some(1_960);
+        orders.unacked = Some(20);
+        orders.consumers = Some(2);
+        orders.publish_rate = Some(9.6);
+        let mut demo = exchange_row("keyhole.demo", ExchangeType::Topic);
+        demo.publish_rate = Some(19.6);
+        let mut trace = exchange_row("amq.rabbitmq.trace", ExchangeType::Topic);
+        trace.internal = true;
+        DestinationList {
+            items: vec![
+                orders,
+                queue_row("payments", QueueType::Quorum, 3),
+                queue_row("audit", QueueType::Stream, 0),
+                exchange_row("amq.direct", ExchangeType::Direct),
+                exchange_row("amq.fanout", ExchangeType::Fanout),
+                exchange_row("amq.headers", ExchangeType::Headers),
+                trace,
+                demo,
+            ],
+            truncated: false,
+            stats_disabled: false,
+        }
+    }
+
+    /// Spawn an actor around `mock` whose events go to `events` (e.g. the
+    /// app's own channel, so a test can feed the replies back in).
+    pub async fn spawn(
+        id: u32,
+        name: &str,
+        mock: MockBroker,
+        events: mpsc::Sender<AppEvent>,
+    ) -> ConnHandle {
+        let tracker = TaskTracker::new();
+        let cancel = CancellationToken::new();
+        spawn_connection(SpawnParams {
+            id: ConnId(id),
+            name: name.to_string(),
+            addr: "127.0.0.1:5672".to_string(),
+            conn: mock.boxed(),
+            events,
+            tracker: &tracker,
+            parent_cancel: &cancel,
+            recordings_dir: std::env::temp_dir(),
+        })
+        .await
+        .expect("mock connect")
     }
 
     /// Spawn a default mock-backed connection actor and return its live handle.
@@ -1004,6 +1124,33 @@ mod tests {
                 assert!(error.contains("boom"), "error was {error:?}");
             }
             other => panic!("expected ConnError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_destinations_emits_the_listing_or_its_error() {
+        let mut mock = MockBroker::new();
+        mock.list = mock::sample_destinations();
+        let (handle, mut rx, _t, _c) = spawn(mock, temp_dir("list")).await;
+        assert!(handle.send(ConnCommand::ListDestinations { reprobe: true }));
+        match next(&mut rx).await {
+            Some(AppEvent::DestinationsListed {
+                result: Ok(list), ..
+            }) => {
+                assert_eq!(list, mock::sample_destinations())
+            }
+            other => panic!("expected DestinationsListed, got {other:?}"),
+        }
+
+        let mut failing = MockBroker::new();
+        failing.list_err = Some("management API unavailable at u: refused".into());
+        let (handle, mut rx, _t, _c) = spawn(failing, temp_dir("listerr")).await;
+        handle.send(ConnCommand::ListDestinations { reprobe: false });
+        match next(&mut rx).await {
+            Some(AppEvent::DestinationsListed { result: Err(e), .. }) => {
+                assert_eq!(e, "management API unavailable at u: refused")
+            }
+            other => panic!("expected a failed DestinationsListed, got {other:?}"),
         }
     }
 

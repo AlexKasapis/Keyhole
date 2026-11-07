@@ -266,8 +266,14 @@ fn hint_sections(app: &App) -> Vec<(&'static str, String)> {
                     .is_some_and(|c| c.caps.curates_destinations());
                 if !curated {
                     // RabbitMQ: its list comes from the broker (nothing to add or
-                    // remove), and its taps start from the Tail anchor.
-                    owned(&[("Tab", "tails"), (":", "palette"), ("?", "help")])
+                    // remove), so `r` lists it again, and `t` taps an exchange.
+                    owned(&[
+                        ("r", "refresh"),
+                        ("t", "tap"),
+                        ("Tab", "tails"),
+                        (":", "palette"),
+                        ("?", "help"),
+                    ])
                 } else if on_messages {
                     owned(&[
                         ("/", "filter"),
@@ -353,8 +359,8 @@ mod tests {
     };
     use crate::broker::actor::mock;
     use crate::broker::{
-        BrokerEvent, ClientInfo, EntryMeta, Payload, PayloadEncoding, ServerStats, StreamEntry,
-        SubSpec, Ttl, ValueType, ValueView,
+        BrokerEvent, ClientInfo, ConnId, DestinationList, EntryMeta, Payload, PayloadEncoding,
+        ServerStats, StreamEntry, SubSpec, Ttl, ValueType, ValueView,
     };
     use crate::config::Config;
     use crate::event::AppEvent;
@@ -1350,14 +1356,8 @@ mod tests {
         let (mut app, rx) = test_app();
         let handle = mock::amqp_handle(1, "events").await;
         let mut conn = Connection::new(handle);
-        conn.add_destination(Destination {
-            name: "orders".into(),
-            kind: DestKind::Queue,
-        });
-        conn.add_destination(Destination {
-            name: "alerts".into(),
-            kind: DestKind::Topic,
-        });
+        conn.add_destination(Destination::new("orders", DestKind::Queue));
+        conn.add_destination(Destination::new("alerts", DestKind::Topic));
         conn.destinations.table.select(Some(0));
         // A pinned peek result for the selected queue (`orders`).
         conn.peek.peeked = Some(SubSpec::Queue("orders".into()));
@@ -2118,18 +2118,181 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn snapshot_browser_rabbitmq() {
-        // The RabbitMQ browser with no management API: the destination pane
-        // points at the Tail anchor (AMQP 0.9.1 can't list destinations), and
-        // the footer offers none of AMQP's curated-list keys.
-        let (mut app, _rx) = test_app();
+    /// An app on the Browser for a RabbitMQ connection named `rabbit` (with a
+    /// saved profile on vhost `shop`), whose listing returned `result`.
+    async fn rabbitmq_browser(
+        result: Option<Result<DestinationList, String>>,
+    ) -> (App, Receiver<AppEvent>) {
+        use crate::config::{ConnectionConfig, RabbitmqProfile};
+        let config = Config {
+            connections: vec![ConnectionConfig::Rabbitmq(RabbitmqProfile {
+                name: "rabbit".into(),
+                host: "127.0.0.1".into(),
+                port: 5672,
+                vhost: "shop".into(),
+                username: None,
+                password: None,
+                tls: false,
+                management_url: None,
+                management_username: None,
+                management_password: None,
+            })],
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel(64);
+        let mut app = App::new(
+            config,
+            std::path::PathBuf::from("/tmp/keyhole-ui-test.toml"),
+            std::env::temp_dir(),
+            tx,
+            TaskTracker::new(),
+            CancellationToken::new(),
+            None,
+        );
         let handle = mock::rabbitmq_handle(1, "rabbit").await;
         app.connections.push(Connection::new(handle));
         app.active = Some(0);
-        pin_clock(&mut app);
         app.screen = Screen::Browser;
-        insta::assert_snapshot!("browser_rabbitmq", render_lines(&mut app, 90, 24));
+        pin_clock(&mut app);
+        if let Some(result) = result {
+            app.handle_event(AppEvent::DestinationsListed {
+                id: ConnId(1),
+                result,
+            });
+        }
+        (app, rx)
+    }
+
+    /// Put the RabbitMQ list's cursor on the row named `name`.
+    fn select_destination(app: &mut App, name: &str) {
+        let conn = app.active_conn_mut().unwrap();
+        let i = conn
+            .destinations
+            .items
+            .iter()
+            .position(|d| d.name == name)
+            .unwrap();
+        conn.destinations.table.select(Some(i));
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq() {
+        // The full RabbitMQ list on a wide terminal: queues then exchanges with
+        // every column, the selected queue's details on the right, and the
+        // footer's r/t keys (none of AMQP's curated-list keys).
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        insta::assert_snapshot!("browser_rabbitmq", render_lines(&mut app, 160, 30));
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_narrow() {
+        // A narrow terminal drops the stat columns from the right, keeping Name,
+        // Kind and Msgs; the selected topic exchange's details say how `t` taps
+        // it.
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        select_destination(&mut app, "keyhole.demo");
+        insta::assert_snapshot!("browser_rabbitmq_narrow", render_lines(&mut app, 90, 24));
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_unavailable() {
+        // The management API couldn't be reached: the pane says where and why,
+        // that tails still work, and how to retry or point it elsewhere.
+        let (mut app, _rx) = rabbitmq_browser(Some(Err(
+            "management API unavailable at http://127.0.0.1:15672: could not reach the \
+             management API: Connection refused (os error 111)"
+                .into(),
+        )))
+        .await;
+        insta::assert_snapshot!(
+            "browser_rabbitmq_unavailable",
+            render_lines(&mut app, 90, 24)
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_browser_rabbitmq_no_metrics() {
+        // Metrics disabled on the broker: every count and rate reads `—`, and a
+        // notice above the table says why.
+        let mut list = mock::sample_destinations();
+        for d in &mut list.items {
+            (d.messages, d.ready, d.unacked, d.consumers, d.publish_rate) =
+                (None, None, None, None, None);
+        }
+        list.stats_disabled = true;
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(list))).await;
+        insta::assert_snapshot!(
+            "browser_rabbitmq_no_metrics",
+            render_lines(&mut app, 160, 20)
+        );
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_pane_states_before_and_without_rows() {
+        let (mut app, _rx) = rabbitmq_browser(None).await;
+        assert!(screen_text(&mut app).contains("Listing queues and exchanges…"));
+
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(DestinationList::default()))).await;
+        assert!(
+            screen_text(&mut app).contains("No queues or exchanges in vhost shop."),
+            "the empty list names the profile's vhost"
+        );
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_pane_notes_a_truncated_list_and_a_failed_refresh() {
+        let mut list = mock::sample_destinations();
+        list.truncated = true;
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(list))).await;
+        let text = render_lines(&mut app, 160, 24);
+        assert!(
+            text.contains("Showing the first 5,000 of each kind."),
+            "{text}"
+        );
+
+        // A later refresh fails: the rows stay, under the reason.
+        app.handle_event(AppEvent::DestinationsListed {
+            id: ConnId(1),
+            result: Err("management API unavailable at http://h:15672: timed out".into()),
+        });
+        let text = render_lines(&mut app, 160, 24);
+        assert!(
+            text.contains("Refresh failed: management API unavailable at http://h:15672"),
+            "{text}"
+        );
+        assert!(text.contains("Press r to retry."), "{text}");
+        assert!(text.contains("keyhole.demo"), "the rows stay: {text}");
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_details_say_what_t_does_for_each_kind() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        for (name, expect) in [
+            ("orders", "To watch them, tap an exchange"),
+            ("amq.direct", "routing key after exchange:name/"),
+            ("amq.fanout", "copies every message"),
+            ("amq.headers", "header-based taps aren't"),
+            ("amq.rabbitmq.trace", "topic exchange (internal)"),
+        ] {
+            select_destination(&mut app, name);
+            let text = render_lines(&mut app, 160, 30);
+            assert!(text.contains(expect), "{name}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_footer_offers_refresh_and_tap_but_not_add_or_remove() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        let text = render_lines(&mut app, 160, 30);
+        let footer = text.lines().last().unwrap();
+        assert!(
+            footer.contains("r refresh") && footer.contains("t tap"),
+            "{footer}"
+        );
+        assert!(
+            !footer.contains("a add") && !footer.contains("remove"),
+            "{footer}"
+        );
     }
 
     #[tokio::test]

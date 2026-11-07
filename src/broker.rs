@@ -160,8 +160,8 @@ impl Capabilities {
     /// RabbitMQ (AMQP 0.9.1): tail + record (a non-destructive exchange tap, see
     /// [`crate::broker::rabbitmq`]). `can_browse` is true so it lands on the
     /// Browser screen, whose bottom panel hosts the Tail anchor. AMQP 0.9.1 can't
-    /// list queues or exchanges, so the destination pane stays empty until the
-    /// management API fills it.
+    /// list queues or exchanges, so the destination list comes from the
+    /// management API ([`BrokerConnection::list_destinations`]).
     pub fn rabbitmq() -> Self {
         Self {
             r#type: BrokerType::Rabbitmq,
@@ -173,12 +173,25 @@ impl Capabilities {
     }
 
     /// Whether the browse list is driven by a Redis-style `SCAN` (cursor paging,
-    /// periodic auto-refresh, per-database scoping). True only for Redis; AMQP's
-    /// browse list is a curated set of destinations, so the SCAN cadence must not
-    /// run for it. Gates the scan-specific code paths (initial scan on connect,
-    /// auto-refresh, key navigation).
+    /// per-database scoping). True only for Redis; the other brokers browse a
+    /// list of destinations. Gates the scan-specific code paths (initial scan on
+    /// connect, the scan behind an auto-refresh, key navigation).
     pub fn uses_key_scan(&self) -> bool {
         matches!(self.r#type, BrokerType::Redis)
+    }
+
+    /// Whether the Browser's list refreshes itself on the `browse_refresh_ms`
+    /// clock: Redis re-scans its keys and RabbitMQ lists its queues and
+    /// exchanges again. AMQP 1.0's curated list only changes when the user edits
+    /// it.
+    pub fn auto_refresh(&self) -> bool {
+        matches!(self.r#type, BrokerType::Redis | BrokerType::Rabbitmq)
+    }
+
+    /// Whether selecting a queue in the destination browser peeks its messages.
+    /// AMQP 1.0 browses them; RabbitMQ lists its queues without peeking them.
+    pub fn peeks_queues(&self) -> bool {
+        matches!(self.r#type, BrokerType::Amqp)
     }
 
     /// Whether the Browser body is a destination list (AMQP 1.0, RabbitMQ) rather
@@ -347,6 +360,147 @@ pub struct PublishReq {
     pub body: Vec<u8>,
 }
 
+/// Whether a destination is a topic, a queue or an exchange. AMQP 1.0's curated
+/// list holds topics and queues; RabbitMQ lists queues and exchanges. Decides
+/// the source spec built when peeking or tailing it (and the tag shown in the
+/// list).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DestKind {
+    Topic,
+    Queue,
+    Exchange,
+}
+
+impl DestKind {
+    /// The lower-case tag shown beside the name in the destination list.
+    pub fn tag(self) -> &'static str {
+        match self {
+            DestKind::Topic => "topic",
+            DestKind::Queue => "queue",
+            DestKind::Exchange => "exchange",
+        }
+    }
+}
+
+/// A RabbitMQ queue's type, from the management API's `type` field. (4.x also
+/// puts `x-queue-type` in every queue's `arguments`, so the arguments can't
+/// tell.)
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(from = "String")]
+pub enum QueueType {
+    /// Also what a broker too old to report `type` has.
+    #[default]
+    Classic,
+    Quorum,
+    Stream,
+    Other(String),
+}
+
+impl From<String> for QueueType {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "classic" => QueueType::Classic,
+            "quorum" => QueueType::Quorum,
+            "stream" => QueueType::Stream,
+            _ => QueueType::Other(s),
+        }
+    }
+}
+
+impl QueueType {
+    /// The destination list's Kind label. A classic queue is plain `queue`.
+    pub fn label(&self) -> &str {
+        match self {
+            QueueType::Classic => "queue",
+            QueueType::Quorum => "quorum",
+            QueueType::Stream => "stream",
+            QueueType::Other(s) => s,
+        }
+    }
+}
+
+/// A RabbitMQ exchange's type. It decides how a tap binds: the catch-all `#`
+/// matches every routing key on a topic exchange and is ignored by a fanout
+/// one, a direct exchange matches only the exact routing key, and a headers
+/// exchange routes on message headers instead of the key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExchangeType {
+    Direct,
+    Fanout,
+    Topic,
+    Headers,
+    /// A plugin type, e.g. `x-delayed-message` or `x-consistent-hash`.
+    Other(String),
+}
+
+impl From<String> for ExchangeType {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "direct" => ExchangeType::Direct,
+            "fanout" => ExchangeType::Fanout,
+            "topic" => ExchangeType::Topic,
+            "headers" => ExchangeType::Headers,
+            _ => ExchangeType::Other(s),
+        }
+    }
+}
+
+impl ExchangeType {
+    /// The type's name, as RabbitMQ reports it.
+    pub fn label(&self) -> &str {
+        match self {
+            ExchangeType::Direct => "direct",
+            ExchangeType::Fanout => "fanout",
+            ExchangeType::Topic => "topic",
+            ExchangeType::Headers => "headers",
+            ExchangeType::Other(s) => s,
+        }
+    }
+}
+
+/// The most rows of each kind (queues, exchanges) a destination listing
+/// returns. A broker with more reports the listing as
+/// [`truncated`](DestinationList::truncated).
+pub const DESTINATION_LIST_CAP: usize = 5_000;
+
+/// What a destination listing knows about one queue or exchange (RabbitMQ,
+/// from the management API). A count or rate the broker didn't report is
+/// `None`: a queue that never saw a publish has no publish rate, and with
+/// management metrics disabled every count and rate is missing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DestinationInfo {
+    pub name: String,
+    /// [`DestKind::Queue`] or [`DestKind::Exchange`].
+    pub kind: DestKind,
+    /// A queue's messages, ready plus unacknowledged.
+    pub messages: Option<u64>,
+    pub ready: Option<u64>,
+    pub unacked: Option<u64>,
+    pub consumers: Option<u64>,
+    /// A queue's type; `None` for an exchange.
+    pub queue_type: Option<QueueType>,
+    /// An exchange's type; `None` for a queue.
+    pub exchange_type: Option<ExchangeType>,
+    /// Messages published per second, into a queue or into an exchange.
+    pub publish_rate: Option<f64>,
+    /// An internal exchange (e.g. `amq.rabbitmq.trace`). Clients can't publish
+    /// to it, but a tap can still bind to it.
+    pub internal: bool,
+}
+
+/// The result of [`BrokerConnection::list_destinations`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DestinationList {
+    /// Queues first, then exchanges, each sorted by name.
+    pub items: Vec<DestinationInfo>,
+    /// Whether the broker has more than [`DESTINATION_LIST_CAP`] queues or
+    /// exchanges, so the list stops short.
+    pub truncated: bool,
+    /// Whether the broker has its management metrics disabled, which is why
+    /// every count and rate is missing.
+    pub stats_disabled: bool,
+}
+
 /// How a payload's bytes are represented for display/recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PayloadEncoding {
@@ -431,11 +585,12 @@ pub enum SubSpec {
     /// gets its own copy, so observing never steals messages). The primary AMQP tail.
     ///
     /// `Topic`/`Queue`/`Exchange` are built by [`SubSpec::parse`] from the
-    /// destination add/seed/tail paths (and directly by the `dev` publisher and
-    /// Jolokia discovery); the AMQP/RabbitMQ subscribe paths match on them to open
-    /// the corresponding tail.
+    /// destination add/seed/tail paths (and directly by the `dev` publisher,
+    /// Jolokia discovery and the destination browser); the AMQP/RabbitMQ
+    /// subscribe paths match on them to open the corresponding tail.
     Topic(String),
-    /// An AMQP 1.0 queue address.
+    /// A queue: an AMQP 1.0 queue address (peeked, or tailed as a
+    /// non-destructive browse), or a queue in RabbitMQ's destination list.
     Queue(String),
     /// A RabbitMQ (AMQP 0.9.1) exchange tap: bind a temporary, exclusive,
     /// auto-delete queue to `exchange` with `binding_key` and consume the
@@ -743,6 +898,16 @@ pub trait BrokerConnection: Send {
         anyhow::bail!("this broker does not support peeking messages")
     }
 
+    /// List the broker's queues and exchanges for the destination browser
+    /// (RabbitMQ, from its management API). `reprobe` first retries a
+    /// management API the broker found unusable — the user's explicit refresh.
+    /// The periodic refresh passes `false`, so a dead endpoint fails fast rather
+    /// than stalling the connection's actor. Default: unsupported (AMQP 1.0
+    /// discovers destinations over Jolokia instead, and Redis browses keys).
+    async fn list_destinations(&mut self, _reprobe: bool) -> anyhow::Result<DestinationList> {
+        anyhow::bail!("this broker does not list destinations")
+    }
+
     /// Publish a single message to `req.spec`. The one *write* in the trait;
     /// default unsupported, so observe-only brokers keep this bail. Gated by
     /// [`Capabilities::can_publish`].
@@ -982,6 +1147,36 @@ mod tests {
 
         // Redis browses keys, not destinations.
         assert!(!r.has_destinations() && !r.curates_destinations());
+
+        // The broker-supplied lists refresh themselves; AMQP's curated one
+        // doesn't. Only AMQP 1.0 peeks queues.
+        assert!(r.auto_refresh() && rmq.auto_refresh() && !a.auto_refresh());
+        assert!(a.peeks_queues() && !rmq.peeks_queues() && !r.peeks_queues());
+    }
+
+    #[test]
+    fn destination_types_read_rabbitmqs_names() {
+        for (wire, kind, label) in [
+            ("classic", QueueType::Classic, "queue"),
+            ("quorum", QueueType::Quorum, "quorum"),
+            ("stream", QueueType::Stream, "stream"),
+        ] {
+            let parsed = QueueType::from(wire.to_string());
+            assert_eq!(parsed, kind);
+            assert_eq!(parsed.label(), label);
+        }
+        let delayed = QueueType::from("delayed".to_string());
+        assert_eq!(delayed.label(), "delayed");
+
+        for name in ["direct", "fanout", "topic", "headers"] {
+            let parsed = ExchangeType::from(name.to_string());
+            assert!(!matches!(parsed, ExchangeType::Other(_)), "{name}");
+            assert_eq!(parsed.label(), name);
+        }
+        let plugin = ExchangeType::from("x-delayed-message".to_string());
+        assert_eq!(plugin, ExchangeType::Other("x-delayed-message".into()));
+        assert_eq!(plugin.label(), "x-delayed-message");
+        assert_eq!(DestKind::Exchange.tag(), "exchange");
     }
 
     #[test]

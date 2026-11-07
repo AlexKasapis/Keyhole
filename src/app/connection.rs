@@ -483,7 +483,9 @@ impl App {
                 return;
             };
             let spec = dest.spec();
-            let peekable = matches!(dest.kind, DestKind::Queue) && mode != config::PeekMode::Skip;
+            let peekable = conn.caps.peeks_queues()
+                && matches!(dest.kind, DestKind::Queue)
+                && mode != config::PeekMode::Skip;
             // Reset the inspector to the freshly selected destination.
             conn.peek.peeked = Some(spec.clone());
             conn.peek.events.clear();
@@ -497,6 +499,26 @@ impl App {
                 });
             }
         }
+    }
+
+    /// Ask the broker for its queues and exchanges (RabbitMQ), unless a
+    /// listing is already on its way; the reply lands in
+    /// [`Self::on_destinations_listed`]. `reprobe` retries a management API the
+    /// broker found unusable (the refresh key) — the connect-time and periodic
+    /// listings don't, so a dead endpoint never stalls the connection.
+    pub(super) fn list_destinations(&mut self, id: ConnId, reprobe: bool) {
+        let Some(conn) = self.conn_by_id_mut(id) else {
+            return;
+        };
+        if conn.destinations.list_in_flight {
+            return;
+        }
+        // A dropped command (a full inbox) gets no reply, so it mustn't block
+        // the next refresh.
+        conn.destinations.list_in_flight =
+            conn.handle.send(ConnCommand::ListDestinations { reprobe });
+        // Any listing restarts the auto-refresh clock.
+        conn.destinations.refresh_ticks = 0;
     }
 
     /// Populate an AMQP connection's destination list from its saved profile's

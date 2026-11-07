@@ -219,10 +219,10 @@ impl App {
     }
 
     /// Keys while the destination list (left pane) is focused: navigate the
-    /// list, Enter to open the selection (peek a queue / tail a topic), `t` to
-    /// tail it, `P` to publish. A curated (AMQP) list also takes `a` to add a
-    /// destination, `x`/`d` to remove one and `r` to (re)discover destinations
-    /// from the broker. `Ctrl-→` steps focus into the message list (handled in
+    /// list, Enter to open the selection (peek a queue / tail a topic or tap an
+    /// exchange), `t` to tail it, `P` to publish and `r` to refresh the list. A
+    /// curated (AMQP) list also takes `a` to add a destination and `x`/`d` to
+    /// remove one. `Ctrl-→` steps focus into the message list (handled in
     /// [`Self::handle_browser_key`]).
     ///
     /// When the message pane holds the keyboard the keys drive that pane instead
@@ -233,8 +233,8 @@ impl App {
             return self.handle_message_key(key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        // Add / remove / discover edit a user-curated list (AMQP 1.0); a list that
-        // comes from the broker (RabbitMQ) doesn't take them.
+        // Add / remove edit a user-curated list (AMQP 1.0); a list that comes
+        // from the broker (RabbitMQ) doesn't take them.
         let curated = self
             .active_conn()
             .is_some_and(|c| c.caps.curates_destinations());
@@ -245,7 +245,7 @@ impl App {
             (false, KeyCode::End) => self.nav_edge(false),
             (false, KeyCode::Enter) => self.open_selected_destination(),
             (false, KeyCode::Char('a')) if curated => self.begin_add_destination(),
-            (false, KeyCode::Char('r')) if curated => self.refresh_destinations(),
+            (false, KeyCode::Char('r')) => self.refresh_destinations(),
             (false, KeyCode::Char('x') | KeyCode::Char('d')) if curated => {
                 self.delete_selected_destination()
             }
@@ -342,12 +342,29 @@ impl App {
         self.mode = InputMode::Publish;
     }
 
-    /// Re-discover destinations from the broker's management API for the active
-    /// AMQP connection (the `r` key). Announces progress / "not configured",
-    /// unlike the silent auto-discovery on connect.
+    /// The `r` key: refresh the destination list from the broker. AMQP 1.0
+    /// re-discovers destinations over Jolokia, announcing progress / "not
+    /// configured" (unlike the silent auto-discovery on connect). RabbitMQ lists
+    /// its queues and exchanges again, first re-probing a management API that
+    /// failed — the one listing that may wait on a dead endpoint, because the
+    /// user asked for it.
     fn refresh_destinations(&mut self) {
-        if let Some(id) = self.active_id() {
+        let Some((id, curated, in_flight)) = self.active_conn().map(|c| {
+            (
+                c.id,
+                c.caps.curates_destinations(),
+                c.destinations.list_in_flight,
+            )
+        }) else {
+            return;
+        };
+        if curated {
             self.discover_destinations(id, true);
+        } else if in_flight {
+            self.set_status("already listing queues and exchanges…".to_string(), false);
+        } else {
+            self.list_destinations(id, true);
+            self.set_status("Listing queues and exchanges…".to_string(), false);
         }
     }
 
@@ -377,19 +394,59 @@ impl App {
                     self.request_peek(id);
                 }
             }
-            Some(DestKind::Topic) => self.tail_selected_destination(),
+            Some(DestKind::Topic | DestKind::Exchange) => self.tail_selected_destination(),
             None => {}
         }
     }
 
-    /// Open a live tail on the highlighted destination (topic or queue).
+    /// Open a live tail on the highlighted destination: an AMQP 1.0 topic or
+    /// queue, or a RabbitMQ exchange tap. How an exchange is tapped follows its
+    /// type: a topic or fanout exchange takes the catch-all `#` binding key; a
+    /// direct exchange needs a routing key, so the Tail anchor opens with
+    /// `exchange:name/` for the user to finish; a headers exchange routes on
+    /// headers, and header-based taps aren't supported. A RabbitMQ queue can't
+    /// be tailed without consuming from it.
     fn tail_selected_destination(&mut self) {
-        if let Some(spec) = self
-            .active_conn()
-            .and_then(|c| c.selected_destination().map(|d| d.spec()))
-        {
-            self.start_subscribe(spec);
+        let Some((dest, rabbitmq)) = self.active_conn().and_then(|c| {
+            let dest = c.selected_destination()?.clone();
+            Some((dest, c.caps.r#type == BrokerType::Rabbitmq))
+        }) else {
+            return;
+        };
+        if !rabbitmq {
+            return self.start_subscribe(dest.spec());
         }
+        // The statuses stay short enough for the footer's status column; the
+        // details pane spells out the alternative.
+        let exchange_type = dest.info.as_ref().and_then(|i| i.exchange_type.as_ref());
+        match (dest.kind, exchange_type) {
+            (DestKind::Exchange, Some(ExchangeType::Direct)) => {
+                self.open_tail_anchor_with(format!("exchange:{}/", dest.name))
+            }
+            (DestKind::Exchange, Some(ExchangeType::Headers)) => {
+                self.set_status("header-based taps aren't supported".to_string(), true)
+            }
+            // Topic and fanout take `#`. An unknown (plugin) type is tapped the
+            // same way; the tap's notice says `#` may not match.
+            (DestKind::Exchange, _) => self.start_subscribe(dest.spec()),
+            (DestKind::Queue | DestKind::Topic, _) => {
+                self.set_status("can't tail a queue without consuming it".to_string(), true)
+            }
+        }
+    }
+
+    /// Give the keyboard to the Tail anchor with `text` already typed, so the
+    /// user finishes the spec (e.g. a direct exchange's routing key).
+    fn open_tail_anchor_with(&mut self, text: String) {
+        let Some(conn) = self.active_conn_mut() else {
+            return;
+        };
+        if let Some(i) = conn.panel_slots().iter().position(|t| *t == PanelTab::Tail) {
+            conn.panel_tab = i;
+        }
+        // Entering the panel clears the anchor's prompt, so type after it.
+        self.set_pane_focus(PaneFocus::Bottom);
+        self.subscribe_buf = text;
     }
 
     /// The destination-add prompt's keys: type a spec, Enter adds it, Esc cancels.

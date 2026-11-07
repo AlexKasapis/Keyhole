@@ -11,7 +11,9 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::broker::actor::ConnHandle;
-use crate::broker::{BrokerEvent, BrowsePage, ConnId, ServerStats, SubSpec, ValueView};
+use crate::broker::{
+    BrokerEvent, BrowsePage, ConnId, DestinationList, ServerStats, SubSpec, ValueView,
+};
 use crate::recording::RecordingStatus;
 
 /// Everything the render loop reacts to.
@@ -56,6 +58,13 @@ pub enum AppEvent {
     DestinationsDiscovered {
         id: ConnId,
         result: Result<Vec<SubSpec>, String>,
+    },
+    /// The broker's queues and exchanges (RabbitMQ), to replace the
+    /// destination browser's list, or why they couldn't be listed. Requested
+    /// on connect, by the refresh key and on the auto-refresh clock.
+    DestinationsListed {
+        id: ConnId,
+        result: Result<DestinationList, String>,
     },
     /// Refreshed server statistics.
     StatsUpdated { id: ConnId, stats: ServerStats },

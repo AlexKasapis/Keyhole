@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 90, 24)"
+---
+┌ Destinations ─────────────────────────────┐┌ keyhole.demo ─────────────────────────────┐
+│  Name                     Kind        Msgs││Type       topic exchange                  │
+│  orders                   queue       1980││Publish    19.6/s in                       │
+│  payments                 quorum         3││                                           │
+│  audit                    stream         0││Press t or Enter to tap it with binding key│
+│  amq.direct               direct          ││#, which matches every routing key.        │
+│  amq.fanout               fanout          ││                                           │
+│  amq.headers              headers         ││                                           │
+│  amq.rabbitmq.trace       topic           ││                                           │
+│▶ keyhole.demo             topic           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
+│exchange:name or exchange:name/binding-key:                                             │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│Enter taps it · non-destructive copy via a temporary queue · key defaults to #          │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ r refresh · t tap · Tab tails · : palette · ? help

@@ -9,9 +9,10 @@ use ratatui::widgets::TableState;
 use time::OffsetDateTime;
 
 use crate::broker::actor::ConnHandle;
+pub use crate::broker::DestKind;
 use crate::broker::{
-    BrokerEvent, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId, EntryMeta, ServerStats,
-    SubSpec, Ttl, ValueType, ValueView,
+    BrokerEvent, BrokerType, BrowsePage, BrowseReq, Capabilities, ConnId, DestinationInfo,
+    EntryMeta, ServerStats, SubSpec, Ttl, ValueType, ValueView,
 };
 use crate::config::ConnectionConfig;
 
@@ -796,54 +797,65 @@ impl ValueInspector {
     }
 }
 
-/// Whether a curated AMQP destination is a topic or a queue. Decides the source
-/// spec built when peeking or tailing it (and the tag shown in the list).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DestKind {
-    Topic,
-    Queue,
-}
-
-impl DestKind {
-    /// The lower-case tag shown beside the name in the destination list.
-    pub fn tag(self) -> &'static str {
-        match self {
-            DestKind::Topic => "topic",
-            DestKind::Queue => "queue",
-        }
-    }
-}
-
-/// One curated AMQP destination: a topic or queue the user has added to the
-/// browser. AMQP 1.0 can't enumerate destinations, so the user maintains this
-/// list themselves (persisted in the profile).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One row of the destination browser. AMQP 1.0 can't enumerate destinations,
+/// so its list is curated: topics and queues the user added (persisted in the
+/// profile), with no `info`. RabbitMQ's queues and exchanges come from the
+/// broker's listing, each with the `info` (type, counts, rate) it reported.
+///
+/// A row's identity is its `(name, kind)` ([`Self::same`]): the `info` changes
+/// on every refresh, so it never decides whether two rows are the same one.
+#[derive(Debug, Clone)]
 pub struct Destination {
     pub name: String,
     pub kind: DestKind,
+    pub info: Option<DestinationInfo>,
 }
 
 impl Destination {
-    /// The source spec this destination tails/peeks as.
+    /// A curated destination (no listing info).
+    pub fn new(name: impl Into<String>, kind: DestKind) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            info: None,
+        }
+    }
+
+    /// A row from a broker's listing.
+    pub fn from_info(info: DestinationInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            kind: info.kind,
+            info: Some(info),
+        }
+    }
+
+    /// Whether `other` is the same destination (same name and kind), whatever
+    /// its stats.
+    pub fn same(&self, other: &Destination) -> bool {
+        self.kind == other.kind && self.name == other.name
+    }
+
+    /// The source spec this destination tails/peeks as. An exchange taps with
+    /// the catch-all `#` binding key.
     pub fn spec(&self) -> SubSpec {
         match self.kind {
             DestKind::Topic => SubSpec::Topic(self.name.clone()),
             DestKind::Queue => SubSpec::Queue(self.name.clone()),
+            DestKind::Exchange => SubSpec::Exchange {
+                exchange: self.name.clone(),
+                binding_key: "#".to_string(),
+            },
         }
     }
 
-    /// Build a destination from a source spec, if it is an AMQP one (`topic:` /
-    /// `queue:`). Other specs have no destination-list representation.
+    /// Build a curated destination from a source spec, if it is an AMQP 1.0
+    /// one (`topic:` / `queue:`). Other specs have no curated-list
+    /// representation.
     pub fn from_spec(spec: &SubSpec) -> Option<Self> {
         match spec {
-            SubSpec::Topic(name) => Some(Destination {
-                name: name.clone(),
-                kind: DestKind::Topic,
-            }),
-            SubSpec::Queue(name) => Some(Destination {
-                name: name.clone(),
-                kind: DestKind::Queue,
-            }),
+            SubSpec::Topic(name) => Some(Destination::new(name.clone(), DestKind::Topic)),
+            SubSpec::Queue(name) => Some(Destination::new(name.clone(), DestKind::Queue)),
             _ => None,
         }
     }
@@ -854,13 +866,40 @@ impl Destination {
     }
 }
 
-/// The left-pane destination browser for an AMQP connection: the curated list
-/// plus its selection. The AMQP analog of [`KeyBrowser`] (no scan/sort/grouping —
-/// the list is user-curated, not discovered).
+/// The left-pane destination browser for an AMQP 1.0 or RabbitMQ connection:
+/// the list plus its selection, and — for a list the broker supplies
+/// (RabbitMQ) — where its listing stands. The analog of [`KeyBrowser`], with no
+/// scan, sort or grouping.
 #[derive(Default)]
 pub struct DestinationBrowser {
     pub items: Vec<Destination>,
     pub table: TableState,
+    /// The outcome of the last listing (RabbitMQ). Unused for a curated list.
+    pub listing: Listing,
+    /// Whether a listing request is on its way to the broker. The refreshes
+    /// never stack a second one on top of it.
+    pub list_in_flight: bool,
+    /// Ticks elapsed since the last automatic re-listing.
+    pub refresh_ticks: u32,
+}
+
+/// Where a broker-supplied destination list stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Listing {
+    /// Nothing listed yet; the first listing is on its way.
+    #[default]
+    Pending,
+    /// The last listing succeeded.
+    Listed {
+        /// The broker has more queues or exchanges than the listing returns.
+        truncated: bool,
+        /// The broker's management metrics are off, so counts and rates are
+        /// missing.
+        stats_disabled: bool,
+    },
+    /// The last listing failed, for this (user-facing) reason. The rows from
+    /// an earlier listing, if any, stay on screen.
+    Failed(String),
 }
 
 /// The right-pane peek inspector for an AMQP connection: the messages from the
@@ -1094,7 +1133,7 @@ impl Connection {
     /// when it was newly added, `false` when it was already present (the existing
     /// row is selected either way).
     pub fn add_destination(&mut self, dest: Destination) -> bool {
-        if let Some(i) = self.destinations.items.iter().position(|d| *d == dest) {
+        if let Some(i) = self.destinations.items.iter().position(|d| d.same(&dest)) {
             self.destinations.table.select(Some(i));
             return false;
         }
@@ -1113,7 +1152,7 @@ impl Connection {
     pub fn merge_destinations(&mut self, dests: Vec<Destination>) -> usize {
         let mut added = 0;
         for dest in dests {
-            if !self.destinations.items.contains(&dest) {
+            if !self.destinations.items.iter().any(|d| d.same(&dest)) {
                 self.destinations.items.push(dest);
                 added += 1;
             }
@@ -1122,6 +1161,42 @@ impl Connection {
             self.destinations.table.select(Some(0));
         }
         added
+    }
+
+    /// Replace the list with a fresh broker listing (RabbitMQ), keeping the
+    /// cursor on the same destination by `(name, kind)`. When that destination
+    /// is gone (deleted on the server), the cursor stays at the same position,
+    /// clamped to the shorter list; an unselected list lands on the first row.
+    pub fn replace_destinations(&mut self, dests: Vec<Destination>) {
+        let cursor = self.destinations.table.selected();
+        let previous = self.selected_destination().cloned();
+        self.destinations.items = dests;
+        let items = &self.destinations.items;
+        let selected = (!items.is_empty()).then(|| {
+            previous
+                .and_then(|p| items.iter().position(|d| d.same(&p)))
+                .unwrap_or_else(|| cursor.unwrap_or(0).min(items.len() - 1))
+        });
+        self.destinations.table.select(selected);
+    }
+
+    /// Advance the Browser's auto-refresh clock by one tick, and say whether a
+    /// background refresh is due: `every` ticks have passed and the previous
+    /// refresh (a key scan, or a destination listing) is no longer running.
+    pub fn refresh_due(&mut self, every: u32) -> bool {
+        let (ticks, busy) = if self.caps.uses_key_scan() {
+            let busy = self.browser.phase == ScanPhase::InProgress;
+            (&mut self.browser.browse_ticks, busy)
+        } else {
+            let busy = self.destinations.list_in_flight;
+            (&mut self.destinations.refresh_ticks, busy)
+        };
+        *ticks += 1;
+        if *ticks < every {
+            return false;
+        }
+        *ticks = 0;
+        !busy
     }
 
     /// Remove the highlighted destination, reselecting a neighbour. Returns the

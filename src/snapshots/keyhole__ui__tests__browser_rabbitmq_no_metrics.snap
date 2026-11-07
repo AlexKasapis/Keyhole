@@ -1,0 +1,24 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 160, 20)"
+---
+┌ Destinations ────────────────────────────────────────────────────────────────┐┌ orders ──────────────────────────────────────────────────────────────────────┐
+│Management metrics are disabled on this broker, so counts and rates show —.   ││Type       classic queue                                                      │
+│  Name                    Kind        Msgs  Ready/Unacked  Consumers      Rate││Messages   —                                                                  │
+│▶ orders                  queue          —              —          —         —││Consumers  —                                                                  │
+│  payments                quorum         —              —          —         —││Publish    —                                                                  │
+│  audit                   stream         —              —          —         —││                                                                              │
+│  amq.direct              direct                                             —││Tailing a queue would consume its messages. To watch them, tap an exchange    │
+│  amq.fanout              fanout                                             —││that routes to it.                                                            │
+│  amq.headers             headers                                            —││                                                                              │
+│  amq.rabbitmq.trace      topic                                              —││                                                                              │
+│  keyhole.demo            topic                                              —││                                                                              │
+│                                                                              ││                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────────────────────────┘
+┌ Tail ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│exchange:name or exchange:name/binding-key:                                                                                                                   │
+│                                                                                                                                                              │
+│                                                                                                                                                              │
+│Enter taps it · non-destructive copy via a temporary queue · key defaults to #                                                                                │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ r refresh · t tap · Tab tails · : palette · ? help

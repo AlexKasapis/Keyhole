@@ -15,11 +15,15 @@ use time::OffsetDateTime;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, ConnForm, ConnHealth, Connection, DestKind, InputMode, PaletteCommand, PaneFocus,
-    PanelTab, RecordState, RecordingsFocus, Screen, SettingsRow, SubState, Subscription, ViewRow,
+    App, ConnForm, ConnHealth, Connection, DestKind, Destination, InputMode, Listing,
+    PaletteCommand, PaneFocus, PanelTab, RecordState, RecordingsFocus, Screen, SettingsRow,
+    SubState, Subscription, ViewRow,
 };
-use crate::broker::{BrokerEvent, BrokerType, ClientInfo, Payload, ServerStats, Ttl, ValueView};
-use crate::config::AnimationSpeed;
+use crate::broker::{
+    BrokerEvent, BrokerType, ClientInfo, ExchangeType, Payload, QueueType, ServerStats, Ttl,
+    ValueView, DESTINATION_LIST_CAP,
+};
+use crate::config::{AnimationSpeed, ConnectionConfig};
 use crate::theme::Theme;
 
 /// The merged home area: a single bordered box whose title is the tab strip
@@ -214,6 +218,8 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let now = app.now;
     let anim_speed = app.animation_speed();
     let panel_h = panel_band_height(frame.area().height);
+    // RabbitMQ's empty list names the vhost it looked in.
+    let vhost = active_vhost(app);
     let Some(conn) = app.active_conn_mut() else {
         let body = Paragraph::new("No active connection. Press 'c', select a profile, and Enter.")
             .style(theme.dim)
@@ -270,7 +276,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         let [table_area, value_area] =
             Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
                 .areas(body_area);
-        amqp_destination_pane(frame, conn, focus, theme, table_area);
+        amqp_destination_pane(frame, conn, focus, theme, table_area, vhost.as_deref());
         amqp_peek_pane(frame, conn, theme, value_area);
         if let Some(panel_area) = panel_area {
             panel_band(frame, conn, mode, &subscribe_buf, theme, panel_area);
@@ -500,15 +506,26 @@ fn value_body(frame: &mut Frame, conn: &mut Connection, theme: &Theme, value_are
     frame.render_widget(value, value_area);
 }
 
-/// The AMQP browser's left pane: the curated destination list (the analog of the
-/// Redis key table). Each row is a destination name with a dim `[topic]` /
-/// `[queue]` tag; an empty list shows an add prompt instead.
+/// The vhost of the active connection's RabbitMQ profile, if it is one.
+fn active_vhost(app: &App) -> Option<String> {
+    let name = &app.active_conn()?.name;
+    app.profiles.iter().find_map(|p| match p {
+        ConnectionConfig::Rabbitmq(r) if &r.name == name => Some(r.vhost.clone()),
+        _ => None,
+    })
+}
+
+/// The browser's left pane: the destination list (the analog of the Redis key
+/// table). AMQP 1.0's curated list shows each name with a dim `[topic]` /
+/// `[queue]` tag, or an add prompt when empty; RabbitMQ's listed queues and
+/// exchanges are drawn by [`rabbitmq_destination_pane`].
 fn amqp_destination_pane(
     frame: &mut Frame,
     conn: &mut Connection,
     focus: PaneFocus,
     theme: &Theme,
     area: Rect,
+    vhost: Option<&str>,
 ) {
     // The list is "focused" only when the keys pane has the keyboard *and* it
     // has not been handed onward to the message pane (the AMQP sub-focus).
@@ -517,21 +534,16 @@ fn amqp_destination_pane(
         .title(" Destinations ")
         .title_style(theme.heading)
         .border_style(border_style(theme, list_focused));
+    if conn.caps.r#type == BrokerType::Rabbitmq {
+        return rabbitmq_destination_pane(frame, conn, list_focused, theme, area, block, vhost);
+    }
     if conn.destinations.items.is_empty() {
-        let lines = match conn.caps.r#type {
-            // AMQP 0.9.1 can't list destinations, so point at the Tail anchor.
-            BrokerType::Rabbitmq => vec![
-                Line::from(""),
-                Line::styled("  Type exchange:name in the Tail tab", theme.dim),
-                Line::styled("  (press Tab) to tap an exchange.", theme.dim),
-            ],
-            _ => vec![
-                Line::from(""),
-                Line::styled("  No destinations yet.", theme.dim),
-                Line::styled("  Press 'a' to add topic:name or queue:name,", theme.dim),
-                Line::styled("  or 'r' to discover them from the broker.", theme.dim),
-            ],
-        };
+        let lines = vec![
+            Line::from(""),
+            Line::styled("  No destinations yet.", theme.dim),
+            Line::styled("  Press 'a' to add topic:name or queue:name,", theme.dim),
+            Line::styled("  or 'r' to discover them from the broker.", theme.dim),
+        ];
         frame.render_widget(Paragraph::new(lines).block(block), area);
         return;
     }
@@ -557,15 +569,396 @@ fn amqp_destination_pane(
     frame.render_stateful_widget(table, area, &mut conn.destinations.table);
 }
 
-/// The AMQP browser's right pane: the messages from the last queue peek (the
-/// analog of the Redis value pane). A topic shows a tail hint (topics don't
-/// retain); a queue with messages shows a navigable, filterable message list
-/// (upper) over a body preview of the selected message (lower) — the analog of
-/// the Redis key list + value pane. An empty / pending queue shows a hint.
+/// The minimum width of RabbitMQ's destination Name column, which takes the
+/// pane's slack. The stat columns after it drop off from the right while the
+/// pane can't fit them beside a name this wide.
+const DEST_NAME_MIN: u16 = 20;
+const DEST_KIND_WIDTH: u16 = 7;
+const DEST_MSGS_WIDTH: u16 = 7;
+const DEST_READY_UNACKED_WIDTH: u16 = 13;
+const DEST_CONSUMERS_WIDTH: u16 = 9;
+const DEST_RATE_WIDTH: u16 = 8;
+const DEST_COLUMN_SPACING: u16 = 2;
+/// The width of the `▶ ` selection marker the table reserves on every row.
+const HIGHLIGHT_SYMBOL_WIDTH: u16 = 2;
+
+/// RabbitMQ's destination stat columns, in display (and keep) order: the
+/// header and the width of each. Every column but Kind is a right-aligned
+/// number.
+const DEST_STAT_COLUMNS: [(&str, u16); 5] = [
+    ("Kind", DEST_KIND_WIDTH),
+    ("Msgs", DEST_MSGS_WIDTH),
+    ("Ready/Unacked", DEST_READY_UNACKED_WIDTH),
+    ("Consumers", DEST_CONSUMERS_WIDTH),
+    ("Rate", DEST_RATE_WIDTH),
+];
+
+/// How many of [`DEST_STAT_COLUMNS`] fit in `width` columns beside a Name
+/// column of at least [`DEST_NAME_MIN`].
+fn dest_columns_shown(width: u16) -> usize {
+    let mut used = DEST_NAME_MIN;
+    DEST_STAT_COLUMNS
+        .iter()
+        .take_while(|(_, w)| {
+            used += DEST_COLUMN_SPACING + w;
+            used <= width
+        })
+        .count()
+}
+
+/// RabbitMQ's left pane: the queues and exchanges its management API listed,
+/// with each one's kind, message counts, consumers and publish rate. Notices
+/// above the table say why the list may be stale or incomplete; with no rows,
+/// the pane explains the listing's state instead.
+fn rabbitmq_destination_pane(
+    frame: &mut Frame,
+    conn: &mut Connection,
+    focused: bool,
+    theme: &Theme,
+    area: Rect,
+    block: Block,
+    vhost: Option<&str>,
+) {
+    let listing = &conn.destinations.listing;
+    if conn.destinations.items.is_empty() {
+        let lines = match listing {
+            Listing::Pending => vec![Line::styled("Listing queues and exchanges…", theme.dim)],
+            Listing::Failed(error) => vec![
+                Line::styled(format!("{error} (tails still work)"), theme.error),
+                Line::from(""),
+                Line::styled(
+                    "Press r to retry. Set management_url on the connection if the API isn't \
+                     at the default address.",
+                    theme.dim,
+                ),
+                Line::from(""),
+                Line::styled(
+                    "To tap an exchange, press Tab and type exchange:name.",
+                    theme.dim,
+                ),
+            ],
+            Listing::Listed { .. } => vec![Line::styled(
+                format!("No queues or exchanges in vhost {}.", vhost.unwrap_or("/")),
+                theme.dim,
+            )],
+        };
+        let body = Paragraph::new(lines)
+            .wrap(Wrap { trim: true })
+            .block(block.padding(Padding::horizontal(1)));
+        frame.render_widget(body, area);
+        return;
+    }
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let mut notices: Vec<Line> = Vec::new();
+    match listing {
+        Listing::Failed(error) => notices.push(Line::styled(
+            format!("Refresh failed: {error} (tails still work). Press r to retry."),
+            theme.error,
+        )),
+        Listing::Listed {
+            truncated,
+            stats_disabled,
+        } => {
+            if *stats_disabled {
+                notices.push(Line::styled(
+                    "Management metrics are disabled on this broker, so counts and rates \
+                     show —.",
+                    theme.dim,
+                ));
+            }
+            if *truncated {
+                notices.push(Line::styled(
+                    format!(
+                        "Showing the first {} of each kind.",
+                        thousands(DESTINATION_LIST_CAP)
+                    ),
+                    theme.dim,
+                ));
+            }
+        }
+        Listing::Pending => {}
+    }
+    // Leave the table at least its header and a row.
+    let notice_h = notices
+        .iter()
+        .map(|l| wrapped_rows(l, inner.width))
+        .sum::<u16>()
+        .min(inner.height.saturating_sub(2));
+    let [notice_area, table_area] =
+        Layout::vertical([Constraint::Length(notice_h), Constraint::Min(0)]).areas(inner);
+    if notice_h > 0 {
+        frame.render_widget(
+            Paragraph::new(notices).wrap(Wrap { trim: true }),
+            notice_area,
+        );
+    }
+
+    // Self-windowed like the Redis key table: only the visible rows are built.
+    let shown = dest_columns_shown(table_area.width.saturating_sub(HIGHLIGHT_SYMBOL_WIDTH));
+    let items = &conn.destinations.items;
+    let total = items.len();
+    let viewport = table_area.height.saturating_sub(1) as usize;
+    let selected = conn.destinations.table.selected();
+    let offset = visible_offset(conn.destinations.table.offset(), selected, viewport, total);
+    let end = offset.saturating_add(viewport).min(total);
+    let rows: Vec<Row> = items[offset..end]
+        .iter()
+        .map(|d| {
+            let mut cells = vec![Cell::from(d.name.clone())];
+            for (i, value) in dest_stat_cells(d).into_iter().enumerate().take(shown) {
+                cells.push(stat_cell(value, i > 0));
+            }
+            let row = Row::new(cells);
+            if d.info.as_ref().is_some_and(|i| i.internal) {
+                row.style(theme.dim)
+            } else {
+                row
+            }
+        })
+        .collect();
+    let mut widths = vec![Constraint::Min(DEST_NAME_MIN)];
+    let mut header = vec![Cell::from("Name")];
+    for (i, (title, width)) in DEST_STAT_COLUMNS.iter().enumerate().take(shown) {
+        widths.push(Constraint::Length(*width));
+        header.push(stat_cell(title.to_string(), i > 0));
+    }
+    let table = Table::new(rows, widths)
+        .header(Row::new(header).style(theme.header))
+        .column_spacing(DEST_COLUMN_SPACING)
+        .row_highlight_style(selection_style(theme, focused))
+        .highlight_symbol("▶ ")
+        .highlight_spacing(HighlightSpacing::Always);
+    *conn.destinations.table.offset_mut() = offset;
+    // The rows are pre-sliced, so the widget gets a viewport-local state.
+    let mut win = TableState::default();
+    win.select(selected.map(|s| s.saturating_sub(offset)));
+    frame.render_stateful_widget(table, table_area, &mut win);
+}
+
+/// A table cell, right-aligned when it holds a number.
+fn stat_cell(text: String, numeric: bool) -> Cell<'static> {
+    let line = Line::from(text);
+    Cell::from(if numeric { line.right_aligned() } else { line })
+}
+
+/// A RabbitMQ row's stat columns, in [`DEST_STAT_COLUMNS`] order. A count or
+/// rate the broker didn't report shows `—`; the queue counts are blank on an
+/// exchange, which has none.
+fn dest_stat_cells(d: &Destination) -> [String; 5] {
+    let info = d.info.as_ref();
+    let kind = info
+        .and_then(|i| {
+            i.queue_type
+                .as_ref()
+                .map(QueueType::label)
+                .or(i.exchange_type.as_ref().map(ExchangeType::label))
+        })
+        .unwrap_or(d.kind.tag())
+        .to_string();
+    let rate = rate_label(info.and_then(|i| i.publish_rate));
+    if d.kind != DestKind::Queue {
+        return [kind, String::new(), String::new(), String::new(), rate];
+    }
+    let ready_unacked = match info.map(|i| (i.ready, i.unacked)) {
+        Some((Some(ready), Some(unacked))) => {
+            format!("{}/{}", list_count(ready), list_count(unacked))
+        }
+        _ => "—".to_string(),
+    };
+    [
+        kind,
+        count_label(info.and_then(|i| i.messages)),
+        ready_unacked,
+        count_label(info.and_then(|i| i.consumers)),
+        rate,
+    ]
+}
+
+/// A count for a narrow column: exact below 100,000, compact above.
+fn list_count(n: u64) -> String {
+    if n < 100_000 {
+        n.to_string()
+    } else {
+        human_count(n)
+    }
+}
+
+/// A count, or `—` when the broker didn't report it.
+fn count_label(n: Option<u64>) -> String {
+    n.map_or_else(|| "—".to_string(), list_count)
+}
+
+/// A per-second rate, or `—` when the broker didn't report it. The broker's
+/// smoothed rates can dip below zero; those read as `0.0/s`.
+fn rate_label(rate: Option<f64>) -> String {
+    match rate {
+        None => "—".to_string(),
+        Some(r) if r < 100.0 => format!("{:.1}/s", r.max(0.0)),
+        Some(r) if r < 100_000.0 => format!("{r:.0}/s"),
+        Some(r) => format!("{}/s", human_count(r as u64)),
+    }
+}
+
+/// `n` with thousands separators: `5000` → `5,000`.
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// How many rows `line` takes when word-wrapped into `width` columns: the
+/// height to give a wrapped notice. Greedy wrapping on spaces, with a word
+/// wider than the row split across rows, as ratatui's word wrapper does.
+fn wrapped_rows(line: &Line, width: u16) -> u16 {
+    let width = width as usize;
+    if width == 0 {
+        return 0;
+    }
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    let (mut rows, mut col) = (1usize, 0usize);
+    for word in text.split_whitespace() {
+        let w = UnicodeWidthStr::width(word);
+        if col > 0 && col + 1 + w <= width {
+            col += 1 + w;
+            continue;
+        }
+        if col > 0 {
+            rows += 1;
+        }
+        // A word wider than the row continues onto the next rows.
+        rows += w.saturating_sub(1) / width;
+        col = w - w.saturating_sub(1) / width * width;
+    }
+    rows.try_into().unwrap_or(u16::MAX)
+}
+
+/// RabbitMQ's right pane: the selected queue's or exchange's details, and
+/// what `t` (and Enter) do with it.
+fn rabbitmq_details_pane(frame: &mut Frame, dest: &Destination, theme: &Theme, area: Rect) {
+    let field = |label: &str, value: String| {
+        Line::from(vec![
+            Span::styled(format!("{label:<11}"), theme.accent),
+            Span::raw(value),
+        ])
+    };
+    let info = dest.info.as_ref();
+    let rate = rate_label(info.and_then(|i| i.publish_rate));
+    let mut lines = Vec::new();
+    let hint = match dest.kind {
+        DestKind::Exchange => {
+            let exchange_type = info.and_then(|i| i.exchange_type.clone());
+            let internal = if info.is_some_and(|i| i.internal) {
+                " (internal)"
+            } else {
+                ""
+            };
+            let type_name = exchange_type
+                .as_ref()
+                .map_or("unknown", ExchangeType::label);
+            lines.push(field("Type", format!("{type_name} exchange{internal}")));
+            let rate_in = match info.and_then(|i| i.publish_rate) {
+                Some(_) => format!("{rate} in"),
+                None => rate.clone(),
+            };
+            lines.push(field("Publish", rate_in));
+            match exchange_type {
+                Some(ExchangeType::Topic) => "Press t or Enter to tap it with binding key #, \
+                    which matches every routing key."
+                    .to_string(),
+                Some(ExchangeType::Fanout) => "Press t or Enter to tap it: a fanout exchange \
+                    copies every message to the tap."
+                    .to_string(),
+                Some(ExchangeType::Direct) => "Press t or Enter to tap it, then type the \
+                    routing key after exchange:name/ — a direct exchange only routes exact \
+                    keys."
+                    .to_string(),
+                Some(ExchangeType::Headers) => "A headers exchange routes on message headers \
+                    rather than the binding key, and header-based taps aren't supported."
+                    .to_string(),
+                Some(ExchangeType::Other(t)) => format!(
+                    "Press t or Enter to tap it with binding key #, which may not match \
+                     on a {t} exchange."
+                ),
+                None => "Press t or Enter to tap it with binding key #.".to_string(),
+            }
+        }
+        _ => {
+            let queue_type = match info.and_then(|i| i.queue_type.as_ref()) {
+                Some(QueueType::Other(t)) => t.as_str(),
+                Some(QueueType::Quorum) => "quorum",
+                Some(QueueType::Stream) => "stream",
+                Some(QueueType::Classic) | None => "classic",
+            };
+            lines.push(field("Type", format!("{queue_type} queue")));
+            let ready_unacked = match info.map(|i| (i.ready, i.unacked)) {
+                Some((Some(ready), Some(unacked))) => {
+                    format!(" ({ready} ready · {unacked} unacked)")
+                }
+                _ => String::new(),
+            };
+            lines.push(field(
+                "Messages",
+                format!(
+                    "{}{ready_unacked}",
+                    info.and_then(|i| i.messages)
+                        .map_or_else(|| "—".to_string(), |n| n.to_string())
+                ),
+            ));
+            lines.push(field(
+                "Consumers",
+                info.and_then(|i| i.consumers)
+                    .map_or_else(|| "—".to_string(), |n| n.to_string()),
+            ));
+            lines.push(field("Publish", rate));
+            "Tailing a queue would consume its messages. To watch them, tap an exchange \
+             that routes to it."
+                .to_string()
+        }
+    };
+    lines.push(Line::from(""));
+    lines.push(Line::styled(hint, theme.dim));
+    let para = Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .title(format!(" {} ", dest.name))
+                .title_style(theme.heading)
+                .border_style(theme.border),
+        )
+        .wrap(Wrap { trim: false });
+    frame.render_widget(para, area);
+}
+
+/// The browser's right pane. RabbitMQ shows the selected row's details
+/// ([`rabbitmq_details_pane`]). AMQP 1.0 shows the messages from the last
+/// queue peek (the analog of the Redis value pane): a topic shows a tail hint
+/// (topics don't retain); a queue with messages shows a navigable, filterable
+/// message list (upper) over a body preview of the selected message (lower) —
+/// the analog of the Redis key list + value pane. An empty / pending queue
+/// shows a hint.
 fn amqp_peek_pane(frame: &mut Frame, conn: &mut Connection, theme: &Theme, area: Rect) {
+    if conn.caps.r#type == BrokerType::Rabbitmq {
+        return match conn.selected_destination() {
+            Some(dest) => rabbitmq_details_pane(frame, dest, theme, area),
+            None => render_peek_hint(
+                frame,
+                theme,
+                area,
+                None,
+                "Taps open as tabs in the panel below.",
+            ),
+        };
+    }
     let sel = conn.selected_destination().map(|d| (d.canonical(), d.kind));
     let queue_name = match sel.as_ref().map(|(name, kind)| (name.clone(), *kind)) {
-        Some((name, DestKind::Topic)) => {
+        Some((name, DestKind::Topic | DestKind::Exchange)) => {
             return render_peek_hint(
                 frame,
                 theme,
@@ -2035,10 +2428,10 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from("  Console: Enter runs · ↑↓ / Ctrl-P/N history · Ctrl-L clear"),
         Line::from("  Pub/Sub & Tail: type a spec, Enter subscribes/tails"),
         Line::from(""),
-        Line::styled("AMQP browser", theme.heading),
-        Line::from("  Ctrl-→ messages · Ctrl-← destinations · ↑↓ pick message"),
-        Line::from("  a add · r discover · x/d remove · Enter open · t tail"),
-        Line::from("  P publish · / filter · the selected body previews below"),
+        Line::styled("AMQP / RabbitMQ browser", theme.heading),
+        Line::from("  Enter open · t tail · Ctrl-→ messages · Ctrl-← destinations"),
+        Line::from("  AMQP: a add · r discover · x/d remove · P publish · / filter"),
+        Line::from("  RabbitMQ: r refresh · t/Enter tap (direct: asks for a key)"),
         Line::from(""),
         Line::styled("Global keys (any pane)", theme.heading),
         Line::from("  : palette · ? help · m mouse · Esc back · Ctrl-C quit"),
@@ -2398,6 +2791,7 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::DestinationInfo;
     use time::macros::datetime;
 
     #[test]
@@ -2432,6 +2826,81 @@ mod tests {
         assert_eq!(visible_offset(0, Some(0), 10, 0), 0, "empty view");
         // A viewport taller than the list pins the window at the top.
         assert_eq!(visible_offset(0, Some(3), 50, 5), 0, "fits entirely");
+    }
+
+    #[test]
+    fn destination_columns_drop_off_from_the_right() {
+        // Name (≥ 20) + Kind + Msgs + Ready/Unacked + Consumers + Rate, each
+        // after a 2-column gap.
+        let all = DEST_NAME_MIN
+            + DEST_STAT_COLUMNS
+                .iter()
+                .map(|(_, w)| DEST_COLUMN_SPACING + w)
+                .sum::<u16>();
+        assert_eq!(dest_columns_shown(all), 5);
+        assert_eq!(dest_columns_shown(all - 1), 4, "Rate goes first");
+        assert_eq!(dest_columns_shown(DEST_NAME_MIN + 9), 1, "just Kind");
+        assert_eq!(dest_columns_shown(DEST_NAME_MIN + 8), 0, "just the name");
+        assert_eq!(dest_columns_shown(0), 0);
+    }
+
+    #[test]
+    fn destination_stats_show_dashes_for_what_the_broker_left_out() {
+        use crate::broker::actor::mock;
+        let mut queue = mock::queue_row("q", QueueType::Quorum, 1_980);
+        queue.ready = Some(1_960);
+        queue.unacked = Some(20);
+        queue.publish_rate = Some(9.6);
+        let row = Destination::from_info(queue.clone());
+        assert_eq!(
+            dest_stat_cells(&row),
+            ["quorum", "1980", "1960/20", "0", "9.6/s"].map(String::from)
+        );
+        // Metrics off: every count and rate is missing.
+        let bare = DestinationInfo {
+            messages: None,
+            ready: None,
+            unacked: None,
+            consumers: None,
+            publish_rate: None,
+            ..queue
+        };
+        assert_eq!(
+            dest_stat_cells(&Destination::from_info(bare)),
+            ["quorum", "—", "—", "—", "—"].map(String::from)
+        );
+        // An exchange has no queue counts at all.
+        let ex = Destination::from_info(mock::exchange_row("x", ExchangeType::Fanout));
+        assert_eq!(
+            dest_stat_cells(&ex),
+            ["fanout", "", "", "", "—"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn list_numbers_stay_narrow() {
+        assert_eq!(list_count(99_999), "99999");
+        assert_eq!(list_count(123_456), "123.5k");
+        assert_eq!(rate_label(Some(-0.4)), "0.0/s", "a smoothed dip below zero");
+        assert_eq!(rate_label(Some(9.65)), "9.7/s");
+        assert_eq!(rate_label(Some(1_234.4)), "1234/s");
+        assert_eq!(rate_label(Some(250_000.0)), "250.0k/s");
+        assert_eq!(rate_label(None), "—");
+        assert_eq!(thousands(5_000), "5,000");
+        assert_eq!(thousands(999), "999");
+        assert_eq!(thousands(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn wrapped_rows_counts_word_wrapped_rows() {
+        let rows = |text: &str, width| wrapped_rows(&Line::from(text.to_string()), width);
+        assert_eq!(rows("short", 20), 1);
+        assert_eq!(rows("aaaa bbbb cccc", 9), 2, "aaaa bbbb / cccc");
+        assert_eq!(rows("aaaa bbbb cccc", 4), 3);
+        assert_eq!(rows("abcdefghij", 4), 3, "a long word is split");
+        assert_eq!(rows("x abcdefghij", 4), 4);
+        assert_eq!(rows("", 10), 1);
+        assert_eq!(rows("text", 0), 0);
     }
 
     #[test]

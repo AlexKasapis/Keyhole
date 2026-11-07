@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::broker::actor::mock;
-use crate::broker::{EntryMeta, Payload, Ttl};
+use crate::broker::{EntryMeta, Payload, QueueType, Ttl};
 use crossterm::event::{KeyEventState, KeyModifiers};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc::{self, Receiver};

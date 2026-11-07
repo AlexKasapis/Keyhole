@@ -55,6 +55,7 @@ impl App {
             AppEvent::DestinationsDiscovered { id, result } => {
                 self.on_destinations_discovered(id, result)
             }
+            AppEvent::DestinationsListed { id, result } => self.on_destinations_listed(id, result),
             AppEvent::StatsUpdated { id, stats } => self.on_stats(id, stats),
             AppEvent::ConnError { id, context, error } => self.on_conn_error(id, context, error),
             AppEvent::Realtime { id, sub_id, event } => self.on_realtime(id, sub_id, event),
@@ -111,25 +112,28 @@ impl App {
                 // Liveness check; a failure surfaces as Disconnected.
                 conn.handle.send(ConnCommand::Ping);
             }
-            // Auto-refresh the key browser on its own clock, independent of
-            // navigation, so keys added or removed server-side appear without
-            // the user touching anything. Gated to the Browser screen (no point
-            // re-scanning while a tail is on screen) and never stacked on top of
-            // a scan that is still running.
-            if refresh_ticks > 0 && on_browser && conn.caps.uses_key_scan() {
-                conn.browser.browse_ticks += 1;
-                if conn.browser.browse_ticks >= refresh_ticks {
-                    conn.browser.browse_ticks = 0;
-                    if conn.browser.phase != ScanPhase::InProgress {
-                        refresh_id = Some(conn.id);
-                    }
-                }
+            // Auto-refresh the browser's list on its own clock, independent of
+            // navigation, so keys (Redis) or queues and exchanges (RabbitMQ)
+            // added or removed server-side appear without the user touching
+            // anything. Gated to the Browser screen (no point refreshing while
+            // a tail is on screen) and never stacked on top of a refresh that
+            // is still running.
+            if refresh_ticks > 0
+                && on_browser
+                && conn.caps.auto_refresh()
+                && conn.refresh_due(refresh_ticks)
+            {
+                refresh_id = Some((conn.id, conn.caps.uses_key_scan()));
             }
         }
-        if let Some(id) = refresh_id {
+        match refresh_id {
             // A background refresh: keep the current list visible and swap in the
             // fresh scan once it completes.
-            self.start_scan(id, false);
+            Some((id, true)) => self.start_scan(id, false),
+            // A dead management API isn't re-probed here, so it fails fast
+            // instead of stalling the connection's actor on every tick.
+            Some((id, false)) => self.list_destinations(id, false),
+            None => {}
         }
     }
 
@@ -159,9 +163,10 @@ impl App {
                 // connect.
                 self.discover_destinations(id, false);
             }
-            // Nothing to load yet: AMQP 0.9.1 can't list destinations, so the
-            // pane stays empty and exchange taps start from the Tail anchor.
-            BrokerType::Rabbitmq => {}
+            // AMQP 0.9.1 can't list destinations, so the queues and exchanges
+            // come from the management API. `connect` has just probed it, so
+            // this doesn't probe again.
+            BrokerType::Rabbitmq => self.list_destinations(id, false),
         }
         if caps.can_dashboard {
             self.request_stats(id);
@@ -298,6 +303,32 @@ impl App {
             format!("Discovered {total} destinations ({added} new)"),
             false,
         );
+    }
+
+    /// A RabbitMQ listing returned: replace the destination list (the cursor
+    /// stays on the same queue or exchange), or keep the rows already shown and
+    /// record why the listing failed, which the pane explains.
+    pub(super) fn on_destinations_listed(
+        &mut self,
+        id: ConnId,
+        result: Result<DestinationList, String>,
+    ) {
+        let Some(conn) = self.conn_by_id_mut(id) else {
+            return;
+        };
+        conn.destinations.list_in_flight = false;
+        conn.destinations.listing = match result {
+            Ok(list) => {
+                conn.replace_destinations(
+                    list.items.into_iter().map(Destination::from_info).collect(),
+                );
+                Listing::Listed {
+                    truncated: list.truncated,
+                    stats_disabled: list.stats_disabled,
+                }
+            }
+            Err(e) => Listing::Failed(e),
+        };
     }
 
     /// A publish completed: confirm or report it, and re-peek when the message

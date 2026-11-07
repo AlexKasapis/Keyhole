@@ -1,0 +1,28 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 90, 24)"
+---
+┌ Destinations ─────────────────────────────┐┌ Messages ─────────────────────────────────┐
+│ management API unavailable at             ││Taps open as tabs in the panel below.      │
+│ http://127.0.0.1:15672: could not reach   ││                                           │
+│ the management API: Connection refused    ││                                           │
+│ (os error 111) (tails still work)         ││                                           │
+│                                           ││                                           │
+│ Press r to retry. Set management_url on   ││                                           │
+│ the connection if the API isn't at the    ││                                           │
+│ default address.                          ││                                           │
+│                                           ││                                           │
+│ To tap an exchange, press Tab and type    ││                                           │
+│ exchange:name.                            ││                                           │
+│                                           ││                                           │
+│                                           ││                                           │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
+│exchange:name or exchange:name/binding-key:                                             │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│                                                                                        │
+│Enter taps it · non-destructive copy via a temporary queue · key defaults to #          │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ r refresh · t tap · Tab tails · : palette · ? help
