@@ -17,6 +17,7 @@
 //! - A paged list comes back in an envelope, and asking past `page_count` is a
 //!   400.
 //! - Every auth failure is a 401 (never a 403), told apart by its `reason`.
+//! - 4.x lists a quorum queue's negative `delivery_limit` as `"unlimited"`.
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -587,52 +588,71 @@ pub struct NodeInfo {
     pub partitions: Vec<String>,
 }
 
-/// One queue row. Counts and rates are missing when metrics are off.
+/// One queue row. Counts and rates are missing when metrics are off. A listing
+/// is one parse, so every field but the name reads an odd value as missing
+/// rather than failing the row, and the listing with it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueueInfo {
     pub name: String,
-    #[serde(default, rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "or_default")]
     pub queue_type: QueueType,
+    #[serde(default, deserialize_with = "lenient")]
     pub state: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub durable: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub auto_delete: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub exclusive: bool,
-    #[serde(default, deserialize_with = "object_or_empty")]
+    #[serde(default, deserialize_with = "or_default")]
     pub arguments: Map<String, Value>,
+    #[serde(default, deserialize_with = "lenient")]
     pub policy: Option<String>,
-    #[serde(default, deserialize_with = "object_or_empty")]
+    #[serde(default, deserialize_with = "or_default")]
     pub effective_policy_definition: Map<String, Value>,
     /// 4.x only; 3.x has it in `arguments` or the policy, if anywhere.
-    pub delivery_limit: Option<i64>,
+    #[serde(default, deserialize_with = "delivery_limit")]
+    pub delivery_limit: Option<DeliveryLimit>,
+    #[serde(default, deserialize_with = "lenient")]
     pub messages: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
     pub messages_ready: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
     pub messages_unacknowledged: Option<u64>,
+    #[serde(default, deserialize_with = "lenient")]
     pub consumers: Option<u64>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub message_stats: MessageStats,
 }
 
-/// One exchange row. The default exchange is named `""`.
+/// A 4.x quorum queue's `delivery_limit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryLimit {
+    Limit(i64),
+    /// `"unlimited"`: a negative limit, which 4.x reads as none.
+    Unlimited,
+}
+
+/// One exchange row. The default exchange is named `""`. Lenient like
+/// [`QueueInfo`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct ExchangeInfo {
     pub name: String,
     /// `direct`, `fanout`, `topic`, `headers`, or a plugin type (`x-…`).
-    #[serde(rename = "type")]
+    #[serde(default, rename = "type", deserialize_with = "or_default")]
     pub exchange_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub durable: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub auto_delete: bool,
     /// Internal exchanges refuse client publishes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub internal: bool,
-    #[serde(default, deserialize_with = "object_or_empty")]
+    #[serde(default, deserialize_with = "or_default")]
     pub arguments: Map<String, Value>,
+    #[serde(default, deserialize_with = "lenient")]
     pub policy: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "or_default")]
     pub message_stats: MessageStats,
 }
 
@@ -755,13 +775,9 @@ pub struct ChannelDetails {
 // Lenient field parsers
 // ---------------------------------------------------------------------------
 
-/// A `{"rate": x}` details object as its rate.
+/// A `{"rate": x}` details object as its rate; anything else is `None`.
 fn rate<'de, D: Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
-    #[derive(Deserialize)]
-    struct Details {
-        rate: Option<f64>,
-    }
-    Ok(Option::<Details>::deserialize(d)?.and_then(|d| d.rate))
+    Ok(Option::<Value>::deserialize(d)?.and_then(|v| v.get("rate")?.as_f64()))
 }
 
 /// An object field that the broker renders as `[]` (or `null`) when it's empty
@@ -778,14 +794,34 @@ where
     }
 }
 
-/// A value some connection kinds fill with a non-number (`"unknown"`), read as
-/// `None` when it isn't a `T`.
+/// A value read as `None` when it's `null` or not a `T` (some connection kinds
+/// fill `peer_port` with `"unknown"`).
 fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned,
 {
     Ok(Option::<Value>::deserialize(d)?.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// A value read as `T::default()` when it's `null` or not a `T` — including
+/// an Erlang empty proplist (`[]`) where an object belongs.
+fn or_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned + Default,
+{
+    Ok(lenient(d)?.unwrap_or_default())
+}
+
+/// 4.x's `delivery_limit`: a number, or `"unlimited"` for a negative limit.
+/// Anything else is `None`.
+fn delivery_limit<'de, D: Deserializer<'de>>(d: D) -> Result<Option<DeliveryLimit>, D::Error> {
+    Ok(match Option::<Value>::deserialize(d)? {
+        Some(Value::Number(n)) => n.as_i64().map(DeliveryLimit::Limit),
+        Some(Value::String(s)) if s == "unlimited" => Some(DeliveryLimit::Unlimited),
+        _ => None,
+    })
 }
 
 /// User tags: a JSON array, or a comma-separated string on RabbitMQ before 3.9.
@@ -1001,7 +1037,10 @@ mod tests {
         let v3: Page<QueueInfo> = page(fixture!("queues.v3"));
         let v4: Page<QueueInfo> = page(fixture!("queues.v4"));
         assert_eq!(queue(&v3, "spike.quorum.limit").delivery_limit, None);
-        assert_eq!(queue(&v4, "spike.quorum.limit").delivery_limit, Some(3));
+        assert_eq!(
+            queue(&v4, "spike.quorum.limit").delivery_limit,
+            Some(DeliveryLimit::Limit(3))
+        );
         assert!(queue(&v3, "spike.consumed").arguments.is_empty());
         assert_eq!(
             queue(&v4, "spike.consumed").arguments.get("x-queue-type"),
@@ -1042,6 +1081,82 @@ mod tests {
         .unwrap();
         assert_eq!(q.message_stats.publish_rate, Some(-0.2));
         assert_eq!(q.message_stats.ack_rate, None);
+    }
+
+    #[test]
+    fn a_negative_delivery_limit_is_unlimited_on_4x_and_absent_on_3x() {
+        // 4.x reports a negative limit, by argument or by policy, as
+        // `"unlimited"`, and 0 as itself. 3.x has no `delivery_limit` field.
+        let v4: Page<QueueInfo> = page(fixture!("queues.negative-delivery-limit.v4"));
+        let limit = |name: &str| queue(&v4, name).delivery_limit;
+        assert_eq!(limit("spike.classic"), None);
+        assert_eq!(
+            limit("spike.quorum.default"),
+            Some(DeliveryLimit::Limit(20))
+        );
+        assert_eq!(limit("spike.quorum.zero"), Some(DeliveryLimit::Limit(0)));
+        for name in ["spike.quorum.unlimited", "spike.quorum.policy-unlimited"] {
+            assert_eq!(limit(name), Some(DeliveryLimit::Unlimited), "{name}");
+        }
+        let v3: Page<QueueInfo> = page(fixture!("queues.negative-delivery-limit.v3"));
+        assert_eq!(v3.items.len(), 4);
+        assert!(v3.items.iter().all(|q| q.delivery_limit.is_none()));
+        assert_eq!(
+            queue(&v3, "spike.quorum.unlimited")
+                .arguments
+                .get("x-delivery-limit"),
+            Some(&json!(-1))
+        );
+    }
+
+    #[test]
+    fn an_odd_field_reads_as_missing_without_failing_the_listing() {
+        // Every field but the name holds a value of the wrong kind.
+        let queues: Page<QueueInfo> = page(
+            r#"{"page_count":1,"items":[
+                {"name":"odd","type":7,"state":{"syncing":12},"durable":null,
+                 "auto_delete":"no","exclusive":1,"arguments":[["x",1]],"policy":[],
+                 "effective_policy_definition":"","delivery_limit":"infinity",
+                 "messages":-1,"messages_ready":1.5,"messages_unacknowledged":"0",
+                 "consumers":null,"message_stats":{"publish_details":{"rate":"fast"},
+                 "ack_details":[],"deliver_get_details":{"rate":2}}},
+                {"name":"plain","type":"quorum","delivery_limit":3,"messages":4}]}"#,
+        );
+        let odd = queue(&queues, "odd");
+        assert_eq!(odd.queue_type, QueueType::Classic);
+        assert_eq!((&odd.state, &odd.policy), (&None, &None));
+        assert!(!odd.durable && !odd.auto_delete && !odd.exclusive);
+        assert!(odd.arguments.is_empty() && odd.effective_policy_definition.is_empty());
+        assert_eq!(odd.delivery_limit, None);
+        let counts = [
+            odd.messages,
+            odd.messages_ready,
+            odd.messages_unacknowledged,
+            odd.consumers,
+        ];
+        assert_eq!(counts, [None; 4]);
+        let rates = &odd.message_stats;
+        assert_eq!((rates.publish_rate, rates.ack_rate), (None, None));
+        assert_eq!(rates.deliver_get_rate, Some(2.0));
+        let plain = queue(&queues, "plain");
+        assert_eq!(plain.delivery_limit, Some(DeliveryLimit::Limit(3)));
+        assert_eq!(plain.messages, Some(4));
+
+        let exchanges: Page<ExchangeInfo> = page(
+            r#"{"page_count":1,"items":[
+                {"name":"odd","type":null,"durable":"yes","auto_delete":0,"internal":[],
+                 "arguments":"none","policy":5,"message_stats":[]},
+                {"name":"plain","type":"topic","internal":true}]}"#,
+        );
+        let [odd, plain] = &exchanges.items[..] else {
+            panic!("{:?}", exchanges.items)
+        };
+        assert_eq!(odd.exchange_type, "");
+        assert!(!odd.durable && !odd.auto_delete && !odd.internal);
+        assert!(odd.arguments.is_empty() && odd.policy.is_none());
+        assert_eq!(odd.message_stats.publish_in_rate, None);
+        assert_eq!(plain.exchange_type, "topic");
+        assert!(plain.internal);
     }
 
     #[test]

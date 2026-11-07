@@ -464,8 +464,8 @@ fn destination_list(
 }
 
 fn queue_info(q: QueueInfo, requeue_counts: bool) -> DestinationInfo {
-    // Only 3.x lacks the `delivery_limit` field; a broker that reports it is
-    // 4.x, where a requeue doesn't count either way.
+    // Only 3.x lacks the `delivery_limit` field; a broker that reports it (even
+    // as `unlimited`) is 4.x, where a requeue doesn't count either way.
     let counts = requeue_counts && q.queue_type == QueueType::Quorum && q.delivery_limit.is_none();
     let peek_delivery_limit = counts.then(|| configured_delivery_limit(&q)).flatten();
     DestinationInfo {
@@ -485,18 +485,19 @@ fn queue_info(q: QueueInfo, requeue_counts: bool) -> DestinationInfo {
 
 /// A 3.x quorum queue's delivery limit: its `x-delivery-limit` argument or a
 /// `delivery-limit` policy, the lower one when both are set (as the broker
-/// applies it). 3.x has no default limit. A negative limit means unlimited.
+/// applies it). 3.x has no default limit. It doesn't validate the argument, so
+/// the limit can be negative, which (like 0) drops or dead-letters a message on
+/// its first requeue.
 fn configured_delivery_limit(q: &QueueInfo) -> Option<i64> {
     let argument = q.arguments.get("x-delivery-limit").and_then(|v| v.as_i64());
     let policy = q
         .effective_policy_definition
         .get("delivery-limit")
         .and_then(|v| v.as_i64());
-    let limit = match (argument, policy) {
+    match (argument, policy) {
         (Some(a), Some(p)) => Some(a.min(p)),
         (a, p) => a.or(p),
-    };
-    limit.filter(|&n| n >= 0)
+    }
 }
 
 fn exchange_info(e: ExchangeInfo) -> DestinationInfo {
@@ -1100,6 +1101,43 @@ mod tests {
         let list = conn.list_destinations(false).await.expect("lists");
         server.join().unwrap();
         assert!(limits(&list).is_empty(), "{:?}", limits(&list));
+
+        // A negative or zero limit on 3.x drops a message on its first
+        // requeue, so it's marked too.
+        let (mut conn, server) = probed_conn(
+            "3.13.7",
+            false,
+            vec![
+                (200, fixture!("queues.negative-delivery-limit.v3")),
+                (200, fixture!("exchanges.v3")),
+            ],
+        )
+        .await;
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        assert_eq!(
+            limits(&list),
+            [
+                ("spike.quorum.unlimited".to_string(), Some(-1)),
+                ("spike.quorum.zero".to_string(), Some(0)),
+            ]
+        );
+
+        // On 4.x a negative limit is reported as `unlimited`. That still marks
+        // the broker as 4.x when its version is unknown (which is otherwise
+        // assumed to count).
+        let (mut conn, server) = probed_conn(
+            "",
+            false,
+            vec![
+                (200, fixture!("queues.negative-delivery-limit.v4")),
+                (200, fixture!("exchanges.v4")),
+            ],
+        )
+        .await;
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        assert!(limits(&list).is_empty(), "{:?}", limits(&list));
     }
 
     #[test]
@@ -1110,11 +1148,22 @@ mod tests {
                 "effective_policy_definition":{"delivery-limit":4}}"#,
         );
         assert_eq!(configured_delivery_limit(&both), Some(4));
-        // An Erlang empty proplist (`[]`) and a negative (unlimited) value.
-        let none = queue(
+        // 3.x accepts a negative argument and drops on the first requeue, as
+        // it does at 0. An Erlang empty proplist (`[]`) is no policy.
+        for limit in [0, -1] {
+            let q = queue(&format!(
+                r#"{{"name":"q","type":"quorum","arguments":{{"x-delivery-limit":{limit}}},
+                    "effective_policy_definition":[]}}"#
+            ));
+            assert_eq!(configured_delivery_limit(&q), Some(limit));
+        }
+        // A negative argument beats a policy too.
+        let negative = queue(
             r#"{"name":"q","type":"quorum","arguments":{"x-delivery-limit":-1},
-                "effective_policy_definition":[]}"#,
+                "effective_policy_definition":{"delivery-limit":5}}"#,
         );
+        assert_eq!(configured_delivery_limit(&negative), Some(-1));
+        let none = queue(r#"{"name":"q","type":"quorum"}"#);
         assert_eq!(configured_delivery_limit(&none), None);
         // A 3.x broker counts it; an unknown version is assumed to.
         assert_eq!(queue_info(both.clone(), true).peek_delivery_limit, Some(4));
@@ -2055,8 +2104,10 @@ mod integration_tests {
         assert_eq!(format!("{err:#}"), STREAM_PEEK_HINT);
     }
 
-    #[tokio::test]
-    async fn the_listing_marks_a_limited_quorum_queue_on_3x_only() {
+    /// The listing's row for a new durable quorum queue declared with
+    /// `x-delivery-limit: limit` (deleted again), and the broker's major
+    /// version.
+    async fn listed_quorum_queue(limit: i32) -> (DestinationInfo, Option<u32>) {
         use crate::broker::QueueType;
         use lapin::options::QueueDeleteOptions;
         let queue = unique("keyhole.it.quorum");
@@ -2068,7 +2119,7 @@ mod integration_tests {
         );
         args.insert(
             "x-delivery-limit".into(),
-            lapin::types::AMQPValue::LongInt(3),
+            lapin::types::AMQPValue::LongInt(limit),
         );
         declare_queue(&channel, &queue, true, args).await;
 
@@ -2083,11 +2134,26 @@ mod integration_tests {
         let list = list.expect("lists");
         let row = list
             .items
-            .iter()
+            .into_iter()
             .find(|d| d.name == queue)
             .expect("the quorum queue is listed");
         assert_eq!(row.queue_type, Some(QueueType::Quorum));
+        (row, major)
+    }
+
+    #[tokio::test]
+    async fn the_listing_marks_a_limited_quorum_queue_on_3x_only() {
+        let (row, major) = listed_quorum_queue(3).await;
         let expected = if major == Some(3) { Some(3) } else { None };
+        assert_eq!(row.peek_delivery_limit, expected, "RabbitMQ {major:?}");
+    }
+
+    #[tokio::test]
+    async fn the_listing_marks_a_negative_limit_on_3x_only() {
+        // 3.x accepts `-1` and drops or dead-letters a message on its first
+        // requeue. 4.x reads it as no limit (and lists it as `unlimited`).
+        let (row, major) = listed_quorum_queue(-1).await;
+        let expected = if major == Some(3) { Some(-1) } else { None };
         assert_eq!(row.peek_delivery_limit, expected, "RabbitMQ {major:?}");
     }
 

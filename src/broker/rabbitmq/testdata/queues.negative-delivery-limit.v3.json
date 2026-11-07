@@ -1,0 +1,80 @@
+{
+  "filtered_count": 4,
+  "item_count": 4,
+  "items": [
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.classic",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.default",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-delivery-limit": -1,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.unlimited",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-delivery-limit": 0,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.zero",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    }
+  ],
+  "page": 1,
+  "page_count": 1,
+  "page_size": 500,
+  "total_count": 4
+}

@@ -2341,14 +2341,16 @@ mod tests {
     /// (through the real keys and reply path), the listing's `payments` being a
     /// 3.x quorum queue whose peeks count toward a delivery limit of 3.
     async fn rabbitmq_peeked(name: &str, result: Result<Vec<BrokerEvent>, String>) -> App {
-        let mut list = mock::sample_destinations();
-        let payments = list
-            .items
-            .iter_mut()
-            .find(|d| d.name == "payments")
-            .unwrap();
-        payments.peek_delivery_limit = Some(3);
-        let (mut app, _rx) = rabbitmq_browser(Some(Ok(list))).await;
+        rabbitmq_peeked_with_limit(name, 3, result).await
+    }
+
+    /// [`rabbitmq_peeked`] with `payments`' delivery limit at `limit`.
+    async fn rabbitmq_peeked_with_limit(
+        name: &str,
+        limit: i64,
+        result: Result<Vec<BrokerEvent>, String>,
+    ) -> App {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(payments_limited_to(limit)))).await;
         select_destination(&mut app, name);
         press(&mut app, KeyEvent::from(KeyCode::Enter));
         app.handle_event(AppEvent::Peeked {
@@ -2421,17 +2423,24 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn rabbitmq_quorum_warning_shows_only_when_a_peek_counts_toward_a_limit() {
-        use crate::config::PeekMode;
-        const WARNING: &str = "delivery-limit of 3";
+    /// The sample listing with `payments` a 3.x quorum queue whose peeks
+    /// count toward a delivery limit of `limit`.
+    fn payments_limited_to(limit: i64) -> DestinationList {
         let mut list = mock::sample_destinations();
         let payments = list
             .items
             .iter_mut()
             .find(|d| d.name == "payments")
             .unwrap();
-        payments.peek_delivery_limit = Some(3);
+        payments.peek_delivery_limit = Some(limit);
+        list
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_quorum_warning_shows_only_when_a_peek_counts_toward_a_limit() {
+        use crate::config::PeekMode;
+        const WARNING: &str = "delivery-limit of 3";
+        let list = payments_limited_to(3);
         // Before the peek: payments' details warn in browse mode only (a
         // destructive read doesn't requeue).
         for (mode, warns) in [(PeekMode::Browse, true), (PeekMode::Destructive, false)] {
@@ -2446,6 +2455,33 @@ mod tests {
         let text = render_lines(&mut app, 200, 30);
         assert!(text.contains("orders · 1 msgs"), "{text}");
         assert!(!text.contains("delivery-limit"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_rabbitmq_limit_below_one_warns_that_each_peek_drops_what_it_reads() {
+        // On 3.x a limit of 0 or less drops or dead-letters a message on its
+        // first requeue, so a browse peek is as good as destructive.
+        for limit in [0, -1] {
+            let (mut app, _rx) = rabbitmq_browser(Some(Ok(payments_limited_to(limit)))).await;
+            select_destination(&mut app, "payments");
+            let text = render_lines(&mut app, 200, 30);
+            assert!(
+                text.contains("Each peek drops or dead-letters the messages it reads"),
+                "{text}"
+            );
+            assert!(
+                text.contains(&format!("delivery-limit is {limit}")),
+                "{text}"
+            );
+
+            let mut app =
+                rabbitmq_peeked_with_limit("payments", limit, Ok(vec![broker_event("m")])).await;
+            let text = render_lines(&mut app, 200, 30);
+            assert!(
+                text.contains("payments · 1 msgs · peeking drops or dead-letters what it reads"),
+                "{text}"
+            );
+        }
     }
 
     #[tokio::test]

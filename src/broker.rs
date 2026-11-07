@@ -494,8 +494,10 @@ pub struct DestinationInfo {
     /// The `delivery-limit` that a browse peek of this queue counts toward:
     /// set only for a RabbitMQ 3.x quorum queue with a limit (by argument or
     /// policy), where each requeue raises `x-delivery-count` and a message
-    /// past the limit is dropped or dead-lettered. A 4.x requeue raises only
-    /// `x-acquired-count`, so it never reaches the limit and this is `None`.
+    /// past the limit is dropped or dead-lettered — on its first requeue when
+    /// the limit is below 1 (3.x accepts a negative argument). A 4.x requeue
+    /// raises only `x-acquired-count`, so it never reaches the limit and this
+    /// is `None`.
     pub peek_delivery_limit: Option<i64>,
     /// An internal exchange (e.g. `amq.rabbitmq.trace`). Clients can't publish
     /// to it, but a tap can still bind to it.

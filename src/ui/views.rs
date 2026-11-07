@@ -933,14 +933,7 @@ fn rabbitmq_details_pane(
             } else {
                 notes.push(queue_peek_note(mode, theme));
                 if let Some(limit) = dest.peek_counts_toward(mode) {
-                    notes.push(Line::styled(
-                        format!(
-                            "Each peek counts toward this quorum queue's delivery-limit of \
-                             {limit}: RabbitMQ 3.x raises x-delivery-count on every requeue, \
-                             and a message past the limit is dropped or dead-lettered."
-                        ),
-                        theme.warning,
-                    ));
+                    notes.push(Line::styled(delivery_limit_warning(limit), theme.warning));
                 }
                 "Tailing a queue would consume its messages. To watch them, tap an exchange \
                  that routes to it."
@@ -963,6 +956,32 @@ fn rabbitmq_details_pane(
         )
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
+}
+
+/// The details pane's warning that a browse peek counts toward a 3.x quorum
+/// queue's delivery `limit`. Below 1, the first requeue already passes it.
+fn delivery_limit_warning(limit: i64) -> String {
+    if limit < 1 {
+        format!(
+            "Each peek drops or dead-letters the messages it reads: this quorum queue's \
+             delivery-limit is {limit}, and RabbitMQ 3.x counts every requeue toward it."
+        )
+    } else {
+        format!(
+            "Each peek counts toward this quorum queue's delivery-limit of {limit}: RabbitMQ \
+             3.x raises x-delivery-count on every requeue, and a message past the limit is \
+             dropped or dead-lettered."
+        )
+    }
+}
+
+/// The peeked message list's title note for the same warning, kept short.
+fn delivery_limit_note(limit: i64) -> String {
+    if limit < 1 {
+        "peeking drops or dead-letters what it reads ".to_string()
+    } else {
+        format!("each peek counts toward delivery-limit {limit} ")
+    }
 }
 
 /// What pressing Enter on a (non-stream) RabbitMQ queue does in peek `mode`.
@@ -1026,10 +1045,7 @@ fn rabbitmq_peek_pane(
             "The queue was empty when peeked. Press Enter to peek again.",
         );
     }
-    let note = conn
-        .peek
-        .requeue_limit
-        .map(|limit| format!("each peek counts toward delivery-limit {limit} "));
+    let note = conn.peek.requeue_limit.map(delivery_limit_note);
     let [list_area, preview_area] =
         Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(area);
     amqp_message_list(frame, conn, theme, list_area, &name, note);
