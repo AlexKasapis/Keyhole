@@ -448,3 +448,20 @@ async fn amqp_peek_error_clears_the_pending_peek() {
         "[1] peek: opening peek connection: refused"
     );
 }
+
+#[tokio::test]
+async fn closing_an_amqp_tail_lands_on_the_tail_anchor() {
+    // AMQP has no Pub/Sub anchor: a closed topic tail returns focus to Tail,
+    // not past the last slot (where Tab would then skip a tab).
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 1, "mq").await;
+    app.start_subscribe(SubSpec::Topic("a".into()));
+    app.start_subscribe(SubSpec::Topic("b".into()));
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Sub(1));
+    app.close_active_tab();
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.subs.len(), 1);
+    assert_eq!((conn.panel_tab, conn.active_panel()), (0, PanelTab::Tail));
+    app.apply(Action::NextTab);
+    assert_eq!(app.active_conn().unwrap().active_panel(), PanelTab::Sub(0));
+}

@@ -1441,3 +1441,53 @@ async fn each_roster_scrolls_its_own_list_like_server_details() {
     app.handle_key(key(KeyCode::Down));
     assert_eq!(scrolls(&app), (1, 0, 1));
 }
+
+// -- closing a tap ------------------------------------------------------------
+
+#[tokio::test]
+async fn closing_the_last_tap_lands_on_the_tail_anchor_and_tab_skips_nothing() {
+    // With the management API: Server Details, Connections, Consumers, Tail,
+    // then the tap. There's no Pub/Sub anchor to land on, and a focus left on
+    // the closed tap's slot made Tab from Tail skip Server Details.
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_with_dashboard(&mut app);
+    submit_on_tail_anchor(&mut app, "exchange:ex");
+    assert_eq!(active_panel(&app), PanelTab::Sub(0));
+    app.handle_key(ch('x'));
+    let conn = app.active_conn().unwrap();
+    assert!(conn.subs.is_empty());
+    assert_eq!((conn.panel_tab, conn.active_panel()), (3, PanelTab::Tail));
+
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(
+        active_panel(&app),
+        PanelTab::ServerDetails,
+        "wraps to the first"
+    );
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(active_panel(&app), PanelTab::Connections);
+    app.handle_key(key(KeyCode::BackTab));
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(active_panel(&app), PanelTab::Tail, "wraps back to the last");
+    app.handle_key(key(KeyCode::BackTab));
+    assert_eq!(active_panel(&app), PanelTab::Consumers);
+}
+
+#[tokio::test]
+async fn closing_a_tap_without_the_management_api_lands_on_the_tail_anchor() {
+    // The Tail anchor, then two taps. Closing the second one used to leave
+    // the first selected, and Tab then stayed on it.
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_capturing(&mut app);
+    submit_on_tail_anchor(&mut app, "exchange:a");
+    app.start_subscribe(exchange("b", "#"));
+    assert_eq!(active_panel(&app), PanelTab::Sub(1));
+    app.handle_key(ch('x'));
+    let conn = app.active_conn().unwrap();
+    assert_eq!(conn.subs.len(), 1);
+    assert_eq!((conn.panel_tab, conn.active_panel()), (0, PanelTab::Tail));
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(active_panel(&app), PanelTab::Sub(0));
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(active_panel(&app), PanelTab::Tail);
+}

@@ -1109,6 +1109,11 @@ mod tests {
         assert!(text.contains("Help"));
         assert!(text.contains("Moving around"));
         assert!(text.contains("Global keys"));
+        // RabbitMQ's bottom tabs and publish's routing-key step are covered.
+        assert!(text.contains("bottom: Details · Connections · Consumers"));
+        assert!(text.contains("ask for a routing key first"));
+        // The whole overlay fits a 30-row terminal: its last row isn't cut.
+        assert!(text.contains("Esc back · Ctrl-C quit"), "{text}");
     }
 
     #[test]

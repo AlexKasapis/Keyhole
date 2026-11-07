@@ -6,6 +6,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │                                                                                        │
 │                                  No saved connections.                                 │
 │                                                                                        │
+│                                  Press 'a' to add one.                                 │
 │           ┌ Help ──────────────────────────────────────────────────────────┐           │
 │           │Moving around — one model everywhere                            │           │
 │           │  ↑↓ move / scroll · Home/End ends · mouse wheel moves          │           │
@@ -13,13 +14,11 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │  Tab cycles the tab strip in view · Esc leaves the screen      │           │
 │           │                                                                │           │
 │           │Home (Connections / Recordings)                                 │           │
-│           │  Tab switch tabs · Enter opens a connection's browser          │           │
-│           │  Connections: a add · e edit/delete · x disconnect             │           │
+│           │  Connections: Enter open · a add · e edit/delete · x disconnect│           │
 │           │  Recordings: r rename · dd delete · Ctrl-←/→ list / viewer     │           │
 │           │                                                                │           │
 │           │Browser — focus follows the pane                                │           │
-│           │  Ctrl-↑ keys · Ctrl-↓ bottom (lands on Console)                │           │
-│           │  Tab cycles the bottom tabs · focused pane is highlighted      │           │
+│           │  Ctrl-↑ keys · Ctrl-↓ bottom · Tab cycles the bottom tabs      │           │
 │           │  keys: / filter · o/O sort · z fold all · Enter/l fold group   │           │
 │           │                                                                │           │
 │           │Bottom subpanel (Redis)                                         │           │
@@ -29,10 +28,11 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │  Pub/Sub & Tail: type a spec, Enter subscribes/tails           │           │
 │           │                                                                │           │
 │           │AMQP / RabbitMQ browser                                         │           │
-│           │  Enter open · t tail · Ctrl-→ messages · Ctrl-← destinations   │           │
-│           │  AMQP: a add · r discover · x/d remove · P publish · / filter  │           │
+│           │  Enter open · t tail · Ctrl-→ messages · / filter messages     │           │
+│           │  P publish · direct/topic exchanges ask for a routing key first│           │
+│           │  AMQP: a add · r discover · x/d remove                         │           │
 │           │  RabbitMQ: Enter peek queue · t/Enter tap exchange · r refresh │           │
-│           │  P publish · / filter messages · tap/publish may ask for a key │           │
+│           │  bottom: Details · Connections · Consumers (↑↓ Home End) · Tail│           │
 │           │                                                                │           │
 │           │Global keys (any pane)                                          │           │
 │           │  : palette · ? help · m mouse · Esc back · Ctrl-C quit         │           │

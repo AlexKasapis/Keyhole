@@ -489,8 +489,9 @@ impl App {
         self.set_status(msg.to_string(), false);
     }
 
-    /// Close the focused pub/sub or stream tab, stopping its tail. The five fixed
-    /// anchors (Console / Monitor / Keyspace / Pub/Sub / Tail) cannot be closed.
+    /// Close the focused tail tab (pub/sub, stream, AMQP topic or queue, or
+    /// RabbitMQ tap), stopping its tail. The fixed tabs (the anchors, Server
+    /// Details and the RabbitMQ rosters) cannot be closed.
     pub(super) fn close_active_tab(&mut self) {
         if self.screen != Screen::Browser {
             return;
@@ -504,15 +505,21 @@ impl App {
                     let sub = conn.subs.remove(i);
                     conn.handle
                         .send(ConnCommand::StopSubscription { sub_id: sub.sub_id });
-                    // Land focus back on the anchor the closed tail belonged to.
-                    let anchor = if matches!(sub.spec, SubSpec::Stream { .. }) {
-                        PanelTab::Tail
-                    } else {
+                    // Land focus back on the anchor the closed tail belonged to:
+                    // Pub/Sub for a Redis channel or pattern, else Tail (a
+                    // stream, an AMQP topic or queue, a RabbitMQ tap). AMQP and
+                    // RabbitMQ have no Pub/Sub anchor, and a focus left past the
+                    // last slot would make Tab skip a tab.
+                    let anchor = if matches!(sub.spec, SubSpec::Channel(_) | SubSpec::Pattern(_)) {
                         PanelTab::PubSub
+                    } else {
+                        PanelTab::Tail
                     };
-                    if let Some(pos) = conn.panel_slots().iter().position(|t| *t == anchor) {
-                        conn.panel_tab = pos;
-                    }
+                    let slots = conn.panel_slots();
+                    conn.panel_tab = slots
+                        .iter()
+                        .position(|t| *t == anchor)
+                        .unwrap_or(slots.len() - 1);
                     Some(sub.label)
                 }
                 _ => None,
