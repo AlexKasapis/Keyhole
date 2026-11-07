@@ -1,0 +1,94 @@
+[
+  {
+    "arguments": {},
+    "ack_required": false,
+    "active": true,
+    "activity_status": "up",
+    "channel_details": {
+      "connection_name": "172.18.0.1:34822 -> 172.18.0.4:5672",
+      "name": "172.18.0.1:34822 -> 172.18.0.4:5672 (2)",
+      "node": "rabbit@19942ffdc832",
+      "number": 2,
+      "peer_host": "172.18.0.1",
+      "peer_port": 34822,
+      "user": "spike-mgmt"
+    },
+    "consumer_tag": "spike-consumer-quorum",
+    "consumer_timeout": 1800000,
+    "exclusive": false,
+    "prefetch_count": 0,
+    "queue": {
+      "name": "spike.quorum.busy",
+      "vhost": "/"
+    }
+  },
+  {
+    "arguments": {},
+    "ack_required": false,
+    "active": true,
+    "activity_status": "up",
+    "channel_details": {
+      "connection_name": "172.18.0.1:34836 -> 172.18.0.4:5672",
+      "name": "172.18.0.1:34836 -> 172.18.0.4:5672 (2)",
+      "node": "rabbit@19942ffdc832",
+      "number": 2,
+      "peer_host": "172.18.0.1",
+      "peer_port": 34836,
+      "user": "keyhole"
+    },
+    "consumer_tag": "spike-consumer-quorum",
+    "consumer_timeout": 1800000,
+    "exclusive": false,
+    "prefetch_count": 0,
+    "queue": {
+      "name": "spike.quorum.busy",
+      "vhost": "/"
+    }
+  },
+  {
+    "arguments": {},
+    "ack_required": true,
+    "active": true,
+    "activity_status": "up",
+    "channel_details": {
+      "connection_name": "172.18.0.1:34822 -> 172.18.0.4:5672",
+      "name": "172.18.0.1:34822 -> 172.18.0.4:5672 (1)",
+      "node": "rabbit@19942ffdc832",
+      "number": 1,
+      "peer_host": "172.18.0.1",
+      "peer_port": 34822,
+      "user": "spike-mgmt"
+    },
+    "consumer_tag": "spike-consumer-classic",
+    "consumer_timeout": 1800000,
+    "exclusive": false,
+    "prefetch_count": 10,
+    "queue": {
+      "name": "spike.consumed",
+      "vhost": "/"
+    }
+  },
+  {
+    "arguments": {},
+    "ack_required": true,
+    "active": true,
+    "activity_status": "up",
+    "channel_details": {
+      "connection_name": "172.18.0.1:34836 -> 172.18.0.4:5672",
+      "name": "172.18.0.1:34836 -> 172.18.0.4:5672 (1)",
+      "node": "rabbit@19942ffdc832",
+      "number": 1,
+      "peer_host": "172.18.0.1",
+      "peer_port": 34836,
+      "user": "keyhole"
+    },
+    "consumer_tag": "spike-consumer-classic",
+    "consumer_timeout": 1800000,
+    "exclusive": false,
+    "prefetch_count": 10,
+    "queue": {
+      "name": "spike.consumed",
+      "vhost": "/"
+    }
+  }
+]

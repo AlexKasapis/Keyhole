@@ -1,0 +1,4 @@
+{
+  "error": "bad_request",
+  "reason": "Stats in management UI are disabled on this node"
+}

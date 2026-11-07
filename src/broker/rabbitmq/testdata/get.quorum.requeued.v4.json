@@ -1,0 +1,70 @@
+[
+  {
+    "payload_bytes": 81,
+    "redelivered": true,
+    "exchange": "",
+    "routing_key": "spike.quorum",
+    "message_count": 2,
+    "properties": {
+      "app_id": "keyhole-spike",
+      "user_id": "keyhole",
+      "type": "order.created",
+      "timestamp": 1762500000,
+      "message_id": "msg-0001",
+      "expiration": "3600000",
+      "reply_to": "spike.replies",
+      "correlation_id": "corr-abc",
+      "priority": 5,
+      "delivery_mode": 2,
+      "headers": {
+        "x-acquired-count": 1,
+        "x-attempt": 1,
+        "x-flag": true,
+        "x-nested": {
+          "k": "v"
+        },
+        "x-ratio": 0.5,
+        "x-source": "spike",
+        "x-tags": [
+          "a",
+          "b"
+        ]
+      },
+      "content_encoding": "utf-8",
+      "content_type": "application/json"
+    },
+    "payload": "eyJvcmRlcl9pZCI6NDIsInN0YXR1cyI6ImNyZWF0ZWQiLCJpdGVtcyI6W3sic2t1IjoiQS0xIiwicXR5IjoyfV0sIm5vdGUiOiJjYWbDqSJ9",
+    "payload_encoding": "base64"
+  },
+  {
+    "payload_bytes": 15,
+    "redelivered": true,
+    "exchange": "",
+    "routing_key": "spike.quorum",
+    "message_count": 1,
+    "properties": {
+      "message_id": "msg-0002",
+      "delivery_mode": 1,
+      "headers": {
+        "x-acquired-count": 1
+      },
+      "content_type": "application/octet-stream"
+    },
+    "payload": "AAEC//6Aa2V5aG9sZcMo",
+    "payload_encoding": "base64"
+  },
+  {
+    "payload_bytes": 30,
+    "redelivered": true,
+    "exchange": "",
+    "routing_key": "spike.quorum",
+    "message_count": 0,
+    "properties": {
+      "headers": {
+        "x-acquired-count": 1
+      }
+    },
+    "payload": "cGxhaW4gdGV4dCBib2R5LCBubyBwcm9wZXJ0aWVz",
+    "payload_encoding": "base64"
+  }
+]

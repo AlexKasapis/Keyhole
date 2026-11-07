@@ -1,0 +1,74 @@
+{
+  "crypto_lib_version": "OpenSSL 3.5.9 29 Sep 2026",
+  "product_name": "RabbitMQ",
+  "product_version": "4.4.0",
+  "rabbitmq_version": "4.4.0",
+  "management_version": "4.4.0",
+  "erlang_version": "29.1.2",
+  "erlang_full_version": "Erlang/OTP 29 [erts-17.1.1] [source] [64-bit] [smp:22:22] [ds:22:22:10] [async-threads:1] [jit:ns]",
+  "cluster_name": "rabbit@f19b542c61db",
+  "rates_mode": "basic",
+  "sample_retention_policies": {
+    "global": [
+      600,
+      3600,
+      28800,
+      86400
+    ],
+    "basic": [
+      600,
+      3600
+    ],
+    "detailed": [
+      600
+    ]
+  },
+  "exchange_types": [
+    {
+      "name": "direct",
+      "description": "AMQP direct exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "fanout",
+      "description": "AMQP fanout exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "headers",
+      "description": "AMQP headers exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "topic",
+      "description": "AMQP topic exchange, as per the AMQP specification",
+      "enabled": true
+    },
+    {
+      "name": "x-local-random",
+      "description": "Picks one random local binding (queue) to route via (to).",
+      "enabled": true
+    },
+    {
+      "name": "x-modulus-hash",
+      "description": "Modulus Hashing Exchange",
+      "enabled": true
+    }
+  ],
+  "cluster_tags": {},
+  "node_tags": {},
+  "disable_stats": true,
+  "default_queue_type": "classic",
+  "is_op_policy_updating_enabled": true,
+  "enable_queue_totals": false,
+  "definitions": {
+    "require_definition_json_extension": false
+  },
+  "require_definition_json_extension": false,
+  "node": "rabbit@f19b542c61db",
+  "object_totals": {
+    "queues": 17,
+    "exchanges": 20,
+    "connections": 1
+  }
+}

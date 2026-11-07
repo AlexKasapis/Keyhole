@@ -1,0 +1,34 @@
+[
+  {
+    "payload_bytes": 28,
+    "redelivered": true,
+    "exchange": "spike.dlx",
+    "routing_key": "spike.quorum.limit.dlx",
+    "message_count": 0,
+    "properties": {
+      "message_id": "only",
+      "headers": {
+        "x-death": [
+          {
+            "count": 1,
+            "exchange": "",
+            "queue": "spike.quorum.limit.dlx",
+            "reason": "delivery_limit",
+            "routing-keys": [
+              "spike.quorum.limit.dlx"
+            ],
+            "time": 1794066457
+          }
+        ],
+        "x-first-death-exchange": "",
+        "x-first-death-queue": "spike.quorum.limit.dlx",
+        "x-first-death-reason": "delivery_limit",
+        "x-last-death-exchange": "",
+        "x-last-death-queue": "spike.quorum.limit.dlx",
+        "x-last-death-reason": "delivery_limit"
+      }
+    },
+    "payload": "aGVsbG8gc3Bpa2UucXVvcnVtLmxpbWl0LmRseA==",
+    "payload_encoding": "base64"
+  }
+]

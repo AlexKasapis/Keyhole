@@ -1,0 +1,138 @@
+{
+  "filtered_count": 13,
+  "item_count": 13,
+  "items": [
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "message_stats": {
+        "publish_in_details": {
+          "rate": 0.0
+        },
+        "publish_out_details": {
+          "rate": 0.0
+        }
+      },
+      "name": "",
+      "type": "direct"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "amq.direct",
+      "type": "direct"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "amq.fanout",
+      "type": "fanout"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "amq.headers",
+      "type": "headers"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "amq.match",
+      "type": "headers"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": true,
+      "name": "amq.rabbitmq.log",
+      "type": "topic"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": true,
+      "name": "amq.rabbitmq.trace",
+      "type": "topic"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "amq.topic",
+      "type": "topic"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "spike.direct",
+      "type": "direct"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "spike.dlx",
+      "type": "fanout"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "message_stats": {
+        "publish_in_details": {
+          "rate": 0.0
+        },
+        "publish_out_details": {
+          "rate": 0.0
+        }
+      },
+      "name": "spike.fanout",
+      "type": "fanout"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "name": "spike.headers",
+      "type": "headers"
+    },
+    {
+      "arguments": {},
+      "auto_delete": false,
+      "durable": true,
+      "internal": false,
+      "message_stats": {
+        "publish_in_details": {
+          "rate": 9.8
+        },
+        "publish_out_details": {
+          "rate": 19.6
+        }
+      },
+      "name": "spike.topic",
+      "type": "topic"
+    }
+  ],
+  "page": 1,
+  "page_count": 1,
+  "page_size": 500,
+  "total_count": 13
+}

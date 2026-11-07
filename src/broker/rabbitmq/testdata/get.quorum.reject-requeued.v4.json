@@ -1,0 +1,19 @@
+[
+  {
+    "payload_bytes": 13,
+    "redelivered": true,
+    "exchange": "",
+    "routing_key": "spike.quorum.policy",
+    "message_count": 0,
+    "properties": {
+      "message_id": "msg-r1",
+      "headers": {
+        "x-acquired-count": 1,
+        "x-delivery-count": 1
+      },
+      "content_type": "text/plain"
+    },
+    "payload": "cmVqZWN0ZWQgb25jZQ==",
+    "payload_encoding": "base64"
+  }
+]

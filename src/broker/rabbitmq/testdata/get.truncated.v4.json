@@ -1,0 +1,38 @@
+[
+  {
+    "payload_bytes": 81,
+    "redelivered": true,
+    "exchange": "",
+    "routing_key": "spike.classic",
+    "message_count": 2,
+    "properties": {
+      "app_id": "keyhole-spike",
+      "user_id": "keyhole",
+      "type": "order.created",
+      "timestamp": 1762500000,
+      "message_id": "msg-0001",
+      "expiration": "3600000",
+      "reply_to": "spike.replies",
+      "correlation_id": "corr-abc",
+      "priority": 5,
+      "delivery_mode": 2,
+      "headers": {
+        "x-attempt": 1,
+        "x-flag": true,
+        "x-nested": {
+          "k": "v"
+        },
+        "x-ratio": 0.5,
+        "x-source": "spike",
+        "x-tags": [
+          "a",
+          "b"
+        ]
+      },
+      "content_encoding": "utf-8",
+      "content_type": "application/json"
+    },
+    "payload": "eyJvcmRlcl9pZA==",
+    "payload_encoding": "base64"
+  }
+]

@@ -1,0 +1,4 @@
+{
+  "error": "not_authorised",
+  "reason": "ACCESS_REFUSED - read access to queue 'spike.classic' in vhost '/' refused for user 'spike-noread'"
+}

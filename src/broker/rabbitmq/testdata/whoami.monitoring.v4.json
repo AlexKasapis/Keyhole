@@ -1,0 +1,7 @@
+{
+  "name": "spike-mon",
+  "tags": [
+    "monitoring"
+  ],
+  "is_internal_user": true
+}

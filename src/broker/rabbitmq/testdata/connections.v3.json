@@ -1,0 +1,138 @@
+[
+  {
+    "auth_mechanism": "PLAIN",
+    "channel_max": 2047,
+    "channels": 3,
+    "client_properties": {
+      "capabilities": {
+        "authentication_failure_close": true,
+        "basic.nack": true,
+        "connection.blocked": true,
+        "consumer_cancel_notify": true,
+        "consumer_priorities": true,
+        "direct_reply_to": true,
+        "exchange_exchange_bindings": true,
+        "per_consumer_qos": true,
+        "publisher_confirms": true
+      },
+      "connection_name": "spike-load-mgmt",
+      "platform": "rust",
+      "product": "lapin",
+      "version": "4.12.3"
+    },
+    "connected_at": 1794066383017,
+    "frame_max": 131072,
+    "garbage_collection": {
+      "fullsweep_after": 65535,
+      "max_heap_size": 0,
+      "min_bin_vheap_size": 46422,
+      "min_heap_size": 233,
+      "minor_gcs": 140
+    },
+    "host": "172.18.0.4",
+    "name": "172.18.0.1:34822 -> 172.18.0.4:5672",
+    "node": "rabbit@19942ffdc832",
+    "peer_cert_issuer": null,
+    "peer_cert_subject": null,
+    "peer_cert_validity": null,
+    "peer_host": "172.18.0.1",
+    "peer_port": 34822,
+    "port": 5672,
+    "protocol": "AMQP 0-9-1",
+    "recv_cnt": 3193,
+    "recv_oct": 287863,
+    "recv_oct_details": {
+      "rate": 664.2
+    },
+    "reductions": 598384,
+    "reductions_details": {
+      "rate": 1346.6
+    },
+    "send_cnt": 5291,
+    "send_oct": 539158,
+    "send_oct_details": {
+      "rate": 1250.4
+    },
+    "send_pend": 0,
+    "ssl": false,
+    "ssl_cipher": null,
+    "ssl_hash": null,
+    "ssl_key_exchange": null,
+    "ssl_protocol": null,
+    "state": "running",
+    "timeout": 60,
+    "type": "network",
+    "user": "spike-mgmt",
+    "user_provided_name": "spike-load-mgmt",
+    "user_who_performed_action": "spike-mgmt",
+    "vhost": "/"
+  },
+  {
+    "auth_mechanism": "PLAIN",
+    "channel_max": 2047,
+    "channels": 3,
+    "client_properties": {
+      "capabilities": {
+        "authentication_failure_close": true,
+        "basic.nack": true,
+        "connection.blocked": true,
+        "consumer_cancel_notify": true,
+        "consumer_priorities": true,
+        "direct_reply_to": true,
+        "exchange_exchange_bindings": true,
+        "per_consumer_qos": true,
+        "publisher_confirms": true
+      },
+      "connection_name": "spike-load-admin",
+      "platform": "rust",
+      "product": "lapin",
+      "version": "4.12.3"
+    },
+    "connected_at": 1794066383017,
+    "frame_max": 131072,
+    "garbage_collection": {
+      "fullsweep_after": 65535,
+      "max_heap_size": 0,
+      "min_bin_vheap_size": 46422,
+      "min_heap_size": 233,
+      "minor_gcs": 423
+    },
+    "host": "172.18.0.4",
+    "name": "172.18.0.1:34836 -> 172.18.0.4:5672",
+    "node": "rabbit@19942ffdc832",
+    "peer_cert_issuer": null,
+    "peer_cert_subject": null,
+    "peer_cert_validity": null,
+    "peer_host": "172.18.0.1",
+    "peer_port": 34836,
+    "port": 5672,
+    "protocol": "AMQP 0-9-1",
+    "recv_cnt": 3196,
+    "recv_oct": 287863,
+    "recv_oct_details": {
+      "rate": 664.2
+    },
+    "reductions": 597948,
+    "reductions_details": {
+      "rate": 1338.0
+    },
+    "send_cnt": 5291,
+    "send_oct": 539158,
+    "send_oct_details": {
+      "rate": 1250.4
+    },
+    "send_pend": 0,
+    "ssl": false,
+    "ssl_cipher": null,
+    "ssl_hash": null,
+    "ssl_key_exchange": null,
+    "ssl_protocol": null,
+    "state": "running",
+    "timeout": 60,
+    "type": "network",
+    "user": "keyhole",
+    "user_provided_name": "spike-load-admin",
+    "user_who_performed_action": "keyhole",
+    "vhost": "/"
+  }
+]

@@ -1,0 +1,4 @@
+{
+  "error": "bad_request",
+  "reason": "540 basic.get not supported by stream queues queue 'spike.stream' in vhost '/'"
+}

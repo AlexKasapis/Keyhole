@@ -1,0 +1,229 @@
+{
+  "filtered_count": 17,
+  "item_count": 7,
+  "items": [
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "delivery_limit": 20,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.default",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-delivery-limit": 3,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "delivery_limit": 3,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.limit",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-dead-letter-exchange": "spike.dlx",
+        "x-delivery-limit": 3,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "delivery_limit": 3,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.limit.dlx",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "delivery_limit": 5,
+      "durable": true,
+      "effective_policy_definition": {
+        "delivery-limit": 5
+      },
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.policy",
+      "policy": "spike-dl",
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-delivery-limit": 3,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "delivery_limit": 3,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.reject",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "stream"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "publish_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 3,
+      "messages_ready": 3,
+      "messages_unacknowledged": 0,
+      "name": "spike.stream",
+      "policy": null,
+      "state": "running",
+      "type": "stream"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike/slash",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    }
+  ],
+  "page": 2,
+  "page_count": 2,
+  "page_size": 10,
+  "total_count": 17
+}

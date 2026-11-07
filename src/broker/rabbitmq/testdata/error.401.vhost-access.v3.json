@@ -1,0 +1,4 @@
+{
+  "error": "not_authorised",
+  "reason": "User not authorised to access virtual host"
+}

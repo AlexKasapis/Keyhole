@@ -1,0 +1,4 @@
+{
+  "error": "invalid_pagination_parameters",
+  "reason": "Invalid pagination parameters: page number 1, page size 501"
+}

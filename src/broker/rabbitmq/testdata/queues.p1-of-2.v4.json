@@ -1,0 +1,319 @@
+{
+  "filtered_count": 17,
+  "item_count": 10,
+  "items": [
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike space",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike#hash",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike%pct",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike+plus?q=1",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike.café ✓",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 3,
+      "messages_ready": 3,
+      "messages_unacknowledged": 0,
+      "name": "spike.classic",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 2,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 5.2
+        },
+        "deliver_get_details": {
+          "rate": 5.2
+        },
+        "publish_details": {
+          "rate": 9.8
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1895,
+      "messages_ready": 1875,
+      "messages_unacknowledged": 20,
+      "name": "spike.consumed",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 1,
+      "messages_ready": 1,
+      "messages_unacknowledged": 0,
+      "name": "spike.dlq",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 0,
+      "delivery_limit": 20,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 0.0
+        },
+        "publish_details": {
+          "rate": 0.0
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 3,
+      "messages_ready": 3,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "consumers": 2,
+      "delivery_limit": 20,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "message_stats": {
+        "ack_details": {
+          "rate": 0.0
+        },
+        "deliver_get_details": {
+          "rate": 9.6
+        },
+        "publish_details": {
+          "rate": 9.8
+        },
+        "redeliver_details": {
+          "rate": 0.0
+        }
+      },
+      "messages": 0,
+      "messages_ready": 0,
+      "messages_unacknowledged": 0,
+      "name": "spike.quorum.busy",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    }
+  ],
+  "page": 1,
+  "page_count": 2,
+  "page_size": 10,
+  "total_count": 17
+}

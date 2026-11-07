@@ -1,0 +1,244 @@
+{
+  "filtered_count": 17,
+  "item_count": 17,
+  "items": [
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike space",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike#hash",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike%pct",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike+plus?q=1",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.café ✓",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.classic",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.consumed",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.dlq",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 20,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.quorum",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 20,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.quorum.busy",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 20,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.quorum.default",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-delivery-limit": 3,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 3,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.quorum.limit",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-dead-letter-exchange": "spike.dlx",
+        "x-delivery-limit": 3,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 3,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.quorum.limit.dlx",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 5,
+      "durable": true,
+      "effective_policy_definition": {
+        "delivery-limit": 5
+      },
+      "exclusive": false,
+      "name": "spike.quorum.policy",
+      "policy": "spike-dl",
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-delivery-limit": 3,
+        "x-queue-type": "quorum"
+      },
+      "auto_delete": false,
+      "delivery_limit": 3,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.quorum.reject",
+      "policy": null,
+      "state": "running",
+      "type": "quorum"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "stream"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike.stream",
+      "policy": null,
+      "state": "running",
+      "type": "stream"
+    },
+    {
+      "arguments": {
+        "x-queue-type": "classic"
+      },
+      "auto_delete": false,
+      "durable": true,
+      "effective_policy_definition": {},
+      "exclusive": false,
+      "name": "spike/slash",
+      "policy": null,
+      "state": "running",
+      "type": "classic"
+    }
+  ],
+  "page": 1,
+  "page_count": 1,
+  "page_size": 500,
+  "total_count": 17
+}
