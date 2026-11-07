@@ -257,10 +257,10 @@ mod url_tests {
 
 #[cfg(all(test, feature = "integration"))]
 mod integration_tests {
-    //! Run against a dockerized RabbitMQ: `just test-int`, or
-    //! `cargo test --features integration` with the broker on
-    //! `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_PORT` (default 5673), creds
-    //! `keyhole/keyhole`.
+    //! Run against a dockerized RabbitMQ: `just test-int` (3.x),
+    //! `just test-int-rabbitmq4` (4.x), or `cargo test --features integration`
+    //! with the broker on `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_PORT` (default
+    //! 5673), creds `keyhole/keyhole`.
     use super::*;
 
     /// Held by the tests that use the demo exchange, so they take turns: one
@@ -419,17 +419,19 @@ mod integration_tests {
             )
             .await
             .expect("an uncapped quorum queue");
-        assert!(!is_capped(&conn, &queue).await);
+        let capped_before = is_capped(&conn, &queue).await;
 
         // The demo declare is refused, then deletes it and declares it afresh,
         // on a channel that still works.
         let channel = declare_queue(&conn, channel, &queue).await;
         let capped = is_capped(&conn, &queue).await;
+        // Deleted before asserting, so a failure leaves nothing behind.
         let cleanup = conn.create_channel().await.unwrap();
         cleanup
             .queue_delete(queue.name.into(), QueueDeleteOptions::default())
             .await
             .ok();
+        assert!(!capped_before, "declared uncapped");
         let channel = channel.expect("re-created");
         assert!(capped, "{} is capped", queue.name);
         publish_once(&channel, 1).await.expect("the channel works");

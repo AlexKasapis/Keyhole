@@ -2527,8 +2527,13 @@ mod integration_tests {
     //! creds `keyhole:keyhole` on vhost `/`. A non-`guest` user is required
     //! because RabbitMQ restricts `guest` to loopback, and the dockerized broker
     //! sees the host connection arriving from the bridge network. Each test uses
-    //! a uniquely-named exchange so the suite is parallel-safe. The management
-    //! API is on `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_MGMT_PORT` (default 15673).
+    //! uniquely-named exchanges and queues so the suite is parallel-safe, and
+    //! deletes them again through a [`Cleanup`] guard. The management API is
+    //! on `127.0.0.1:$KEYHOLE_TEST_RABBITMQ_MGMT_PORT` (default 15673).
+    //!
+    //! The suite runs against RabbitMQ 3.x and 4.x (the `rabbitmq4` compose
+    //! service, `just test-int-rabbitmq4`), and on a fresh broker: it asserts
+    //! only what both versions report from the start.
     use super::*;
     use crate::broker::SubSpec;
 
@@ -2565,6 +2570,65 @@ mod integration_tests {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         format!("{prefix}.{}.{}", std::process::id(), n)
+    }
+
+    /// Deletes a test's queues and exchanges when it's dropped, so a test
+    /// cleans up after a failed assertion too. Declare it before what it
+    /// names: locals drop in reverse order, so the test's connections close
+    /// first. It goes through the management API, whose blocking calls work
+    /// in `drop` while a panic unwinds. One that was never created, or that
+    /// the test already deleted, is a 404, which is fine.
+    #[derive(Default)]
+    struct Cleanup {
+        queues: Vec<String>,
+        exchanges: Vec<String>,
+    }
+
+    impl Cleanup {
+        fn queues(names: &[&str]) -> Self {
+            Self::default().and_queues(names)
+        }
+
+        fn exchanges(names: &[&str]) -> Self {
+            Self::default().and_exchanges(names)
+        }
+
+        fn and_queues(mut self, names: &[&str]) -> Self {
+            self.queues.extend(names.iter().map(|n| n.to_string()));
+            self
+        }
+
+        fn and_exchanges(mut self, names: &[&str]) -> Self {
+            self.exchanges.extend(names.iter().map(|n| n.to_string()));
+            self
+        }
+    }
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let agent = crate::broker::http::agent();
+            let auth = crate::broker::http::basic_auth("keyhole", Some("keyhole"));
+            let queues = self.queues.iter().map(|q| ("queues", q));
+            let exchanges = self.exchanges.iter().map(|e| ("exchanges", e));
+            for (kind, name) in queues.chain(exchanges) {
+                let url = format!(
+                    "http://127.0.0.1:{}/api/{kind}/%2F/{}",
+                    mgmt_port(),
+                    utf8_percent_encode(name, NON_ALPHANUMERIC)
+                );
+                let reply = agent
+                    .delete(&url)
+                    .header("Authorization", &auth)
+                    // 3.13 may drop a kept-alive connection after a 404.
+                    .header("Connection", "close")
+                    .call();
+                match reply {
+                    Ok(r) if r.status().is_success() || r.status() == 404 => {}
+                    Ok(r) => eprintln!("cleanup: deleting {kind} {name}: HTTP {}", r.status()),
+                    Err(e) => eprintln!("cleanup: deleting {kind} {name}: {e}"),
+                }
+            }
+        }
     }
 
     fn test_profile() -> RabbitmqProfile {
@@ -2646,6 +2710,7 @@ mod integration_tests {
     #[tokio::test]
     async fn exchange_tap_receives_published_message_with_routing_key() {
         let exchange = unique("keyhole.it.topic");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
         declare_topic_exchange(&exchange).await;
 
         let mut conn = connected().await;
@@ -2675,6 +2740,7 @@ mod integration_tests {
     #[tokio::test]
     async fn exchange_tap_is_live_only_and_leaves_the_real_queue_intact() {
         let exchange = unique("keyhole.it.topic");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
         declare_topic_exchange(&exchange).await;
 
         // A real queue bound to the exchange — the "production" consumer we must
@@ -2831,6 +2897,7 @@ mod integration_tests {
         // The AMQP side is unaffected: liveness and an exchange tap still work.
         conn.ping().await.expect("ping");
         let exchange = unique("keyhole.it.topic");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
         declare_topic_exchange(&exchange).await;
         let mut stream = conn
             .subscribe(SubSpec::Exchange {
@@ -2906,19 +2973,11 @@ mod integration_tests {
         use crate::broker::QueueType;
         use lapin::options::QueueDeleteOptions;
 
-        // A uniquely named queue holding one message. It expires a minute after
-        // its last use, so a failed run cleans up too.
+        // A uniquely named queue holding one message.
         let queue = unique("keyhole.it.listed");
-        let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
-            .await
-            .unwrap();
-        let channel = setup.create_channel().await.unwrap();
-        let mut args = FieldTable::default();
-        args.insert("x-expires".into(), lapin::types::AMQPValue::LongInt(60_000));
-        channel
-            .queue_declare(queue.as_str().into(), QueueDeclareOptions::default(), args)
-            .await
-            .unwrap();
+        let _cleanup = Cleanup::queues(&[&queue]);
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
         publish("", &queue, "count me").await;
 
         let mut conn = connected().await;
@@ -2994,10 +3053,10 @@ mod integration_tests {
 
     #[tokio::test]
     async fn a_headers_exchange_tap_receives_every_message() {
-        use lapin::options::ExchangeDeleteOptions;
         use lapin::types::AMQPValue;
 
         let exchange = unique("keyhole.it.headers");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
         let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
             .await
             .unwrap();
@@ -3054,10 +3113,6 @@ mod integration_tests {
             }
         }
         drop(stream);
-        channel
-            .exchange_delete(exchange.as_str().into(), ExchangeDeleteOptions::default())
-            .await
-            .unwrap();
         setup.close(200, "bye".into()).await.ok();
 
         assert_eq!(
@@ -3078,17 +3133,20 @@ mod integration_tests {
         (connection, channel)
     }
 
-    /// Declare `queue` with `args`. Unless it's durable, it expires a minute
-    /// after its last use, so a failed run cleans up too.
-    async fn declare_queue(channel: &Channel, queue: &str, durable: bool, mut args: FieldTable) {
-        if !durable {
+    /// Declare a durable `queue` with `args`: 4.x refuses a transient queue
+    /// that isn't exclusive, and an exclusive one can't be read through the
+    /// management API. A classic queue (no `x-queue-type`) also expires a
+    /// minute after its last use, in case a run dies before its [`Cleanup`].
+    async fn declare_queue(channel: &Channel, queue: &str, mut args: FieldTable) {
+        let classic = !args.inner().keys().any(|k| k.as_str() == "x-queue-type");
+        if classic {
             args.insert("x-expires".into(), lapin::types::AMQPValue::LongInt(60_000));
         }
         channel
             .queue_declare(
                 queue.into(),
                 QueueDeclareOptions {
-                    durable,
+                    durable: true,
                     ..Default::default()
                 },
                 args,
@@ -3142,8 +3200,9 @@ mod integration_tests {
     #[tokio::test]
     async fn browse_peek_leaves_every_message_on_the_queue_flagged_redelivered() {
         let queue = unique("keyhole.it.peek");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
-        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
         for body in ["first", "second", "third"] {
             publish("", &queue, body).await;
         }
@@ -3187,8 +3246,9 @@ mod integration_tests {
     #[tokio::test]
     async fn destructive_peek_takes_the_messages_off_the_queue() {
         let queue = unique("keyhole.it.peekd");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
-        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
         publish("", &queue, "one").await;
         publish("", &queue, "two").await;
 
@@ -3206,22 +3266,18 @@ mod integration_tests {
 
     #[tokio::test]
     async fn peeking_a_stream_queue_explains_why_not() {
-        use lapin::options::QueueDeleteOptions;
         let queue = unique("keyhole.it.stream");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
         let mut args = FieldTable::default();
         args.insert(
             "x-queue-type".into(),
             lapin::types::AMQPValue::LongString("stream".into()),
         );
-        declare_queue(&channel, &queue, true, args).await;
+        declare_queue(&channel, &queue, args).await;
 
         let mut conn = connected().await;
         let err = peek_queue(&mut conn, &queue, PeekMode::Browse).await;
-        channel
-            .queue_delete(queue.as_str().into(), QueueDeleteOptions::default())
-            .await
-            .ok();
         setup.close(200, "bye".into()).await.ok();
         let err = err.expect_err("a stream refuses basic.get");
         assert_eq!(format!("{err:#}"), STREAM_PEEK_HINT);
@@ -3232,8 +3288,8 @@ mod integration_tests {
     /// version.
     async fn listed_quorum_queue(limit: i32) -> (DestinationInfo, Option<u32>) {
         use crate::broker::QueueType;
-        use lapin::options::QueueDeleteOptions;
         let queue = unique("keyhole.it.quorum");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
         let mut args = FieldTable::default();
         args.insert(
@@ -3244,15 +3300,11 @@ mod integration_tests {
             "x-delivery-limit".into(),
             lapin::types::AMQPValue::LongInt(limit),
         );
-        declare_queue(&channel, &queue, true, args).await;
+        declare_queue(&channel, &queue, args).await;
 
         let mut conn = connected().await;
         let major = conn.mgmt.probe().and_then(mgmt::Probe::major_version);
         let list = conn.list_destinations(false).await;
-        channel
-            .queue_delete(queue.as_str().into(), QueueDeleteOptions::default())
-            .await
-            .ok();
         setup.close(200, "bye".into()).await.ok();
         let list = list.expect("lists");
         let row = list
@@ -3305,19 +3357,11 @@ mod integration_tests {
         let mut conn = connected().await;
         let client = conn.mgmt.client().expect("probe succeeded").clone();
 
-        // A queue whose name needs encoding (`#`, `/`, space, non-ASCII). It
-        // expires a minute after its last use, so a failed run cleans up.
+        // A queue whose name needs encoding (`#`, `/`, space, non-ASCII).
         let queue = unique("keyhole.it.q #1/ü");
-        let setup = Connection::connect(url().as_str(), ConnectionProperties::default())
-            .await
-            .unwrap();
-        let channel = setup.create_channel().await.unwrap();
-        let mut args = FieldTable::default();
-        args.insert("x-expires".into(), lapin::types::AMQPValue::LongInt(60_000));
-        channel
-            .queue_declare(queue.as_str().into(), QueueDeclareOptions::default(), args)
-            .await
-            .unwrap();
+        let _cleanup = Cleanup::queues(&[&queue]);
+        let (setup, channel) = setup_channel().await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
         publish("", &queue, "peek me").await;
 
         let c = client.clone();
@@ -3434,8 +3478,9 @@ mod integration_tests {
         let mut profile = test_profile();
         profile.name = unique("roster");
         let prefix = format!("keyhole-{}-", profile.name);
-        let mut conn = connect_with(profile, "keyhole").await;
         let exchange = unique("keyhole.it.roster");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
+        let mut conn = connect_with(profile, "keyhole").await;
         declare_topic_exchange(&exchange).await;
         // The tap opens a connection of its own and consumes a server-named
         // queue (auto-ack).
@@ -3518,27 +3563,12 @@ mod integration_tests {
         .await
     }
 
-    /// Delete the test's `queues` and `exchanges` over `channel`.
-    async fn clean_up(channel: &Channel, queues: &[&str], exchanges: &[&str]) {
-        for queue in queues {
-            channel
-                .queue_delete((*queue).into(), Default::default())
-                .await
-                .unwrap_or_else(|e| panic!("deleting {queue}: {e:#}"));
-        }
-        for exchange in exchanges {
-            channel
-                .exchange_delete((*exchange).into(), Default::default())
-                .await
-                .unwrap_or_else(|e| panic!("deleting {exchange}: {e:#}"));
-        }
-    }
-
     #[tokio::test]
     async fn a_message_published_to_a_queue_is_peeked_back() {
         let queue = unique("keyhole.it.pub");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
-        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
 
         // No listing first: publishing needs only the AMQP connection.
         let mut conn = connected().await;
@@ -3554,8 +3584,6 @@ mod integration_tests {
         assert_eq!(ev.meta("routing_key"), Some(queue.as_str()));
         assert_eq!(ev.meta("delivery_mode"), Some("2 (persistent)"));
         assert_eq!(ev.meta("content_type"), None, "sent as typed");
-
-        clean_up(&channel, &[&queue], &[]).await;
         setup.close(200, "bye".into()).await.ok();
     }
 
@@ -3563,9 +3591,10 @@ mod integration_tests {
     async fn a_routing_key_takes_an_exchange_publish_to_its_bound_queue() {
         let exchange = unique("keyhole.it.pubx");
         let queue = unique("keyhole.it.pubq");
+        let _cleanup = Cleanup::queues(&[&queue]).and_exchanges(&[&exchange]);
         declare_topic_exchange(&exchange).await;
         let (setup, channel) = setup_channel().await;
-        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
         channel
             .queue_bind(
                 queue.as_str().into(),
@@ -3591,14 +3620,13 @@ mod integration_tests {
         assert_eq!(bodies(&events), [r#"{"id":1}"#]);
         assert_eq!(events[0].meta("exchange"), Some(exchange.as_str()));
         assert_eq!(events[0].meta("routing_key"), Some("order.test"));
-
-        clean_up(&channel, &[&queue], &[&exchange]).await;
         setup.close(200, "bye".into()).await.ok();
     }
 
     #[tokio::test]
     async fn an_unroutable_publish_is_reported_and_the_channel_stays_usable() {
         let exchange = unique("keyhole.it.nobody");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
         declare_topic_exchange(&exchange).await;
         let mut conn = connected().await;
         // The listing tells the connection which exchanges are topic ones.
@@ -3625,15 +3653,12 @@ mod integration_tests {
         // A returned message leaves the channel open.
         let channel = conn.publish_channel.clone().expect("still open");
         assert!(channel.status().connected());
-
-        let (setup, setup_channel) = setup_channel().await;
-        clean_up(&setup_channel, &[], &[&exchange]).await;
-        setup.close(200, "bye".into()).await.ok();
     }
 
     #[tokio::test]
     async fn a_queue_that_rejects_publishes_when_full_nacks_one() {
         let queue = unique("keyhole.it.full");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
         let mut args = FieldTable::default();
         args.insert("x-max-length".into(), lapin::types::AMQPValue::LongInt(1));
@@ -3641,7 +3666,7 @@ mod integration_tests {
             "x-overflow".into(),
             lapin::types::AMQPValue::LongString("reject-publish".into()),
         );
-        declare_queue(&channel, &queue, false, args).await;
+        declare_queue(&channel, &queue, args).await;
 
         let mut conn = connected().await;
         let spec = SubSpec::Queue(queue.clone());
@@ -3655,16 +3680,15 @@ mod integration_tests {
             err.to_string(),
             "NACKed: the broker didn't take the message"
         );
-
-        clean_up(&channel, &[&queue], &[]).await;
         setup.close(200, "bye".into()).await.ok();
     }
 
     #[tokio::test]
     async fn a_refused_publish_closes_only_its_channel_and_the_next_publish_works() {
         let queue = unique("keyhole.it.after");
+        let _cleanup = Cleanup::queues(&[&queue]);
         let (setup, channel) = setup_channel().await;
-        declare_queue(&channel, &queue, false, FieldTable::default()).await;
+        declare_queue(&channel, &queue, FieldTable::default()).await;
 
         let mut conn = connected().await;
         // Clients can't publish to an internal exchange: the broker closes the
@@ -3690,8 +3714,6 @@ mod integration_tests {
             .await
             .expect("peek");
         assert_eq!(bodies(&events), ["after"]);
-
-        clean_up(&channel, &[&queue], &[]).await;
         setup.close(200, "bye".into()).await.ok();
     }
 }
