@@ -2161,6 +2161,25 @@ mod tests {
     }
 
     #[test]
+    fn a_confirmation_with_a_returned_message_reads_as_unroutable() {
+        // A mandatory publish the broker could not route comes back with the
+        // message, whether it is then acked or nacked.
+        let returned = || lapin::message::BasicReturnMessage {
+            delivery: Delivery::mock(1, "".into(), "nowhere".into(), false, Vec::new()),
+            reply_code: 312,
+            reply_text: "NO_ROUTE".into(),
+        };
+        assert_eq!(
+            PublishOutcome::from(Confirmation::Ack(Some(returned()))),
+            PublishOutcome::Unroutable
+        );
+        assert_eq!(
+            PublishOutcome::from(Confirmation::Nack(Some(returned()))),
+            PublishOutcome::Unroutable
+        );
+    }
+
+    #[test]
     fn a_failed_publish_says_why_starting_with_the_kind_of_failure() {
         use ExchangeType::{Direct, Fanout, Headers, Topic};
         use PublishOutcome::{Confirmed, Nacked, Unroutable};
