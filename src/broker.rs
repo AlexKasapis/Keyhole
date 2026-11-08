@@ -1375,15 +1375,11 @@ mod tests {
     fn the_tls_provider_is_aws_lc_rs_and_installing_it_again_is_harmless() {
         install_tls_provider();
         install_tls_provider();
-        let groups = |p: &rustls::crypto::CryptoProvider| {
-            p.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>()
-        };
         let installed = rustls::crypto::CryptoProvider::get_default().expect("installed");
-        assert_eq!(
-            groups(installed),
-            groups(&rustls::crypto::aws_lc_rs::default_provider()),
-            "aws-lc-rs, not ring"
-        );
+        // Each backend's random source and key loader is its own type, which
+        // `Debug` names: `AwsLcRs` here, `Ring` for ring.
+        assert_eq!(format!("{:?}", installed.secure_random), "AwsLcRs");
+        assert_eq!(format!("{:?}", installed.key_provider), "AwsLcRs");
         // What panicked while no provider was chosen.
         let _ = rustls::ClientConfig::builder();
     }
