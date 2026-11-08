@@ -13,7 +13,8 @@
 //! and their consumers never lose a message. Auto-acking only discards our own
 //! copy, and the spy queue auto-deletes when the tail's connection drops. This
 //! is a stronger non-destructive guarantee than AMQP 1.0's queue browse: we
-//! never read from an existing queue at all.
+//! never read from an existing queue at all. The destination list leaves the
+//! spy queues out ([`taps`]).
 //!
 //! Each tail owns a dedicated connection + channel + consumer (mirroring the
 //! Redis dedicated-socket model) so the returned stream is `'static` and the
@@ -35,6 +36,7 @@
 //! route) the message. It doesn't need the management API.
 
 mod mgmt;
+mod taps;
 
 use std::collections::HashMap;
 
@@ -60,6 +62,7 @@ use self::mgmt::{
     AckMode, ApiError, ConnectionInfo, ConsumerInfo, ExchangeInfo, GetMessage, Management,
     MessageProperties, MgmtClient, NodeInfo, Overview, QueueInfo,
 };
+use self::taps::{TapQueueGuard, TapQueues, TAP_QUEUES};
 use super::{
     BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, Capabilities, ClientConnection,
     DestKind, DestinationInfo, DestinationList, ExchangeType, NodeHealth, Payload, PeekReq,
@@ -101,6 +104,9 @@ pub struct RabbitmqConnection {
     /// The most body bytes a peek fetches per message (the
     /// `value_preview_bytes` setting); longer bodies come back truncated.
     preview_bytes: usize,
+    /// Where taps note their spy queues and listings look them up: the
+    /// process-wide [`TAP_QUEUES`], or a test's own.
+    tap_queues: &'static TapQueues,
 }
 
 impl RabbitmqConnection {
@@ -123,7 +129,15 @@ impl RabbitmqConnection {
             mgmt,
             exchange_types: HashMap::new(),
             preview_bytes: preview_bytes.max(1),
+            tap_queues: &TAP_QUEUES,
         }
+    }
+
+    /// The broker and vhost a tap's spy queue is declared on, which the
+    /// management API lists it under.
+    fn tap_scope(&self) -> String {
+        let p = &self.profile;
+        format!("{}:{}/{}", p.host, p.port, p.vhost)
     }
 
     /// Why the management API can't be used, naming where it was looked for.
@@ -237,7 +251,15 @@ impl BrokerConnection for RabbitmqConnection {
             other => anyhow::bail!("{} is not a RabbitMQ destination", other.label()),
         };
         // Each tail is its own dedicated connection (and thus its own spy queue).
-        open_exchange_tap(&self.url(), self.conn_props(), exchange, binding_key).await
+        open_exchange_tap(
+            &self.url(),
+            self.conn_props(),
+            self.tap_queues,
+            &self.tap_scope(),
+            exchange,
+            binding_key,
+        )
+        .await
     }
 
     async fn list_destinations(&mut self, reprobe: bool) -> anyhow::Result<DestinationList> {
@@ -271,7 +293,8 @@ impl BrokerConnection for RabbitmqConnection {
                 return Err(e.context(unavailable));
             }
         };
-        let list = destination_list(queues, exchanges, stats_disabled, requeue_counts);
+        let mut list = destination_list(queues, exchanges, stats_disabled, requeue_counts);
+        self.tap_queues.hide(&self.tap_scope(), &mut list);
         self.exchange_types = list
             .items
             .iter()
@@ -957,17 +980,21 @@ struct TapState {
     // Kept alive for the life of the stream (dropped → spy queue auto-deletes).
     _connection: Connection,
     _channel: Channel,
+    /// Keeps the spy queue out of the destination list.
+    _spy_queue: TapQueueGuard<'static>,
     consumer: Consumer,
     /// The exchange name reported as the event source.
     exchange: String,
 }
 
 /// Open a dedicated, non-destructive tap on `exchange` and return its event
-/// stream. Declares a temporary spy queue, binds it with `binding_key`, and
-/// consumes the copies routed to it.
+/// stream. Declares a temporary spy queue, notes it in `spy_queues` under
+/// `scope`, binds it with `binding_key`, and consumes the copies routed to it.
 async fn open_exchange_tap(
     url: &str,
     props: ConnectionProperties,
+    spy_queues: &'static TapQueues,
+    scope: &str,
     exchange: String,
     binding_key: String,
 ) -> anyhow::Result<BrokerEventStream> {
@@ -1017,6 +1044,9 @@ async fn open_exchange_tap(
         .await
         .context("declaring the spy queue")?;
     let queue_name = queue.name().as_str().to_owned();
+    // Noted before the bind or consume can fail, so the queue a failed tap
+    // leaves behind stays hidden until the broker deletes it too.
+    let spy_queue = spy_queues.register(scope, &queue_name);
 
     // Bind the spy queue: the broker now routes a COPY of every matching message
     // to it, on top of whatever real queues are bound. Non-destructive by
@@ -1054,6 +1084,7 @@ async fn open_exchange_tap(
     let state = TapState {
         _connection: connection,
         _channel: channel,
+        _spy_queue: spy_queue,
         consumer,
         exchange,
     };
@@ -1360,6 +1391,28 @@ mod tests {
         let trace = find(&list, "amq.rabbitmq.trace", DestKind::Exchange);
         assert!(trace.internal);
         assert!(!find(&list, "amq.topic", DestKind::Exchange).internal);
+    }
+
+    #[tokio::test]
+    async fn the_listing_leaves_out_this_processs_tap_queues() {
+        let queues =
+            r#"{"items":[{"name":"amq.gen-ours"},{"name":"amq.gen-theirs"}],"page_count":1}"#;
+        let (mut conn, server) = listing_conn(
+            false,
+            vec![(200, queues.into()), (200, fixture!("exchanges.v4"))],
+        )
+        .await;
+        conn.tap_queues = Box::leak(Box::default());
+        let _tap = conn.tap_queues.register(&conn.tap_scope(), "amq.gen-ours");
+        let list = conn.list_destinations(false).await.expect("lists");
+        server.join().unwrap();
+        let queues: Vec<_> = list
+            .items
+            .iter()
+            .filter(|d| d.kind == DestKind::Queue)
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(queues, ["amq.gen-theirs"]);
     }
 
     #[tokio::test]
@@ -3452,6 +3505,85 @@ mod integration_tests {
         assert!(tap.channel_details.name.is_some());
 
         setup.close(200, "bye".into()).await.ok();
+    }
+
+    /// The queues `list` shows.
+    fn queue_names(list: &DestinationList) -> Vec<String> {
+        list.items
+            .iter()
+            .filter(|d| d.kind == DestKind::Queue)
+            .map(|d| d.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_listing_hides_our_tap_queues_but_not_another_clients() {
+        // Another client's queue shaped like a spy queue: server-named,
+        // exclusive and auto-delete.
+        let (other, other_channel) = setup_channel().await;
+        let theirs = other_channel
+            .queue_declare(
+                "".into(),
+                QueueDeclareOptions {
+                    exclusive: true,
+                    auto_delete: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .unwrap()
+            .name()
+            .as_str()
+            .to_owned();
+
+        let mut conn = connected().await;
+        // A registry of its own, so other tests' taps don't count.
+        conn.tap_queues = Box::leak(Box::default());
+        let tap = conn
+            .subscribe(SubSpec::Exchange {
+                exchange: "amq.topic".into(),
+                binding_key: "#".into(),
+            })
+            .await
+            .expect("exchange tap");
+        let [ours] = &conn.tap_queues.names()[..] else {
+            panic!("the tap notes one queue: {:?}", conn.tap_queues.names());
+        };
+        let ours = ours.clone();
+        assert!(ours.starts_with("amq.gen-"), "{ours}");
+        let client = conn.mgmt.client().expect("probe succeeded").clone();
+        let (o, t) = (ours.clone(), theirs.clone());
+        eventually(
+            move || client.queues(),
+            move |listing: &mgmt::Listing<QueueInfo>| {
+                [&o, &t]
+                    .iter()
+                    .all(|n| listing.items.iter().any(|q| q.name == **n))
+            },
+        )
+        .await;
+
+        // Both queues are on the broker; the list shows only theirs.
+        let shown = queue_names(&conn.list_destinations(false).await.expect("lists"));
+        assert!(!shown.contains(&ours), "{ours} is hidden: {shown:?}");
+        assert!(shown.contains(&theirs), "{theirs} is listed: {shown:?}");
+
+        // Closed, the tap's queue stays hidden while the broker deletes it,
+        // and is forgotten once a listing no longer has it.
+        drop(tap);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        while !conn.tap_queues.names().is_empty() && tokio::time::Instant::now() < deadline {
+            let shown = queue_names(&conn.list_destinations(false).await.expect("lists"));
+            assert!(!shown.contains(&ours), "{ours} is hidden: {shown:?}");
+            assert!(shown.contains(&theirs), "{theirs} is listed: {shown:?}");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            conn.tap_queues.names().is_empty(),
+            "the deleted queue is forgotten"
+        );
+        other.close(200, "bye".into()).await.ok();
     }
 
     /// Ask for `kind` until `done` holds (the broker's stats behind the

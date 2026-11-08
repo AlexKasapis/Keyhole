@@ -34,8 +34,9 @@ value_preview_bytes = 65536`;
   <h3 id="list" data-toc="list">Queues &amp; exchanges</h3>
   <p>
     The list shows the profile's <code>vhost</code> only: its queues first, then its exchanges. The
-    default exchange (<code>""</code>) is left out; <code>amq.*</code> exchanges stay, and internal
-    ones such as <code>amq.rabbitmq.trace</code> are dimmed.
+    default exchange (<code>""</code>) is left out, and so are the temporary queues Keyhole's own
+    taps declare (other clients' <code>amq.gen-…</code> queues stay). <code>amq.*</code> exchanges
+    stay, and internal ones such as <code>amq.rabbitmq.trace</code> are dimmed.
   </p>
   <CodeBlock cmd={listPlain} code={list} dense />
   <table>
