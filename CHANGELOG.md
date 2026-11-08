@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gruvbox is now the default theme**, applied when no `[theme]` `base` is set
   in the config. Existing profiles that pin `base = "dark"` or `"light"` are
   unaffected. The settings page's theme cycle now leads with gruvbox.
+- **The settings page's "AMQP peek mode" row is now "Queue peek mode"**, since
+  `peek_mode` covers RabbitMQ queues as well as AMQP 1.0.
 
 ### Fixed
 
@@ -65,6 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pressed, rather than whatever is selected when the message is submitted.
 - **Closing an AMQP 1.0 or RabbitMQ tail tab** returns to the Tail tab.
   Before, Tab then skipped a tab, or stayed on the same one.
+- **Long destination names end in `…` when cut**, in the AMQP 1.0 and RabbitMQ
+  lists and in the right pane's titles, and a peeked queue's title keeps its
+  message count and delivery-limit warning in view. Text is cut by what the
+  terminal draws, so emoji and CJK names no longer lose the `…`.
+- **The RabbitMQ list leaves out Keyhole's own tap queues.** The temporary
+  `amq.gen-…` queues behind this session's exchange taps no longer show up in
+  the list; other clients' queues still do.
 
 ## [0.1.2] - 2026-06-26
 

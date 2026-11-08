@@ -635,16 +635,17 @@ From Phase 3 on, also check it in the running app: `just dev`, then
   isn't supported" error.
 - An unresolvable `management_password` fails the whole connection instead of leaving tails
   usable.
-- Destination names longer than the Name column are cut without an ellipsis.
-- The tap's own `amq.gen-*` spy queues appear in the list (consider hiding exclusive queues).
 - The serial actor can be delayed by multi-page listings on large vhosts (move management calls
   to their own task).
 - No dedicated re-peek key: Enter on a peeked queue steps into its messages.
 - Publish can't set headers or properties.
 - Roster rows sort as plain text (`keyhole-10` before `keyhole-2`).
 - The `keyhole dev` RabbitMQ publisher loop exits on the first publish error.
-- The docs site's Keybindings page doesn't list the destination-browser keys (`t`, `P`, `r`,
-  `a`, `x`/`d`, Ctrl-→).
-- The Settings page row is still labelled "AMQP peek mode", though it covers RabbitMQ too.
 - Moving AMQP 1.0 Jolokia discovery behind `list_destinations`.
 - Server-side writes: purge, delete, move.
+- A tap binding key or exchange name over 255 bytes panics the connection actor (lapin's
+  `ShortString` conversion `expect`s); reject it with an error instead.
+- `payload_preview` flattens and base64-encodes each whole message body before cutting it to the
+  preview, so a 200-message peek of 64 KiB bodies costs ~23 ms a frame; work only as far as the
+  preview needs.
+- The Redis key table and the Connections list still cut long names without an ellipsis.
