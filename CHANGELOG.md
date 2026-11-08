@@ -75,20 +75,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `amq.gen-…` queues behind this session's exchange taps no longer show up in
   the list; other clients' queues still do.
 - **RabbitMQ names and keys over 255 bytes no longer break the session.** A
-  publish routing key, a profile's vhost (or a host with a `/` in it), or an
-  exchange name the management API listed, past AMQP's 255-byte limit,
-  crashed a background task: the terminal dropped out of full-screen mode
-  with a panic message, keys echoed on screen, and the connection, still
-  shown as connected, did nothing more (a connect never finished). Now the
-  publish fails in the footer, the tap's tab ends, or the connect fails, each
-  saying the limit is 255 bytes, and an open connection stays up. The Tail
-  tab also shows why it refused a typed spec, under its prompt, where the
-  footer couldn't, and keeps the spec to fix.
+  publish routing key, a profile's vhost, or an exchange name the management
+  API listed, past AMQP's 255-byte limit, crashed a background task: the
+  terminal dropped out of full-screen mode with a panic message, keys echoed
+  on screen, and the connection, still shown as connected, did nothing more
+  (a connect never finished). Now the publish fails in the footer, the tap's
+  tab ends, or the connect fails, each saying the limit is 255 bytes, and an
+  open connection stays up. The Tail tab also shows why it refused a typed
+  spec, under its prompt, where the footer couldn't, and keeps the spec to
+  fix.
 - **RabbitMQ profiles with an IPv6 host connect to that host.** An address
   such as `2001:db8::1` was read as `localhost`, so Keyhole connected, and
   logged in with the profile's username and password, to a broker on this
   machine instead. A `.` or `..` vhost also connected to the empty vhost
-  instead of the one named.
+  instead of the one named, and a host containing `/` fails to connect
+  instead of crashing.
 
 ## [0.1.2] - 2026-06-26
 
