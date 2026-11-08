@@ -3270,6 +3270,9 @@ mod integration_tests {
     async fn a_tls_connect_or_tap_on_a_plain_port_fails_instead_of_hanging() {
         // Both rustls backends are built in, so until keyhole chose one,
         // rustls panicked in lapin's I/O thread and the connect never returned.
+        // The provider is installed once per process, so another test's
+        // install can hide a missing call on this path; the fresh-process
+        // tests in `tests/fresh_process_tls.rs` don't share it.
         let mut profile = test_profile();
         profile.tls = true;
         let result = try_connect(profile.clone()).await;
@@ -3300,6 +3303,9 @@ mod integration_tests {
     fn the_management_api_over_tls_on_a_plain_port_is_an_error() {
         // ureq takes the installed provider (aws-lc-rs) instead of its own
         // `ring` fallback, and still completes a TLS attempt.
+        // The provider is installed once per process, so another test's
+        // install can hide a missing call on this path; the fresh-process
+        // tests in `tests/fresh_process_tls.rs` don't share it.
         let url = format!("https://127.0.0.1:{}/api/overview", mgmt_port());
         let reply = crate::broker::http::agent().get(&url).call();
         assert!(reply.is_err(), "{reply:?}");

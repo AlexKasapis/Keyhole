@@ -912,6 +912,9 @@ mod integration_tests {
     async fn a_tls_connect_to_a_plain_port_fails_instead_of_panicking() {
         // Both rustls backends are built in, so until keyhole chose one,
         // building the TLS config panicked inside the connect.
+        // The provider is installed once per process, so another test's
+        // install can hide a missing call on this path; the fresh-process
+        // tests in `tests/fresh_process_tls.rs` don't share it.
         let profile = AmqpProfile {
             name: "tls".into(),
             host: "127.0.0.1".into(),
