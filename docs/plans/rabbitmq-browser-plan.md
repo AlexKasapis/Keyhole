@@ -652,3 +652,9 @@ From Phase 3 on, also check it in the running app: `just dev`, then
 - A panic inside a broker call kills the connection actor silently: the header still says
   connected, every later command is dropped, and the panic hook tears down the terminal while
   the app keeps running.
+- The RabbitMQ connect, a tap's connect and the AMQP 1.0 `open_connection` have no timeout: a
+  listener that accepts and never answers hangs them for good. The actor awaits `subscribe`
+  inline, so a stuck tap also blocks the connection's other commands. (lapin's
+  `connection_timeout` isn't applied on its async path; ureq gives up after 3 s.)
+- fe2o3-amqp's TLS errors are vague: a bad, expired or self-signed certificate shows as
+  "early eof", and an IPv6 host as "Invalid domain". lapin and ureq name the certificate problem.

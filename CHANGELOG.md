@@ -84,20 +84,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open connection stays up. The Tail tab also shows why it refused a typed
   spec, under its prompt, where the footer couldn't, and keeps the spec to
   fix.
-- **RabbitMQ profiles with an IPv6 host connect to that host.** An address
-  such as `2001:db8::1` was read as `localhost`, so Keyhole connected, and
-  logged in with the profile's username and password, to a broker on this
-  machine instead. A `.` or `..` vhost also connected to the empty vhost
-  instead of the one named, and a host containing `/` fails to connect
-  instead of crashing.
+- **RabbitMQ profiles connect to the host and vhost they name.** An IPv6
+  address such as `2001:db8::1` was read as `localhost`, so Keyhole
+  connected, and logged in with the profile's username and password, to a
+  broker on this machine instead; a `.` or `..` vhost connected to the empty
+  vhost; and a host containing `/` crashed the connect. Now each connects
+  where the profile says, and a host containing `/` fails with a connect
+  error.
 - **TLS connections no longer crash.** Connecting a RabbitMQ or AMQP 1.0
   profile with `tls = true` (and `keyhole dev` against one) panicked choosing
   a TLS crypto library: the connect never finished, the panic message broke
   up the screen and keys echoed on it. Keyhole now uses aws-lc-rs for every
   TLS connection, so a TLS connect works, or fails with an error you can read.
-- **Text too long for its prompt shows its end**, where the cursor is, in the
-  Tail tab and the footer's prompts (routing key, message, filters, rename),
-  after a `…`, instead of running off the edge.
+- **Text too long for its prompt shows its end**, where the cursor is, after
+  a `…`, instead of running off the edge: in every footer prompt (filters,
+  rename, subscribe, add destination, routing key, message) and in the bottom
+  panel's Pub/Sub and Tail prompts, for Redis, AMQP 1.0 and RabbitMQ alike.
 
 ## [0.1.2] - 2026-06-26
 
