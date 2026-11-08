@@ -29,7 +29,7 @@ expression: "render_lines(&mut app, 90, 40)"
 │           │                                                                │           │
 │           │AMQP / RabbitMQ browser                                         │           │
 │           │  Enter open · t tail · Ctrl-→ messages · / filter messages     │           │
-│           │  P publish · direct/topic exchanges ask for a routing key first│           │
+│           │  P publish · exchanges but fanout/headers ask for a routing key│           │
 │           │  AMQP: a add · r discover · x/d remove                         │           │
 │           │  RabbitMQ: Enter peek queue · t/Enter tap exchange · r refresh │           │
 │           │  bottom: Details · Connections · Consumers (↑↓ Home End) · Tail│           │

@@ -1111,7 +1111,7 @@ mod tests {
         assert!(text.contains("Global keys"));
         // RabbitMQ's bottom tabs and publish's routing-key step are covered.
         assert!(text.contains("bottom: Details · Connections · Consumers"));
-        assert!(text.contains("ask for a routing key first"));
+        assert!(text.contains("exchanges but fanout/headers ask for a routing key"));
         // The whole overlay fits a 30-row terminal: its last row isn't cut.
         assert!(text.contains("Esc back · Ctrl-C quit"), "{text}");
     }
@@ -2118,7 +2118,7 @@ mod tests {
     fn snapshot_settings_overlay() {
         let (mut app, _rx) = test_app();
         pin_clock(&mut app);
-        // Default config (no base set) reads as the first cycle entry, "dark".
+        // Default config (no base set) reads as the first cycle entry, "gruvbox".
         app.settings = Some(crate::app::SettingsState::default());
         insta::assert_snapshot!("settings_overlay", render_lines(&mut app, 90, 16));
     }

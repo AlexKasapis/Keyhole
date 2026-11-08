@@ -164,7 +164,7 @@ impl App {
         match config::save(&self.config_path, &self.config) {
             Ok(()) => self.set_status(format!("Queue peek mode: {label}"), false),
             Err(e) => self.set_status(
-                format!("Queue peek mode set to {label}, but could not save: {e}"),
+                format!("queue peek mode set to {label}, but could not save: {e}"),
                 true,
             ),
         }
@@ -337,6 +337,9 @@ mod tests {
         // ←/→ cycle it, applied live: browse -> skip -> destructive.
         app.handle_key(key(KeyCode::Right));
         assert_eq!(app.peek_mode(), crate::config::PeekMode::Skip);
+        let status = app.status.as_ref().expect("status set");
+        assert_eq!(status.message, "Queue peek mode: skip");
+        assert!(!status.is_error);
         app.handle_key(key(KeyCode::Right));
         assert_eq!(app.peek_mode(), crate::config::PeekMode::Destructive);
 
@@ -353,6 +356,20 @@ mod tests {
         app.handle_key(key(KeyCode::Left));
         assert_eq!(app.peek_mode(), crate::config::PeekMode::Destructive);
         let _ = std::fs::remove_file(&path);
+
+        // A failed save still applies the mode, and says it wasn't saved.
+        app.config_path = std::env::temp_dir();
+        app.handle_key(key(KeyCode::Left));
+        assert_eq!(app.peek_mode(), crate::config::PeekMode::Skip);
+        let status = app.status.as_ref().expect("status set");
+        assert!(
+            status
+                .message
+                .starts_with("queue peek mode set to skip, but could not save: "),
+            "{}",
+            status.message
+        );
+        assert!(status.is_error);
     }
 
     #[test]

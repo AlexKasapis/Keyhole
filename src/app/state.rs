@@ -88,7 +88,8 @@ pub enum SettingsRow {
     Theme,
     /// Whether UI animations play (`on` / `off`).
     Animations,
-    /// How peeking an AMQP queue reads it (`browse` / `skip` / `destructive`).
+    /// How peeking a queue (AMQP 1.0 or RabbitMQ) reads its messages
+    /// (`browse` / `skip` / `destructive`).
     PeekMode,
 }
 
