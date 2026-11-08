@@ -27,6 +27,7 @@ pub use state::{
 pub use state::ScanPhase;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
@@ -39,6 +40,7 @@ use tokio_util::task::TaskTracker;
 use crate::app::action::Action;
 use crate::broker::actor::{spawn_connection, ConnCommand, ConnHandle, SpawnParams};
 use crate::broker::factory::connection_for;
+use crate::broker::rabbitmq::TapQueues;
 use crate::broker::{
     BrokerEvent, BrokerStats, BrokerType, BrowsePage, Capabilities, ConnId, DestinationList,
     ExchangeType, InspectReq, Roster, RosterKind, SubSpec, ValueType, ValueView,
@@ -85,6 +87,9 @@ pub struct App {
     events: Sender<AppEvent>,
     tracker: TaskTracker,
     cancel: CancellationToken,
+    /// The spy queues this session's RabbitMQ taps declared, shared by every
+    /// RabbitMQ connection so none of them lists another's.
+    tap_queues: Arc<TapQueues>,
 
     // Config.
     config: Config,
@@ -188,6 +193,7 @@ impl App {
             events,
             tracker,
             cancel,
+            tap_queues: Arc::default(),
             config,
             config_path,
             preview_bytes,

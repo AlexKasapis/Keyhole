@@ -38,7 +38,10 @@
 mod mgmt;
 mod taps;
 
+pub use self::taps::TapQueues;
+
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -62,7 +65,7 @@ use self::mgmt::{
     AckMode, ApiError, ConnectionInfo, ConsumerInfo, ExchangeInfo, GetMessage, Management,
     MessageProperties, MgmtClient, NodeInfo, Overview, QueueInfo,
 };
-use self::taps::{TapQueueGuard, TapQueues, TAP_QUEUES};
+use self::taps::TapQueueGuard;
 use super::{
     BrokerConnection, BrokerEvent, BrokerEventStream, BrokerStats, Capabilities, ClientConnection,
     DestKind, DestinationInfo, DestinationList, ExchangeType, NodeHealth, Payload, PeekReq,
@@ -104,21 +107,23 @@ pub struct RabbitmqConnection {
     /// The most body bytes a peek fetches per message (the
     /// `value_preview_bytes` setting); longer bodies come back truncated.
     preview_bytes: usize,
-    /// Where taps note their spy queues and listings look them up: the
-    /// process-wide [`TAP_QUEUES`], or a test's own.
-    tap_queues: &'static TapQueues,
+    /// The spy queues of this session's taps, which the listing leaves out.
+    /// Shared with the session's other RabbitMQ connections.
+    tap_queues: Arc<TapQueues>,
 }
 
 impl RabbitmqConnection {
     /// Build a connection from a profile, its resolved AMQP password, the
     /// resolved management API password (`management_password`, else the AMQP
-    /// password), and the most body bytes a peek shows per message. Call
-    /// [`BrokerConnection::connect`] to actually establish it.
+    /// password), the most body bytes a peek shows per message, and the
+    /// session's tap queues. Call [`BrokerConnection::connect`] to actually
+    /// establish it.
     pub fn new(
         profile: RabbitmqProfile,
         password: Option<String>,
         management_password: Option<String>,
         preview_bytes: usize,
+        tap_queues: Arc<TapQueues>,
     ) -> Self {
         let mgmt = Management::new(management_client(&profile, management_password));
         Self {
@@ -129,15 +134,8 @@ impl RabbitmqConnection {
             mgmt,
             exchange_types: HashMap::new(),
             preview_bytes: preview_bytes.max(1),
-            tap_queues: &TAP_QUEUES,
+            tap_queues,
         }
-    }
-
-    /// The broker and vhost a tap's spy queue is declared on, which the
-    /// management API lists it under.
-    fn tap_scope(&self) -> String {
-        let p = &self.profile;
-        format!("{}:{}/{}", p.host, p.port, p.vhost)
     }
 
     /// Why the management API can't be used, naming where it was looked for.
@@ -254,8 +252,7 @@ impl BrokerConnection for RabbitmqConnection {
         open_exchange_tap(
             &self.url(),
             self.conn_props(),
-            self.tap_queues,
-            &self.tap_scope(),
+            &self.tap_queues,
             exchange,
             binding_key,
         )
@@ -294,7 +291,7 @@ impl BrokerConnection for RabbitmqConnection {
             }
         };
         let mut list = destination_list(queues, exchanges, stats_disabled, requeue_counts);
-        self.tap_queues.hide(&self.tap_scope(), &mut list);
+        self.tap_queues.hide(&mut list);
         self.exchange_types = list
             .items
             .iter()
@@ -981,20 +978,19 @@ struct TapState {
     _connection: Connection,
     _channel: Channel,
     /// Keeps the spy queue out of the destination list.
-    _spy_queue: TapQueueGuard<'static>,
+    _spy_queue: TapQueueGuard,
     consumer: Consumer,
     /// The exchange name reported as the event source.
     exchange: String,
 }
 
 /// Open a dedicated, non-destructive tap on `exchange` and return its event
-/// stream. Declares a temporary spy queue, notes it in `spy_queues` under
-/// `scope`, binds it with `binding_key`, and consumes the copies routed to it.
+/// stream. Declares a temporary spy queue, notes it in `spy_queues`, binds it
+/// with `binding_key`, and consumes the copies routed to it.
 async fn open_exchange_tap(
     url: &str,
     props: ConnectionProperties,
-    spy_queues: &'static TapQueues,
-    scope: &str,
+    spy_queues: &Arc<TapQueues>,
     exchange: String,
     binding_key: String,
 ) -> anyhow::Result<BrokerEventStream> {
@@ -1046,7 +1042,7 @@ async fn open_exchange_tap(
     let queue_name = queue.name().as_str().to_owned();
     // Noted before the bind or consume can fail, so the queue a failed tap
     // leaves behind stays hidden until the broker deletes it too.
-    let spy_queue = spy_queues.register(scope, &queue_name);
+    let spy_queue = spy_queues.register(&queue_name);
 
     // Bind the spy queue: the broker now routes a COPY of every matching message
     // to it, on top of whatever real queues are bound. Non-destructive by
@@ -1159,14 +1155,26 @@ mod tests {
 
     #[test]
     fn url_includes_scheme_encoded_credentials_and_default_vhost() {
-        let conn = RabbitmqConnection::new(profile(false), Some("p@ss/word".into()), None, PREVIEW);
+        let conn = RabbitmqConnection::new(
+            profile(false),
+            Some("p@ss/word".into()),
+            None,
+            PREVIEW,
+            Arc::default(),
+        );
         // The default vhost "/" must be percent-encoded to %2F (not a bare slash,
         // which would select the empty vhost).
         assert_eq!(
             conn.url(),
             "amqp://user:p%40ss%2Fword@rabbit.example.com:5672/%2F"
         );
-        let tls = RabbitmqConnection::new(profile(true), Some("x".into()), None, PREVIEW);
+        let tls = RabbitmqConnection::new(
+            profile(true),
+            Some("x".into()),
+            None,
+            PREVIEW,
+            Arc::default(),
+        );
         assert!(tls.url().starts_with("amqps://"));
         assert!(tls.url().ends_with(":5671/%2F"));
     }
@@ -1176,7 +1184,7 @@ mod tests {
         let mut p = profile(false);
         p.username = None;
         p.vhost = "my/host".into();
-        let conn = RabbitmqConnection::new(p, None, None, PREVIEW);
+        let conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
         assert_eq!(conn.url(), "amqp://rabbit.example.com:5672/my%2Fhost");
     }
 
@@ -1202,7 +1210,7 @@ mod tests {
 
     #[tokio::test]
     async fn default_binding_key_tap_warns_about_non_topic_exchanges() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         // The catch-all `#` default → advisory that direct exchanges
         // need an explicit key (else the tail is silently empty).
         let notice = conn
@@ -1240,6 +1248,7 @@ mod tests {
             Some("amqp-pw".into()),
             management_password.map(str::to_string),
             PREVIEW,
+            Arc::default(),
         );
         conn.mgmt.run_probe().await;
         assert!(conn.mgmt.probe().is_some(), "{:?}", conn.mgmt.error());
@@ -1323,7 +1332,7 @@ mod tests {
         let (base_url, server) = stub_server(all);
         let mut p = profile(false);
         p.management_url = Some(base_url);
-        let mut conn = RabbitmqConnection::new(p, None, Some("pw".into()), PREVIEW);
+        let mut conn = RabbitmqConnection::new(p, None, Some("pw".into()), PREVIEW, Arc::default());
         conn.mgmt.run_probe().await;
         assert!(conn.mgmt.probe().is_some(), "{:?}", conn.mgmt.error());
         (conn, server)
@@ -1402,8 +1411,7 @@ mod tests {
             vec![(200, queues.into()), (200, fixture!("exchanges.v4"))],
         )
         .await;
-        conn.tap_queues = Box::leak(Box::default());
-        let _tap = conn.tap_queues.register(&conn.tap_scope(), "amq.gen-ours");
+        let _tap = conn.tap_queues.register("amq.gen-ours");
         let list = conn.list_destinations(false).await.expect("lists");
         server.join().unwrap();
         let queues: Vec<_> = list
@@ -1444,7 +1452,7 @@ mod tests {
 
     #[tokio::test]
     async fn listing_before_a_good_probe_fails_fast_and_names_the_url() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let err = conn.list_destinations(false).await.unwrap_err();
         assert_eq!(
             format!("{err:#}"),
@@ -1464,7 +1472,7 @@ mod tests {
         ]);
         let mut p = profile(false);
         p.management_url = Some(base_url);
-        let mut conn = RabbitmqConnection::new(p, None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
         assert!(conn.mgmt.error().is_some(), "not probed yet");
 
         // Without `reprobe` the recorded error comes straight back.
@@ -1879,7 +1887,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_peek_before_a_good_probe_fails_fast_and_an_unreachable_one_is_recorded() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let err = conn.peek(queue_peek(PeekMode::Browse)).await.unwrap_err();
         assert_eq!(
             format!("{err:#}"),
@@ -1901,7 +1909,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_queue_is_peeked() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let exchange = SubSpec::Exchange {
             exchange: "ex".into(),
             binding_key: "#".into(),
@@ -2132,7 +2140,7 @@ mod tests {
     async fn stats_before_a_good_probe_fail_fast_without_a_request() {
         // No stub at all: a request would have nowhere to go but the default
         // (unreachable) URL, and would take the timeouts to fail.
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let started = std::time::Instant::now();
         let err = conn.stats().await.unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
@@ -2177,7 +2185,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_dashboard_needs_a_successful_probe() {
-        let unprobed = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let unprobed = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let caps = unprobed.capabilities();
         assert_eq!(caps.r#type, crate::broker::BrokerType::Rabbitmq);
         assert!(!caps.can_dashboard);
@@ -2193,7 +2201,7 @@ mod tests {
     async fn publishing_needs_no_management_api() {
         // It goes over AMQP: offered without a usable API (as before a good
         // probe) and with one.
-        let unprobed = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let unprobed = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         assert!(unprobed.mgmt.client().is_err());
         assert!(unprobed.capabilities().can_publish);
         let (probed, server) = listing_conn(false, Vec::new()).await;
@@ -2305,7 +2313,7 @@ mod tests {
 
     #[tokio::test]
     async fn publishing_needs_a_queue_or_an_exchange_and_a_connection() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let topic = PublishReq {
             spec: SubSpec::Topic("t".into()),
             routing_key: String::new(),
@@ -2324,7 +2332,7 @@ mod tests {
 
     #[test]
     fn management_client_targets_the_profile_url_and_starts_unprobed() {
-        let conn = RabbitmqConnection::new(profile(true), None, None, PREVIEW);
+        let conn = RabbitmqConnection::new(profile(true), None, None, PREVIEW, Arc::default());
         assert_eq!(conn.mgmt.base_url(), "https://rabbit.example.com:15671");
         assert!(conn.mgmt.probe().is_none());
         assert!(
@@ -2523,7 +2531,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_roster_before_a_good_probe_fails_fast_without_a_request() {
-        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW);
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
         let started = std::time::Instant::now();
         let err = conn.roster(RosterKind::Connections).await.unwrap_err();
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
@@ -2712,6 +2720,7 @@ mod integration_tests {
             Some("keyhole".to_string()),
             Some(mgmt_password.to_string()),
             PREVIEW,
+            Arc::default(),
         );
         let caps = conn.connect().await.expect("connect to test RabbitMQ");
         assert_eq!(caps.r#type, crate::broker::BrokerType::Rabbitmq);
@@ -2974,6 +2983,7 @@ mod integration_tests {
             Some("keyhole".into()),
             Some("keyhole".into()),
             PREVIEW,
+            Arc::default(),
         );
         let caps = conn.connect().await.expect("connect");
         assert!(caps.can_dashboard, "{:?}", conn.mgmt.error());
@@ -2988,6 +2998,7 @@ mod integration_tests {
             Some("keyhole".into()),
             Some("keyhole".into()),
             PREVIEW,
+            Arc::default(),
         );
         let caps = conn.connect().await.expect("AMQP still connects");
         assert!(!caps.can_dashboard, "no stats band without the API");
@@ -3537,9 +3548,9 @@ mod integration_tests {
             .as_str()
             .to_owned();
 
+        // The connection has a registry of its own, so other tests' taps
+        // don't count.
         let mut conn = connected().await;
-        // A registry of its own, so other tests' taps don't count.
-        conn.tap_queues = Box::leak(Box::default());
         let tap = conn
             .subscribe(SubSpec::Exchange {
                 exchange: "amq.topic".into(),
@@ -3552,37 +3563,47 @@ mod integration_tests {
         };
         let ours = ours.clone();
         assert!(ours.starts_with("amq.gen-"), "{ours}");
+
+        // Both queues are on the broker, but the list shows only theirs.
         let client = conn.mgmt.client().expect("probe succeeded").clone();
-        let (o, t) = (ours.clone(), theirs.clone());
-        eventually(
-            move || client.queues(),
-            move |listing: &mgmt::Listing<QueueInfo>| {
-                [&o, &t]
-                    .iter()
-                    .all(|n| listing.items.iter().any(|q| q.name == **n))
-            },
-        )
-        .await;
-
-        // Both queues are on the broker; the list shows only theirs.
-        let shown = queue_names(&conn.list_destinations(false).await.expect("lists"));
-        assert!(!shown.contains(&ours), "{ours} is hidden: {shown:?}");
-        assert!(shown.contains(&theirs), "{theirs} is listed: {shown:?}");
-
-        // Closed, the tap's queue stays hidden while the broker deletes it,
-        // and is forgotten once a listing no longer has it.
-        drop(tap);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-        while !conn.tap_queues.names().is_empty() && tokio::time::Instant::now() < deadline {
-            let shown = queue_names(&conn.list_destinations(false).await.expect("lists"));
+        let names = |l: &mgmt::Listing<QueueInfo>| -> Vec<String> {
+            l.items.iter().map(|q| q.name.clone()).collect()
+        };
+        let (c, o, t) = (client.clone(), ours.clone(), theirs.clone());
+        let on_broker = names(
+            &eventually(
+                move || c.queues(),
+                move |l| {
+                    let n = names(l);
+                    n.contains(&o) && n.contains(&t)
+                },
+            )
+            .await,
+        );
+        assert!(
+            on_broker.contains(&ours) && on_broker.contains(&theirs),
+            "both queues are on the broker: {on_broker:?}"
+        );
+        let assert_hidden = |list: DestinationList| {
+            let shown = queue_names(&list);
             assert!(!shown.contains(&ours), "{ours} is hidden: {shown:?}");
             assert!(shown.contains(&theirs), "{theirs} is listed: {shown:?}");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        };
+        assert_hidden(conn.list_destinations(false).await.expect("lists"));
+
+        // Closed, the tap's queue stays hidden while the broker deletes it,
+        // and after.
+        drop(tap);
+        assert_hidden(conn.list_destinations(false).await.expect("lists"));
+        let (c, o) = (client.clone(), ours.clone());
+        let on_broker =
+            names(&eventually(move || c.queues(), move |l| !names(l).contains(&o)).await);
         assert!(
-            conn.tap_queues.names().is_empty(),
-            "the deleted queue is forgotten"
+            !on_broker.contains(&ours),
+            "the broker deletes the closed tap's queue: {on_broker:?}"
         );
+        assert_hidden(conn.list_destinations(false).await.expect("lists"));
+        assert_eq!(conn.tap_queues.names(), [ours], "kept until it expires");
         other.close(200, "bye".into()).await.ok();
     }
 

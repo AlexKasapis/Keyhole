@@ -37,6 +37,7 @@ impl App {
         let tracker = self.tracker.clone();
         let cancel = self.cancel.clone();
         let preview = self.preview_bytes;
+        let tap_queues = Arc::clone(&self.tap_queues);
         let recordings_dir = self.recordings_dir.clone();
         let name = profile.name().to_string();
         let addr = profile.address();
@@ -86,19 +87,20 @@ impl App {
                 }
                 None => None,
             };
-            let conn = match connection_for(profile, password, management_password, preview) {
-                Ok(conn) => conn,
-                Err(e) => {
-                    let _ = events
-                        .send(AppEvent::ConnError {
-                            id,
-                            context: "connect".to_string(),
-                            error: e.to_string(),
-                        })
-                        .await;
-                    return;
-                }
-            };
+            let conn =
+                match connection_for(profile, password, management_password, preview, tap_queues) {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        let _ = events
+                            .send(AppEvent::ConnError {
+                                id,
+                                context: "connect".to_string(),
+                                error: e.to_string(),
+                            })
+                            .await;
+                        return;
+                    }
+                };
             match spawn_connection(SpawnParams {
                 id,
                 name,

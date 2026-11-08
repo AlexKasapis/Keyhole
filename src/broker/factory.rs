@@ -4,8 +4,10 @@
 //! client. The TUI (`app::App::start_connect`) goes through it, so the dispatch
 //! lives here once instead of being duplicated.
 
+use std::sync::Arc;
+
 use crate::broker::amqp::AmqpConnection;
-use crate::broker::rabbitmq::RabbitmqConnection;
+use crate::broker::rabbitmq::{RabbitmqConnection, TapQueues};
 use crate::broker::redis::RedisConnection;
 use crate::broker::BrokerConnection;
 use crate::config::ConnectionConfig;
@@ -14,7 +16,8 @@ use crate::config::ConnectionConfig;
 /// resolved. `management_password` is the resolved password for RabbitMQ's
 /// management API (other brokers ignore it). `preview_bytes` bounds how much of
 /// a value the Redis inspector fetches, and of each message body a RabbitMQ
-/// peek fetches; AMQP 1.0 ignores it.
+/// peek fetches; AMQP 1.0 ignores it. `tap_queues` are the session's RabbitMQ
+/// tap queues, which a RabbitMQ listing leaves out (other brokers ignore it).
 ///
 /// The returned connection is not yet open — the caller drives
 /// [`BrokerConnection::connect`].
@@ -23,6 +26,7 @@ pub fn connection_for(
     password: Option<String>,
     management_password: Option<String>,
     preview_bytes: usize,
+    tap_queues: Arc<TapQueues>,
 ) -> anyhow::Result<Box<dyn BrokerConnection>> {
     let conn: Box<dyn BrokerConnection> = match profile {
         ConnectionConfig::Redis(p) => Box::new(RedisConnection::new(p, password, preview_bytes)),
@@ -32,6 +36,7 @@ pub fn connection_for(
             password,
             management_password,
             preview_bytes,
+            tap_queues,
         )),
     };
     Ok(conn)
@@ -58,7 +63,7 @@ mod tests {
 
     #[test]
     fn builds_a_redis_connection() {
-        assert!(connection_for(redis_profile(), None, None, 4096).is_ok());
+        assert!(connection_for(redis_profile(), None, None, 4096, Arc::default()).is_ok());
     }
 
     #[test]
@@ -76,7 +81,7 @@ mod tests {
             management_username: None,
             management_password: None,
         });
-        assert!(connection_for(profile, None, None, 4096).is_ok());
+        assert!(connection_for(profile, None, None, 4096, Arc::default()).is_ok());
     }
 
     #[test]
@@ -94,6 +99,6 @@ mod tests {
             management_username: None,
             management_password: None,
         });
-        assert!(connection_for(profile, None, None, 4096).is_ok());
+        assert!(connection_for(profile, None, None, 4096, Arc::default()).is_ok());
     }
 }

@@ -23,7 +23,7 @@ pub async fn publish(
 ) -> anyhow::Result<()> {
     let address = connection.address();
     // `preview_bytes` is a Redis-only concern; AMQP ignores it.
-    let mut conn = connection_for(connection, password, None, 4096)?;
+    let mut conn = connection_for(connection, password, None, 4096, Default::default())?;
     // Fail fast if the broker is unreachable rather than per-message later.
     conn.connect().await?;
     println!(
@@ -99,7 +99,8 @@ mod integration_tests {
 
     #[tokio::test]
     async fn publishes_to_the_demo_topic_and_queue() {
-        let mut conn = connection_for(test_connection(), None, None, 4096).expect("build");
+        let mut conn =
+            connection_for(test_connection(), None, None, 4096, Default::default()).expect("build");
         conn.connect().await.expect("connect to ActiveMQ");
         // Even seq → topic, odd seq → queue: one of each in two ticks.
         for seq in 1..=2 {
