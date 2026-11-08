@@ -3267,7 +3267,7 @@ pub fn help(frame: &mut Frame, theme: &Theme, area: Rect) {
         Line::from(""),
         Line::styled("AMQP / RabbitMQ browser", theme.heading),
         Line::from("  Enter open · t tail · Ctrl-→ messages · / filter messages"),
-        Line::from("  P publish · exchanges but fanout/headers ask for a routing key"),
+        Line::from("  P publish · fanout/headers exchanges skip the routing key"),
         Line::from("  AMQP: a add · r discover · x/d remove"),
         Line::from("  RabbitMQ: Enter peek queue · t/Enter tap exchange · r refresh"),
         Line::from("  bottom: Details · Connections · Consumers (↑↓ Home End) · Tail"),
