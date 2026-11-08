@@ -2,7 +2,7 @@
 source: src/ui.rs
 expression: "render_lines(&mut app, 90, 16)"
 ---
-┌ Destinations ─────────────────────────────┐┌ orders.priority.eu-west-1.fulfilment.retry┐
+┌ Destinations ─────────────────────────────┐┌ orders.priority.eu-west-1.fulfilment.ret… ┐
 │  Name                     Kind        Msgs││Type       classic queue                   │
 │▶ orders.priority.eu-wes…  queue          7││Messages   7 (7 ready · 0 unacked)         │
 │  orders                   queue       1980││Consumers  0                               │

@@ -2388,6 +2388,58 @@ mod tests {
         assert!(row_with(&text, "1960/20").contains("  orders  "), "{text}");
     }
 
+    /// The cells of the first pane row (not a title) holding `prefix`, one
+    /// symbol per screen column.
+    fn row_cells(app: &mut App, width: u16, height: u16, prefix: &str) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let frame = terminal.draw(|f| render(f, app)).expect("render");
+        frame
+            .buffer
+            .content()
+            .chunks(usize::from(width))
+            .map(|row| row.iter().map(|c| c.symbol().to_string()).collect())
+            .find(|cells: &Vec<String>| cells[0] == "│" && cells.concat().contains(prefix))
+            .unwrap_or_else(|| panic!("no row holds {prefix:?}"))
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_list_cuts_names_at_the_name_columns_edge() {
+        use crate::broker::QueueType;
+        let names = [
+            "orders.priority.eu-west",
+            "orders.priority.eu-west1",
+            "alerts.⚠️.warning.⚠️.critical.dead",
+            "注文.優先.欧州西部.再試行",
+        ];
+        let list = DestinationList {
+            items: names
+                .iter()
+                .map(|n| mock::queue_row(n, QueueType::Classic, 7))
+                .collect(),
+            ..Default::default()
+        };
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(list))).await;
+        // At 90 columns the Name column is the 23 cells from 3; Kind starts
+        // at 28 on every row.
+        let row = |app: &mut App, prefix: &str| {
+            let cells = row_cells(app, 90, 16, prefix);
+            assert_eq!(cells[28..33].concat(), "queue", "Kind stays in line");
+            (cells[3..26].concat(), cells[25].clone())
+        };
+        let (name, _) = row(&mut app, "eu-west  ");
+        assert_eq!(name, "orders.priority.eu-west", "exactly the column: whole");
+        let (name, _) = row(&mut app, "eu-wes…");
+        assert_eq!(name, "orders.priority.eu-wes…", "a column over: cut");
+        // `⚠️` takes two columns (the second cell blank), though its base
+        // character alone is one wide.
+        let (_, last) = row(&mut app, "alerts.");
+        assert_eq!(last, "…", "the emoji name's ellipsis is on the last column");
+        // A wide character that would straddle the edge is cut too.
+        let (name, last) = row(&mut app, "注");
+        assert!(name.contains("再 …"), "{name:?}");
+        assert_eq!(last, " ");
+    }
+
     #[tokio::test]
     async fn amqp_list_marks_a_cut_off_name_with_an_ellipsis() {
         use crate::app::Destination;

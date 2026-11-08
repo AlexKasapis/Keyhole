@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
@@ -12,7 +12,8 @@ use ratatui::widgets::{
 };
 use ratatui::Frame;
 use time::OffsetDateTime;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
     App, ConnForm, ConnHealth, Connection, DestKind, Destination, InputMode, Listing,
@@ -131,7 +132,7 @@ fn connections_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
         .header(Row::new(["", "NAME", "TYPE", "ENDPOINT", "INFO"]).style(theme.header))
         .column_spacing(2)
         .row_highlight_style(theme.selected)
-        .highlight_symbol("▶ ")
+        .highlight_symbol(HIGHLIGHT_SYMBOL)
         .highlight_spacing(HighlightSpacing::Always);
     frame.render_stateful_widget(table, area, &mut app.profile_state);
 }
@@ -473,7 +474,7 @@ fn key_table_body(
         .header(Row::new(["Key", "Type", "TTL", "Size"]).style(theme.header))
         .column_spacing(2)
         .row_highlight_style(selection_style(theme, focus == PaneFocus::Keys))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(HIGHLIGHT_SYMBOL);
     // The rows are already sliced to the window, so the widget gets a
     // viewport-local state: the selection rebased onto the slice and a zero
     // offset. (The canonical selection/offset stay on `conn.browser.table`.)
@@ -558,13 +559,7 @@ fn amqp_destination_pane(
     }
     // Destination absorbs the slack; Kind is a short fixed tag (topic/queue).
     let widths = [Constraint::Min(10), Constraint::Length(8)];
-    // The marker column is there only while a row is selected.
-    let marker = if conn.destinations.table.selected().is_some() {
-        HIGHLIGHT_SYMBOL_WIDTH
-    } else {
-        0
-    };
-    let name_w = first_column_width(block.inner(area).width, marker, &widths, 2);
+    let name_w = dest_name_width(block.inner(area).width, &widths);
     let rows: Vec<Row> = conn
         .destinations
         .items
@@ -576,12 +571,10 @@ fn amqp_destination_pane(
             ])
         })
         .collect();
-    let table = Table::new(rows, widths)
+    let table = dest_table(rows, &widths)
         .header(Row::new(["Destination", "Kind"]).style(theme.header))
-        .column_spacing(2)
         .block(block)
-        .row_highlight_style(selection_style(theme, list_focused))
-        .highlight_symbol("▶ ");
+        .row_highlight_style(selection_style(theme, list_focused));
     frame.render_stateful_widget(table, area, &mut conn.destinations.table);
 }
 
@@ -595,8 +588,6 @@ const DEST_READY_UNACKED_WIDTH: u16 = 13;
 const DEST_CONSUMERS_WIDTH: u16 = 9;
 const DEST_RATE_WIDTH: u16 = 8;
 const DEST_COLUMN_SPACING: u16 = 2;
-/// The width of the `▶ ` selection marker the table reserves on every row.
-const HIGHLIGHT_SYMBOL_WIDTH: u16 = 2;
 
 /// RabbitMQ's destination stat columns, in display (and keep) order: the
 /// header and the width of each. Every column but Kind is a right-aligned
@@ -622,14 +613,25 @@ fn dest_columns_shown(width: u16) -> usize {
         .count()
 }
 
-/// The width a [`Table`] gives its first column when it lays `widths` out in
-/// `width` columns with `spacing` between them, after reserving `marker`
-/// columns for the selection marker: the room a flexing name column has, so
-/// its text can be cut with an ellipsis rather than clipped.
-fn first_column_width(width: u16, marker: u16, widths: &[Constraint], spacing: u16) -> usize {
-    let area = Rect::new(0, 0, width.saturating_sub(marker), 1);
+/// A destination list's table over `rows`, its columns laid out as
+/// [`dest_name_width`] expects: `widths` with [`DEST_COLUMN_SPACING`] between
+/// them, after the selection marker's column, which is always reserved.
+fn dest_table<'a>(rows: Vec<Row<'a>>, widths: &[Constraint]) -> Table<'a> {
+    Table::new(rows, widths.iter().copied())
+        .column_spacing(DEST_COLUMN_SPACING)
+        .flex(Flex::Start)
+        .highlight_symbol(HIGHLIGHT_SYMBOL)
+        .highlight_spacing(HighlightSpacing::Always)
+}
+
+/// The width a [`dest_table`] `width` columns wide gives its first column,
+/// the name: the room a name has before it's cut with an ellipsis rather than
+/// clipped.
+fn dest_name_width(width: u16, widths: &[Constraint]) -> usize {
+    let area = Rect::new(0, 0, width.saturating_sub(HIGHLIGHT_SYMBOL_WIDTH), 1);
     Layout::horizontal(widths.iter().copied())
-        .spacing(spacing)
+        .spacing(DEST_COLUMN_SPACING)
+        .flex(Flex::Start)
         .split(area)
         .first()
         .map_or(0, |r| r.width as usize)
@@ -738,12 +740,7 @@ fn rabbitmq_destination_pane(
         widths.push(Constraint::Length(*width));
         header.push(stat_cell(title.to_string(), i > 0));
     }
-    let name_w = first_column_width(
-        table_area.width,
-        HIGHLIGHT_SYMBOL_WIDTH,
-        &widths,
-        DEST_COLUMN_SPACING,
-    );
+    let name_w = dest_name_width(table_area.width, &widths);
     let rows: Vec<Row> = items[offset..end]
         .iter()
         .map(|d| {
@@ -759,12 +756,9 @@ fn rabbitmq_destination_pane(
             }
         })
         .collect();
-    let table = Table::new(rows, widths)
+    let table = dest_table(rows, &widths)
         .header(Row::new(header).style(theme.header))
-        .column_spacing(DEST_COLUMN_SPACING)
-        .row_highlight_style(selection_style(theme, focused))
-        .highlight_symbol("▶ ")
-        .highlight_spacing(HighlightSpacing::Always);
+        .row_highlight_style(selection_style(theme, focused));
     *conn.destinations.table.offset_mut() = offset;
     // The rows are pre-sliced, so the widget gets a viewport-local state.
     let mut win = TableState::default();
@@ -998,7 +992,7 @@ fn rabbitmq_details_pane(
     let para = Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(format!(" {} ", dest.name))
+                .title(pane_title(&dest.name, "", area.width))
                 .title_style(theme.heading)
                 .border_style(theme.border),
         )
@@ -1211,6 +1205,7 @@ fn amqp_message_list(
         shown,
         &conn.peek.filter,
         conn.peek.limit_hit,
+        area.width,
     );
     let focused = conn.peek.focused;
     let selected = conn.peek.selected;
@@ -1232,7 +1227,7 @@ fn amqp_message_list(
                     // "parked" one when it doesn't — the shared list convention
                     // (keys / destinations / recordings), via `selection_style`.
                     let style = selection_style(theme, focused);
-                    line.spans.insert(0, Span::styled("▶ ", style));
+                    line.spans.insert(0, Span::styled(HIGHLIGHT_SYMBOL, style));
                     line.style = style;
                 } else {
                     line.spans.insert(0, Span::raw("  "));
@@ -1271,7 +1266,7 @@ fn amqp_message_list(
 /// selection) as a single dim line under the pane's border.
 fn render_peek_hint(frame: &mut Frame, theme: &Theme, area: Rect, name: Option<&str>, msg: &str) {
     let title = match name {
-        Some(n) => format!(" {n} "),
+        Some(n) => pane_title(n, "", area.width),
         None => " Messages ".to_string(),
     };
     let para = Paragraph::new(Line::styled(msg.to_owned(), theme.dim))
@@ -1297,7 +1292,7 @@ fn render_peek_error(frame: &mut Frame, theme: &Theme, area: Rect, name: &str, e
     let para = Paragraph::new(lines)
         .block(
             Block::bordered()
-                .title(format!(" {name} "))
+                .title(pane_title(name, "", area.width))
                 .title_style(theme.heading)
                 .border_style(theme.border),
         )
@@ -1307,20 +1302,31 @@ fn render_peek_error(frame: &mut Frame, theme: &Theme, area: Rect, name: &str, e
 
 /// The message-list pane title: destination plus a message count, a `+` when the
 /// peek was truncated at the limit, or a `shown/total match "filter"` summary
-/// while a filter is active.
+/// while a filter is active. A long name is cut so the count fits a pane
+/// `width` columns wide.
 fn peek_list_title(
     name: &str,
     total: usize,
     shown: usize,
     filter: &str,
     limit_hit: bool,
+    width: u16,
 ) -> String {
-    if filter.is_empty() {
+    let suffix = if filter.is_empty() {
         let plus = if limit_hit { "+" } else { "" };
-        format!(" {name} · {total}{plus} msgs ")
+        format!(" · {total}{plus} msgs")
     } else {
-        format!(" {name} · {shown}/{total} match \"{filter}\" ")
-    }
+        format!(" · {shown}/{total} match \"{filter}\"")
+    };
+    pane_title(name, &suffix, width)
+}
+
+/// A bordered pane's title, ` {name}{suffix} `, with the name cut to an
+/// ellipsis so the whole title fits a pane `width` columns wide.
+fn pane_title(name: &str, suffix: &str, width: u16) -> String {
+    // The two corners, and the spaces either side of the title.
+    let room = usize::from(width).saturating_sub(4 + display_width(suffix));
+    format!(" {}{suffix} ", truncate(name, room))
 }
 
 /// The AMQP body preview (lower-right pane): the selected message's full body
@@ -1887,7 +1893,7 @@ fn recordings_list(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
                 .border_style(border_style(theme, list_focused)),
         )
         .highlight_style(selection_style(theme, list_focused))
-        .highlight_symbol("▶ ");
+        .highlight_symbol(HIGHLIGHT_SYMBOL);
     frame.render_stateful_widget(list, area, &mut app.recordings_state);
 }
 
@@ -2913,7 +2919,7 @@ fn cell(text: &str, width: usize) -> String {
 /// `text` cut to `width` columns, right-aligned.
 fn cell_right(text: &str, width: usize) -> String {
     let text = truncate(text, width);
-    let pad = width.saturating_sub(UnicodeWidthStr::width(text.as_str()));
+    let pad = width.saturating_sub(display_width(&text));
     format!("{}{text}", " ".repeat(pad))
 }
 
@@ -3292,7 +3298,7 @@ pub fn command_palette(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) 
     let list = List::new(items)
         .block(block)
         .highlight_style(theme.selected)
-        .highlight_symbol("▶ ");
+        .highlight_symbol(HIGHLIGHT_SYMBOL);
     let mut state = ListState::default();
     state.select(Some(palette.selected.min(commands.len().saturating_sub(1))));
     frame.render_stateful_widget(list, rect, &mut state);
@@ -3336,7 +3342,7 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         // The highlighted row gets the `▶` marker and the accent tint; the rest
         // sit dim, so the cursor row stands out without moving the columns.
         let (marker, label_style) = if selected {
-            ("▶ ", theme.accent)
+            (HIGHLIGHT_SYMBOL, theme.accent)
         } else {
             ("  ", theme.dim)
         };
@@ -3372,6 +3378,12 @@ fn border_style(theme: &Theme, focused: bool) -> Style {
         theme.border
     }
 }
+
+/// The marker on a list's or table's cursor row.
+const HIGHLIGHT_SYMBOL: &str = "▶ ";
+/// The display width of [`HIGHLIGHT_SYMBOL`], the column a table reserves for
+/// it.
+const HIGHLIGHT_SYMBOL_WIDTH: u16 = 2;
 
 /// The row-highlight style for a selectable list: the bright `selected` while
 /// the pane holds the keyboard, dimmed to a "parked" cursor when another pane
@@ -3520,24 +3532,32 @@ fn payload_preview(payload: &Payload, max: usize) -> String {
     truncate(&flat, max)
 }
 
+/// The columns `s` takes on screen, measured per grapheme cluster as ratatui
+/// draws it: an emoji with a variation selector (`⚠️`) takes two, though its
+/// base character alone is one wide.
+fn display_width(s: &str) -> usize {
+    s.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
 /// Truncate to a display width of `max` columns, appending an ellipsis when
 /// shortened. Width-aware so wide (CJK/emoji) characters don't overflow the
-/// column and break alignment of whatever follows.
+/// column and break alignment of whatever follows, and cut between grapheme
+/// clusters so none is split.
 pub(super) fn truncate(s: &str, max: usize) -> String {
-    if UnicodeWidthStr::width(s) <= max {
+    if display_width(s) <= max {
         return s.to_string();
     }
     // Reserve one column for the ellipsis.
     let budget = max.saturating_sub(1);
     let mut width = 0;
     let mut out = String::new();
-    for ch in s.chars() {
-        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+    for g in s.graphemes(true) {
+        let w = UnicodeWidthStr::width(g);
         if width + w > budget {
             break;
         }
         width += w;
-        out.push(ch);
+        out.push_str(g);
     }
     out.push('…');
     out
@@ -3547,7 +3567,7 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
 /// [`truncate`] for fixed-width columns: `pad_end(&truncate(s, n), n)` yields a
 /// cell exactly `n` columns wide regardless of wide characters.
 fn pad_end(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
+    let w = display_width(s);
     let mut out = s.to_string();
     if w < width {
         out.push_str(&" ".repeat(width - w));
@@ -3811,6 +3831,53 @@ mod tests {
         // An oversized request is clamped to the available area.
         let big = centered(area, 200, 100);
         assert_eq!((big.x, big.y, big.width, big.height), (0, 0, 100, 40));
+    }
+
+    #[test]
+    fn truncate_and_pad_measure_grapheme_clusters() {
+        // `⚠️` is U+26A0 and a variation selector: one column by its
+        // characters, two on screen.
+        assert_eq!(display_width("⚠️"), 2);
+        assert_eq!(truncate("⚠️⚠️⚠️", 4), "⚠️…");
+        assert_eq!(
+            truncate("⚠️⚠️", 4),
+            "⚠️⚠️",
+            "exactly at the cap is unchanged"
+        );
+        assert_eq!(pad_end("⚠️", 4), "⚠️  ");
+        assert_eq!(cell_right("⚠️", 4), "  ⚠️");
+    }
+
+    #[test]
+    fn the_highlight_symbol_fills_the_column_reserved_for_it() {
+        assert_eq!(
+            display_width(HIGHLIGHT_SYMBOL),
+            usize::from(HIGHLIGHT_SYMBOL_WIDTH)
+        );
+    }
+
+    #[test]
+    fn a_pane_title_cuts_the_name_so_its_count_fits() {
+        // 26 columns between the corners and the title's own spaces.
+        let long = "orders.priority.eu-west-1.dead-letter";
+        let title = peek_list_title(long, 12, 12, "", false, 30);
+        assert_eq!(title, " orders.priority… · 12 msgs ");
+        assert_eq!(
+            display_width(&title),
+            28,
+            "fills the border between the corners"
+        );
+        assert_eq!(
+            peek_list_title(long, 12, 3, "eu", false, 30),
+            " orders.… · 3/12 match \"eu\" "
+        );
+        // A name that fits is left whole.
+        assert_eq!(
+            peek_list_title("orders", 12, 12, "", true, 30),
+            " orders · 12+ msgs "
+        );
+        assert_eq!(pane_title("orders", "", 10), " orders ");
+        assert_eq!(pane_title("orders.audit", "", 10), " order… ");
     }
 
     #[test]

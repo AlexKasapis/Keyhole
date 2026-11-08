@@ -1976,6 +1976,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "tui-tree-widget",
+ "unicode-segmentation",
  "unicode-width",
  "ureq",
 ]
