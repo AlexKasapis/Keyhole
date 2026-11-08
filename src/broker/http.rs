@@ -19,6 +19,9 @@ pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// A `ureq` agent configured for a management API: the short timeouts above,
 /// non-2xx replies kept as ordinary responses, and no proxy.
 pub(crate) fn agent() -> ureq::Agent {
+    // Without it ureq falls back to `ring`; with it, every TLS client in the
+    // process uses the same provider.
+    super::install_tls_provider();
     ureq::Agent::config_builder()
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(READ_TIMEOUT))

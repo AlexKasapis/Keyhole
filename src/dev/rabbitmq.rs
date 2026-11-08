@@ -30,6 +30,7 @@ async fn open(
     password: Option<&str>,
 ) -> anyhow::Result<(Connection, Channel)> {
     let uri = crate::broker::rabbitmq::amqp_uri(profile, password)?;
+    crate::broker::install_tls_provider();
     let conn = Connection::connect_uri(uri, ConnectionProperties::default())
         .await
         .context("connecting to RabbitMQ")?;

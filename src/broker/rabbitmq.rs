@@ -251,6 +251,8 @@ impl RabbitmqConnection {
 #[async_trait]
 impl BrokerConnection for RabbitmqConnection {
     async fn connect(&mut self) -> anyhow::Result<Capabilities> {
+        // A `tls` profile builds a rustls config.
+        super::install_tls_provider();
         let conn = Connection::connect_uri(self.uri()?, self.conn_props())
             .await
             // `.context` keeps the lapin error as the source (so its reply
@@ -1049,6 +1051,7 @@ async fn open_exchange_tap(
     // fails the tap with nothing to clean up.
     let exchange_name = short_string("exchange name", &exchange)?;
     let binding_key = short_string("binding key", &binding_key)?;
+    super::install_tls_provider();
     let connection = Connection::connect_uri(uri, props)
         .await
         .context("opening tap connection")?;
@@ -3261,6 +3264,45 @@ mod integration_tests {
             matches!(result, Some(Err(_))),
             "a prompt connect error: {result:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_tls_connect_or_tap_on_a_plain_port_fails_instead_of_hanging() {
+        // Both rustls backends are built in, so until keyhole chose one,
+        // rustls panicked in lapin's I/O thread and the connect never returned.
+        let mut profile = test_profile();
+        profile.tls = true;
+        let result = try_connect(profile.clone()).await;
+        assert!(
+            matches!(result, Some(Err(_))),
+            "a prompt TLS error: {result:?}"
+        );
+        // A tap opens a connection of its own.
+        let mut conn = RabbitmqConnection::new(
+            profile,
+            Some("keyhole".to_string()),
+            None,
+            PREVIEW,
+            Arc::default(),
+        );
+        let tap = SubSpec::Exchange {
+            exchange: "amq.topic".into(),
+            binding_key: "#".into(),
+        };
+        match timeout(Duration::from_secs(5), conn.subscribe(tap)).await {
+            Ok(Err(_)) => {}
+            Ok(Ok(_)) => panic!("a TLS tap on a plain port can't open"),
+            Err(_) => panic!("the tap hung"),
+        }
+    }
+
+    #[test]
+    fn the_management_api_over_tls_on_a_plain_port_is_an_error() {
+        // ureq takes the installed provider (aws-lc-rs) instead of its own
+        // `ring` fallback, and still completes a TLS attempt.
+        let url = format!("https://127.0.0.1:{}/api/overview", mgmt_port());
+        let reply = crate::broker::http::agent().get(&url).call();
+        assert!(reply.is_err(), "{reply:?}");
     }
 
     #[tokio::test]

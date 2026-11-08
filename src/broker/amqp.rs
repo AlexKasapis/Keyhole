@@ -77,6 +77,8 @@ async fn open_connection(
     container_id: String,
     url: &str,
 ) -> Result<ConnectionHandle<()>, OpenError> {
+    // An `amqps://` URL builds a rustls config.
+    super::install_tls_provider();
     Connection::builder()
         .container_id(container_id)
         .sasl_profile(SaslProfile::Anonymous)
@@ -904,6 +906,31 @@ mod integration_tests {
         let caps = conn.connect().await.expect("connect to test ActiveMQ");
         assert_eq!(caps.r#type, crate::broker::BrokerType::Amqp);
         conn
+    }
+
+    #[tokio::test]
+    async fn a_tls_connect_to_a_plain_port_fails_instead_of_panicking() {
+        // Both rustls backends are built in, so until keyhole chose one,
+        // building the TLS config panicked inside the connect.
+        let profile = AmqpProfile {
+            name: "tls".into(),
+            host: "127.0.0.1".into(),
+            port: test_port(),
+            username: Some("admin".into()),
+            password: None,
+            tls: true,
+            destinations: Vec::new(),
+            management_url: None,
+            management_username: None,
+            management_password: None,
+        };
+        let mut conn = AmqpConnection::new(profile, Some("admin".to_string()));
+        let result = timeout(Duration::from_secs(5), conn.connect()).await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "a prompt TLS error: {:?}",
+            result.map(|r| r.map(|_| ()))
+        );
     }
 
     #[tokio::test]

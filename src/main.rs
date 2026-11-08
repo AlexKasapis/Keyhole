@@ -52,6 +52,8 @@ const FRAME_BUDGET: Duration = Duration::from_millis(16);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Before anything can open a TLS connection (`dev` included).
+    broker::install_tls_provider();
     let cli = Cli::parse();
 
     // `gen` is a packaging helper: emit the man page / completions and exit

@@ -90,6 +90,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machine instead. A `.` or `..` vhost also connected to the empty vhost
   instead of the one named, and a host containing `/` fails to connect
   instead of crashing.
+- **TLS connections no longer crash.** Connecting a RabbitMQ or AMQP 1.0
+  profile with `tls = true` (and `keyhole dev` against one) panicked choosing
+  a TLS crypto library: the connect never finished, the panic message broke
+  up the screen and keys echoed on it. Keyhole now uses aws-lc-rs for every
+  TLS connection, so a TLS connect works, or fails with an error you can read.
 - **Text too long for its prompt shows its end**, where the cursor is, in the
   Tail tab and the footer's prompts (routing key, message, filters, rename),
   after a `…`, instead of running off the edge.

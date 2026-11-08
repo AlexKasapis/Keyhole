@@ -31,6 +31,19 @@ use futures_util::Stream;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use time::OffsetDateTime;
 
+/// Make aws-lc-rs the process's rustls crypto provider, once. Both rustls
+/// backends are built in (`ring` through ureq, `aws-lc-rs` through lapin and
+/// fe2o3-amqp), so rustls can't pick one itself and panics building a TLS
+/// config. `main` calls this first; every path that may open a TLS connection
+/// calls it again, since tests don't run `main`.
+pub(crate) fn install_tls_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // An error means a provider is already installed, which serves too.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// A process-wide, monotonically increasing sequence for minting unique
 /// connection identifiers (AMQP container-ids, RabbitMQ connection names), so
 /// every broker connection is distinct even against a single broker.
@@ -1356,6 +1369,23 @@ mod tests {
         let max = "x".repeat(255);
         assert!(SubSpec::parse(&format!("exchange:{max}"), 0).is_ok());
         assert!(SubSpec::parse(&format!("exchange:ex/{max}"), 0).is_ok());
+    }
+
+    #[test]
+    fn the_tls_provider_is_aws_lc_rs_and_installing_it_again_is_harmless() {
+        install_tls_provider();
+        install_tls_provider();
+        let groups = |p: &rustls::crypto::CryptoProvider| {
+            p.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>()
+        };
+        let installed = rustls::crypto::CryptoProvider::get_default().expect("installed");
+        assert_eq!(
+            groups(installed),
+            groups(&rustls::crypto::aws_lc_rs::default_provider()),
+            "aws-lc-rs, not ring"
+        );
+        // What panicked while no provider was chosen.
+        let _ = rustls::ClientConfig::builder();
     }
 
     #[test]
