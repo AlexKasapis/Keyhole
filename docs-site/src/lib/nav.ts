@@ -155,11 +155,12 @@ export const PAGES: readonly PageMeta[] = [
     group: 'Reference',
     href: '/keybindings',
     title: 'Keybindings · Keyhole docs',
-    keywords: 'keys shortcuts bindings hotkeys nav cheat sheet',
+    keywords: 'keys shortcuts bindings hotkeys nav cheat sheet amqp rabbitmq',
     toc: [
       ['global', 'Global'],
       ['nav', 'Navigation'],
       ['browse', 'Browsing & values'],
+      ['amqp', 'AMQP 1.0 & RabbitMQ'],
       ['feeds', 'Tails & recording'],
       ['console', 'Console'],
       ['manage', 'Connections & recordings'],

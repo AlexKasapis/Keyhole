@@ -58,6 +58,41 @@ export const KEYBINDINGS: readonly KeybindingGroup[] = [
     ],
   },
   {
+    // The destination browser (handle_destination_key / handle_message_key /
+    // handle_details_key). A key that differs per broker names both behaviours,
+    // tagged (AMQP 1.0) or (RabbitMQ); an untagged one works the same on both.
+    title: 'AMQP 1.0 & RabbitMQ',
+    slug: 'amqp',
+    bindings: [
+      {
+        keys: ['Enter'],
+        desc: 'Peek the selected queue (again to step into its messages); tail a topic (AMQP 1.0) or tap an exchange (RabbitMQ)',
+      },
+      {
+        keys: ['t'],
+        desc: 'Tail the selected topic or queue (AMQP 1.0) / tap the selected exchange (RabbitMQ; a direct one asks for a binding key at the Tail anchor)',
+      },
+      { keys: ['Ctrl', '→'], desc: "Step into the peeked queue's messages" },
+      { keys: ['Ctrl', '←'], desc: 'Back to the destination list' },
+      { keys: ['/'], desc: 'Filter the peeked messages (in the message list)' },
+      {
+        keys: ['P'],
+        desc: 'Publish a message to the selected destination (RabbitMQ direct and topic exchanges ask for the routing key first)',
+      },
+      { keys: ['a'], desc: 'Add a topic or queue to the list (AMQP 1.0)' },
+      {
+        keys: ['r'],
+        desc: 'Discover topics and queues from management_url (AMQP 1.0) / refresh the queues and exchanges (RabbitMQ; retries a failed management API)',
+      },
+      { keys: ['x', 'd'], desc: 'Remove the selected topic or queue from the list (AMQP 1.0)' },
+      { keys: ['↑', '↓'], desc: 'Scroll the Connections or Consumers tab (RabbitMQ)' },
+      {
+        keys: ['Home', 'End'],
+        desc: 'Jump to the top / bottom of the Connections or Consumers tab (RabbitMQ)',
+      },
+    ],
+  },
+  {
     title: 'Tails & recording',
     slug: 'feeds',
     bindings: [

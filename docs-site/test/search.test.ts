@@ -20,6 +20,15 @@ describe('searchPages', () => {
     expect(searchPages('pubsub').map((r) => r.id)).toEqual(['tails']);
   });
 
+  it('finds the AMQP and RabbitMQ keybindings alongside their pages', () => {
+    expect(searchPages('amqp').map((r) => r.id)).toEqual(['connecting', 'keybindings']);
+    expect(searchPages('rabbitmq').map((r) => r.id)).toEqual([
+      'connecting',
+      'rabbitmq',
+      'keybindings',
+    ]);
+  });
+
   it('returns every matching page in sidebar order', () => {
     // "tail" is a keyword of both Quickstart and Realtime tails.
     expect(searchPages('tail').map((r) => r.id)).toEqual(['quickstart', 'tails']);
