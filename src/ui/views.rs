@@ -854,7 +854,7 @@ fn wrapped_rows(line: &Line, width: u16) -> u16 {
     let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
     let (mut rows, mut col) = (1usize, 0usize);
     for word in text.split_whitespace() {
-        let w = UnicodeWidthStr::width(word);
+        let w = display_width(word);
         if col > 0 && col + 1 + w <= width {
             col += 1 + w;
             continue;
@@ -1199,12 +1199,13 @@ fn amqp_message_list(
 ) {
     let total = conn.peek.events.len();
     let shown = conn.peek.filtered_len();
-    let title = peek_list_title(
+    let (title, note) = peek_list_title(
         queue_name,
         total,
         shown,
         &conn.peek.filter,
         conn.peek.limit_hit,
+        note.as_deref(),
         area.width,
     );
     let focused = conn.peek.focused;
@@ -1250,7 +1251,7 @@ fn amqp_message_list(
 
     let mut title = vec![Span::styled(title, theme.heading)];
     if let Some(note) = note {
-        title.push(Span::styled(format!("· {note}"), theme.warning));
+        title.push(Span::styled(note, theme.warning));
     }
     let para = Paragraph::new(lines)
         .block(
@@ -1302,23 +1303,33 @@ fn render_peek_error(frame: &mut Frame, theme: &Theme, area: Rect, name: &str, e
 
 /// The message-list pane title: destination plus a message count, a `+` when the
 /// peek was truncated at the limit, or a `shown/total match "filter"` summary
-/// while a filter is active. A long name is cut so the count fits a pane
-/// `width` columns wide.
+/// while a filter is active; then the warning `note`, if any, styled apart (so
+/// returned on its own). To fit a pane `width` columns wide, a long name gives
+/// way first, down to its ellipsis, and only then is the note cut.
 fn peek_list_title(
     name: &str,
     total: usize,
     shown: usize,
     filter: &str,
     limit_hit: bool,
+    note: Option<&str>,
     width: u16,
-) -> String {
-    let suffix = if filter.is_empty() {
+) -> (String, Option<String>) {
+    let count = if filter.is_empty() {
         let plus = if limit_hit { "+" } else { "" };
         format!(" · {total}{plus} msgs")
     } else {
         format!(" · {shown}/{total} match \"{filter}\"")
     };
-    pane_title(name, &suffix, width)
+    let note = note.map(|n| format!("· {n}"));
+    // Between the corners: the spaces either side of the name and count, the
+    // count, and the note.
+    let inner = usize::from(width).saturating_sub(2);
+    let fixed = 2 + display_width(&count);
+    let note_w = note.as_deref().map_or(0, display_width);
+    let name = truncate(name, inner.saturating_sub(fixed + note_w).max(1));
+    let note = note.map(|n| truncate(&n, inner.saturating_sub(fixed + display_width(&name))));
+    (format!(" {name}{count} "), note)
 }
 
 /// A bordered pane's title, ` {name}{suffix} `, with the name cut to an
@@ -1977,9 +1988,7 @@ fn recording_viewer(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect)
         let seq = format!("#{:<4} ", rec.seq);
         let time = format!("{} ", rec.time);
         let source = format!("{}  ", rec.source);
-        let used = UnicodeWidthStr::width(seq.as_str())
-            + UnicodeWidthStr::width(time.as_str())
-            + UnicodeWidthStr::width(source.as_str());
+        let used = display_width(&seq) + display_width(&time) + display_width(&source);
         let avail = width.saturating_sub(used).max(1);
         lines.push(Line::from(vec![
             Span::styled(seq, theme.dim),
@@ -3327,7 +3336,7 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     // The values line up two columns past the longest label.
     let label_w = rows
         .iter()
-        .map(|r| UnicodeWidthStr::width(r.label()))
+        .map(|r| display_width(r.label()))
         .max()
         .unwrap_or_default()
         + 2;
@@ -3542,25 +3551,22 @@ fn display_width(s: &str) -> usize {
 /// Truncate to a display width of `max` columns, appending an ellipsis when
 /// shortened. Width-aware so wide (CJK/emoji) characters don't overflow the
 /// column and break alignment of whatever follows, and cut between grapheme
-/// clusters so none is split.
+/// clusters so none is split. It reads only as far as `max` columns in, so a
+/// huge message body costs no more than a short one.
 pub(super) fn truncate(s: &str, max: usize) -> String {
-    if display_width(s) <= max {
-        return s.to_string();
-    }
-    // Reserve one column for the ellipsis.
+    // The cut leaves one column for the ellipsis.
     let budget = max.saturating_sub(1);
-    let mut width = 0;
-    let mut out = String::new();
-    for g in s.graphemes(true) {
-        let w = UnicodeWidthStr::width(g);
-        if width + w > budget {
-            break;
+    let (mut width, mut cut) = (0, None);
+    for (i, g) in s.grapheme_indices(true) {
+        width += UnicodeWidthStr::width(g);
+        if cut.is_none() && width > budget {
+            cut = Some(i);
         }
-        width += w;
-        out.push_str(g);
+        if width > max {
+            return format!("{}…", &s[..cut.unwrap_or(i)]);
+        }
     }
-    out.push('…');
-    out
+    s.to_string()
 }
 
 /// Right-pad `s` with spaces to a display width of `width` columns. Pairs with
@@ -3591,10 +3597,7 @@ fn fmt_datetime(t: OffsetDateTime) -> String {
 /// spans' widths. Used to size the right-pinned segment of a balanced toolbar
 /// so the flexible left segment can take the rest of the row.
 fn line_width(line: &Line) -> usize {
-    line.spans
-        .iter()
-        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-        .sum()
+    line.spans.iter().map(|s| display_width(&s.content)).sum()
 }
 
 fn human_bytes(n: u64) -> String {
@@ -3860,24 +3863,67 @@ mod tests {
     fn a_pane_title_cuts_the_name_so_its_count_fits() {
         // 26 columns between the corners and the title's own spaces.
         let long = "orders.priority.eu-west-1.dead-letter";
-        let title = peek_list_title(long, 12, 12, "", false, 30);
-        assert_eq!(title, " orders.priority… · 12 msgs ");
+        let title = |total, shown, filter, limit_hit| {
+            let (title, note) = peek_list_title(long, total, shown, filter, limit_hit, None, 30);
+            assert_eq!(note, None);
+            title
+        };
+        assert_eq!(title(12, 12, "", false), " orders.priority… · 12 msgs ");
         assert_eq!(
-            display_width(&title),
+            display_width(&title(12, 12, "", false)),
             28,
             "fills the border between the corners"
         );
-        assert_eq!(
-            peek_list_title(long, 12, 3, "eu", false, 30),
-            " orders.… · 3/12 match \"eu\" "
-        );
+        assert_eq!(title(12, 3, "eu", false), " orders.… · 3/12 match \"eu\" ");
         // A name that fits is left whole.
         assert_eq!(
-            peek_list_title("orders", 12, 12, "", true, 30),
+            peek_list_title("orders", 12, 12, "", true, None, 30).0,
             " orders · 12+ msgs "
         );
         assert_eq!(pane_title("orders", "", 10), " orders ");
         assert_eq!(pane_title("orders.audit", "", 10), " order… ");
+    }
+
+    #[test]
+    fn a_peek_title_cuts_the_name_before_the_warning() {
+        let long = "orders.priority.eu-west-1.dead-letter";
+        let note = "each peek counts toward delivery-limit 5 ";
+        // Room for all of the warning: the name gives way.
+        let (title, cut) = peek_list_title(long, 5, 5, "", false, Some(note), 70);
+        assert_eq!(title, " orders.priori… · 5 msgs ");
+        assert_eq!(
+            cut.as_deref(),
+            Some("· each peek counts toward delivery-limit 5 ")
+        );
+        assert_eq!(display_width(&title) + display_width(&cut.unwrap()), 68);
+        // Too little even with the name down to its ellipsis: the warning is
+        // cut too.
+        let (title, cut) = peek_list_title(long, 5, 5, "", false, Some(note), 45);
+        assert_eq!(title, " … · 5 msgs ");
+        assert_eq!(cut.as_deref(), Some("· each peek counts toward deli…"));
+        // A short name and the whole warning fit side by side.
+        let (title, cut) = peek_list_title("payments", 5, 5, "", false, Some(note), 70);
+        assert_eq!(title, " payments · 5 msgs ");
+        assert_eq!(
+            cut.as_deref(),
+            Some("· each peek counts toward delivery-limit 5 ")
+        );
+    }
+
+    #[test]
+    fn truncate_reads_only_as_far_as_the_cut() {
+        // Exactly at the cap, whole; one grapheme over, cut on the boundary.
+        assert_eq!(truncate("abcdef", 6), "abcdef");
+        assert_eq!(truncate("abcdefg", 6), "abcde…");
+        assert_eq!(truncate("日本語", 6), "日本語");
+        assert_eq!(truncate("日本語x", 6), "日本…");
+        assert_eq!(truncate("", 0), "");
+        assert_eq!(truncate("a", 0), "…");
+        // A long body is cut at the same place as a short one.
+        let long = format!("{{\"order\": 12345}} {}", "x".repeat(1 << 20));
+        let cut = truncate(&long, 400);
+        assert_eq!(display_width(&cut), 400);
+        assert!(cut.starts_with("{\"order\": 12345} xx") && cut.ends_with("x…"));
     }
 
     #[test]
