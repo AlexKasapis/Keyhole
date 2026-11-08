@@ -5,14 +5,23 @@
 // non-modal panes, and some keys mean different things per pane — the grouping
 // below reflects that. Each group's `slug` matches its `data-toc` anchor (and
 // the page TOC). `filterKeybindings` powers the live filter input: a binding
-// matches when the query is a substring of its description OR of its
-// space-joined keycaps; groups with no surviving rows drop out. Pure, so it runs
-// in the client filter handler and is unit-tested.
+// matches when the query is a substring of its description, of its
+// space-joined keycaps OR of its broker tags; groups with no surviving rows drop
+// out. Pure, so it runs in the client filter handler and is unit-tested. The
+// page tells rows apart by description, so a group's descriptions are unique.
+
+/** A broker a destination-browser binding applies to, shown as a tag. */
+export type Broker = 'AMQP 1.0' | 'RabbitMQ';
 
 export interface Binding {
   /** Keycaps, rendered as individual <kbd> chips. */
   keys: readonly string[];
   desc: string;
+  /** The brokers a destination-browser binding works on, shown as tags. A key
+   * that does different things per broker gets a row for each. */
+  brokers?: readonly Broker[];
+  /** A docs section with more detail, linked after the description. */
+  more?: { label: string; href: string };
 }
 
 export interface KeybindingGroup {
@@ -21,6 +30,10 @@ export interface KeybindingGroup {
   slug: string;
   bindings: readonly Binding[];
 }
+
+const AMQP: Broker = 'AMQP 1.0';
+const RABBITMQ: Broker = 'RabbitMQ';
+const BOTH: readonly Broker[] = [AMQP, RABBITMQ];
 
 export const KEYBINDINGS: readonly KeybindingGroup[] = [
   {
@@ -50,7 +63,7 @@ export const KEYBINDINGS: readonly KeybindingGroup[] = [
     slug: 'browse',
     bindings: [
       { keys: ['Enter'], desc: 'Fold / unfold the selected group' },
-      { keys: ['l'], desc: 'Fold / unfold the selected group' },
+      { keys: ['l'], desc: 'Fold / unfold the selected group, same as Enter' },
       { keys: ['z'], desc: 'Fold / unfold all groups' },
       { keys: ['/'], desc: 'Filter keys' },
       { keys: ['o'], desc: 'Cycle the sort column' },
@@ -58,37 +71,65 @@ export const KEYBINDINGS: readonly KeybindingGroup[] = [
     ],
   },
   {
-    // The destination browser (handle_destination_key / handle_message_key /
-    // handle_details_key). A key that differs per broker names both behaviours,
-    // tagged (AMQP 1.0) or (RabbitMQ); an untagged one works the same on both.
+    // The destination browser: handle_destination_key, handle_message_key and
+    // handle_details_key in src/app/input.rs.
     title: 'AMQP 1.0 & RabbitMQ',
     slug: 'amqp',
     bindings: [
       {
         keys: ['Enter'],
-        desc: 'Peek the selected queue (again to step into its messages); tail a topic (AMQP 1.0) or tap an exchange (RabbitMQ)',
+        desc: 'Peek the queue per peek_mode; browse leaves messages in place',
+        brokers: [AMQP],
       },
+      {
+        keys: ['Enter'],
+        desc: 'Peek the queue per peek_mode; browse takes messages and puts them back',
+        brokers: [RABBITMQ],
+        more: { label: 'Peek modes', href: '/rabbitmq#modes' },
+      },
+      { keys: ['Enter'], desc: 'Tail the selected topic', brokers: [AMQP] },
+      { keys: ['Enter'], desc: 'Tap the selected exchange, same as t', brokers: [RABBITMQ] },
+      { keys: ['t'], desc: 'Tail the selected topic or queue', brokers: [AMQP] },
       {
         keys: ['t'],
-        desc: 'Tail the selected topic or queue (AMQP 1.0) / tap the selected exchange (RabbitMQ; a direct one asks for a binding key at the Tail anchor)',
+        desc: 'Tap the selected exchange; a direct one opens the Tail anchor',
+        brokers: [RABBITMQ],
       },
-      { keys: ['Ctrl', '→'], desc: "Step into the peeked queue's messages" },
-      { keys: ['Ctrl', '←'], desc: 'Back to the destination list' },
-      { keys: ['/'], desc: 'Filter the peeked messages (in the message list)' },
+      {
+        keys: ['Ctrl', '→'],
+        desc: "Step into the peeked queue's messages (or Enter again)",
+        brokers: BOTH,
+      },
+      { keys: ['Ctrl', '←'], desc: 'Back to the destination list', brokers: BOTH },
+      {
+        keys: ['/'],
+        desc: 'Filter the peeked messages (in the message list)',
+        brokers: BOTH,
+      },
+      { keys: ['P'], desc: 'Publish a message to the selected topic or queue', brokers: [AMQP] },
       {
         keys: ['P'],
-        desc: 'Publish a message to the selected destination (RabbitMQ direct and topic exchanges ask for the routing key first)',
+        desc: 'Publish; exchanges other than fanout and headers ask for a key',
+        brokers: [RABBITMQ],
       },
-      { keys: ['a'], desc: 'Add a topic or queue to the list (AMQP 1.0)' },
+      { keys: ['a'], desc: 'Add a topic or queue to the list', brokers: [AMQP] },
+      { keys: ['r'], desc: 'Discover topics and queues from management_url', brokers: [AMQP] },
       {
         keys: ['r'],
-        desc: 'Discover topics and queues from management_url (AMQP 1.0) / refresh the queues and exchanges (RabbitMQ; retries a failed management API)',
+        desc: 'Refresh queues and exchanges, retrying a failed API',
+        brokers: [RABBITMQ],
       },
-      { keys: ['x', 'd'], desc: 'Remove the selected topic or queue from the list (AMQP 1.0)' },
-      { keys: ['↑', '↓'], desc: 'Scroll the Connections or Consumers tab (RabbitMQ)' },
+      {
+        keys: ['x'],
+        desc: 'Remove the selected topic or queue from the list',
+        brokers: [AMQP],
+      },
+      { keys: ['d'], desc: 'Remove the selected topic or queue, same as x', brokers: [AMQP] },
+      { keys: ['↑', '↓'], desc: 'Scroll the Connections or Consumers tab', brokers: [RABBITMQ] },
       {
         keys: ['Home', 'End'],
-        desc: 'Jump to the top / bottom of the Connections or Consumers tab (RabbitMQ)',
+        desc: 'Jump to top / bottom of the Connections or Consumers tab',
+        brokers: [RABBITMQ],
       },
     ],
   },
@@ -135,7 +176,8 @@ export function filterKeybindings(query: string): KeybindingGroup[] {
       (b) =>
         !q ||
         b.desc.toLowerCase().includes(q) ||
-        b.keys.join(' ').toLowerCase().includes(q),
+        b.keys.join(' ').toLowerCase().includes(q) ||
+        (b.brokers ?? []).join(' ').toLowerCase().includes(q),
     ),
   })).filter((g) => g.bindings.length > 0);
 }

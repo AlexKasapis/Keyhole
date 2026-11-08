@@ -33,7 +33,20 @@ import { KEYBINDINGS } from '../lib/keybindings';
                   <kbd>{k}</kbd>
                 ))}
               </div>
-              <div class="kb-desc">{b.desc}</div>
+              <div class="kb-desc">
+                {b.desc}
+                {b.more && (
+                  <span class="kb-more">
+                    {' · '}
+                    <a href={b.more.href}>{b.more.label}</a>
+                  </span>
+                )}
+                {b.brokers?.map((broker) => (
+                  <span class="kb-tag" data-broker={broker}>
+                    {broker}
+                  </span>
+                ))}
+              </div>
             </div>
           ))}
         </div>
@@ -106,6 +119,24 @@ import { KEYBINDINGS } from '../lib/keybindings';
     padding: 10px 16px;
     color: var(--sec2);
     font-size: 14px;
+  }
+  .kb-tag {
+    display: inline-block;
+    margin-left: 8px;
+    padding: 0 6px;
+    border: 1px solid currentColor;
+    border-radius: 5px;
+    font-family: var(--mono);
+    font-size: 11px;
+    white-space: nowrap;
+    vertical-align: 1px;
+  }
+  /* The broker colours of the Connect a broker and Realtime tails pages. */
+  .kb-tag[data-broker='AMQP 1.0'] {
+    color: var(--blue);
+  }
+  .kb-tag[data-broker='RabbitMQ'] {
+    color: var(--orange);
   }
   .kb-empty {
     padding: 24px;

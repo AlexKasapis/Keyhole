@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { KEYBINDINGS, filterKeybindings } from '../src/lib/keybindings';
-import { getPage } from '../src/lib/nav';
+import { KEYBINDINGS, filterKeybindings, type Broker } from '../src/lib/keybindings';
+import { PAGES, getPage } from '../src/lib/nav';
 
 describe('keybinding data', () => {
   it('has the source-verified groups, slugs matching the page TOC', () => {
@@ -25,6 +25,29 @@ describe('keybinding data', () => {
         expect(b.keys.length).toBeGreaterThan(0);
         expect(b.desc.length).toBeGreaterThan(0);
       }
+    }
+  });
+
+  it("gives each row in a group its own description (the page's filter keys rows on it)", () => {
+    for (const group of KEYBINDINGS) {
+      const descs = group.bindings.map((b) => b.desc);
+      expect(new Set(descs).size, group.slug).toBe(descs.length);
+    }
+  });
+
+  it('tags every destination-browser binding with its brokers, and nothing else', () => {
+    for (const group of KEYBINDINGS) {
+      for (const b of group.bindings) {
+        if (group.slug === 'amqp') expect(b.brokers?.length, b.desc).toBeGreaterThan(0);
+        else expect(b.brokers, b.desc).toBeUndefined();
+      }
+    }
+  });
+
+  it('links only to sections the docs have', () => {
+    const anchors = PAGES.flatMap((p) => p.toc.map(([slug]) => `${p.href}#${slug}`));
+    for (const b of KEYBINDINGS.flatMap((g) => g.bindings)) {
+      if (b.more) expect(anchors).toContain(b.more.href);
     }
   });
 });
@@ -56,75 +79,15 @@ describe('filterKeybindings', () => {
   it('returns nothing when no binding matches', () => {
     expect(filterKeybindings('zzz')).toEqual([]);
   });
-});
 
-describe('AMQP 1.0 & RabbitMQ bindings', () => {
-  const group = KEYBINDINGS.find((g) => g.slug === 'amqp')!;
-  const descOf = (...keys: string[]) =>
-    group.bindings.find((b) => b.keys.join(' ') === keys.join(' '))?.desc;
-
-  it('covers the destination-browser keys from the help overlay', () => {
-    expect(group.bindings.map((b) => b.keys.join(' '))).toEqual([
-      'Enter',
-      't',
-      'Ctrl →',
-      'Ctrl ←',
-      '/',
-      'P',
-      'a',
-      'r',
-      'x d',
-      '↑ ↓',
-      'Home End',
-    ]);
-  });
-
-  it('gives each row its own description (the page filter keys rows on it)', () => {
-    const descs = group.bindings.map((b) => b.desc);
-    expect(new Set(descs).size).toBe(descs.length);
-  });
-
-  it('spells out both brokers where a key differs between them', () => {
-    for (const keys of [['Enter'], ['t'], ['r']]) {
-      expect(descOf(...keys)).toContain('(AMQP 1.0)');
-      expect(descOf(...keys)).toContain('(RabbitMQ');
+  it('matches on broker tags, keeping the rows shared by both brokers', () => {
+    const dest = KEYBINDINGS.find((g) => g.slug === 'amqp')!;
+    const brokers: Broker[] = ['AMQP 1.0', 'RabbitMQ'];
+    for (const broker of brokers) {
+      const kept = filterKeybindings(broker.toLowerCase());
+      expect(kept.map((g) => g.slug)).toEqual(['amqp']);
+      expect(kept[0].bindings).toEqual(dest.bindings.filter((b) => b.brokers?.includes(broker)));
+      expect(kept[0].bindings.some((b) => b.brokers?.length === brokers.length)).toBe(true);
     }
-    expect(descOf('r')).toContain('Discover');
-    expect(descOf('r')).toContain('refresh');
-  });
-
-  it('tags the curated-list keys AMQP 1.0 and the roster scrolling RabbitMQ', () => {
-    for (const keys of [['a'], ['x', 'd']]) {
-      expect(descOf(...keys)).toMatch(/\(AMQP 1\.0\)$/);
-    }
-    for (const keys of [['↑', '↓'], ['Home', 'End']]) {
-      expect(descOf(...keys)).toMatch(/Connections or Consumers tab \(RabbitMQ\)$/);
-    }
-  });
-
-  it('filters to the broker named in the query', () => {
-    // "rabbitmq" doesn't contain "amqp", so each query keeps its own rows.
-    const rabbit = filterKeybindings('rabbitmq');
-    expect(rabbit.map((g) => g.slug)).toEqual(['amqp']);
-    expect(rabbit[0].bindings.map((b) => b.keys.join(' '))).toEqual([
-      'Enter',
-      't',
-      'P',
-      'r',
-      '↑ ↓',
-      'Home End',
-    ]);
-    const amqp = filterKeybindings('amqp 1.0');
-    expect(amqp.map((g) => g.slug)).toEqual(['amqp']);
-    expect(amqp[0].bindings.map((b) => b.keys.join(' '))).toEqual(['Enter', 't', 'a', 'r', 'x d']);
-  });
-
-  it('finds the publish and peek rows by what they do', () => {
-    expect(filterKeybindings('publish').map((g) => g.slug)).toEqual(['amqp']);
-    expect(filterKeybindings('peek')[0].bindings.map((b) => b.keys.join(' '))).toEqual([
-      'Enter',
-      'Ctrl →',
-      '/',
-    ]);
   });
 });
