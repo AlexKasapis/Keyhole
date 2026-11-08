@@ -1,0 +1,20 @@
+---
+source: src/ui.rs
+expression: "render_lines(&mut app, 90, 16)"
+---
+┌ Destinations ─────────────────────────────┐┌ orders.priority.eu-west-1.fulfilment.retry┐
+│  Name                     Kind        Msgs││Type       classic queue                   │
+│▶ orders.priority.eu-wes…  queue          7││Messages   7 (7 ready · 0 unacked)         │
+│  orders                   queue       1980││Consumers  0                               │
+│  payments                 quorum         3││Publish    —                               │
+│  audit                    stream         0││                                           │
+│  amq.direct               direct          ││Press Enter to peek its messages. RabbitMQ │
+│  amq.fanout               fanout          ││puts each one back on the queue, flagged   │
+└───────────────────────────────────────────┘└───────────────────────────────────────────┘
+┌ Tail ──────────────────────────────────────────────────────────────────────────────────┐
+│exchange:name or exchange:name/binding-key:                                             │
+│                                                                                        │
+│                                                                                        │
+│Enter taps it · non-destructive copy via a temporary queue · key defaults to #          │
+└────────────────────────────────────────────────────────────────────────────────────────┘
+ r refresh · t tap · P publish · Tab tails · : palette · ? help

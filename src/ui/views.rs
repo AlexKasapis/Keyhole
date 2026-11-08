@@ -556,19 +556,26 @@ fn amqp_destination_pane(
         frame.render_widget(Paragraph::new(lines).block(block), area);
         return;
     }
+    // Destination absorbs the slack; Kind is a short fixed tag (topic/queue).
+    let widths = [Constraint::Min(10), Constraint::Length(8)];
+    // The marker column is there only while a row is selected.
+    let marker = if conn.destinations.table.selected().is_some() {
+        HIGHLIGHT_SYMBOL_WIDTH
+    } else {
+        0
+    };
+    let name_w = first_column_width(block.inner(area).width, marker, &widths, 2);
     let rows: Vec<Row> = conn
         .destinations
         .items
         .iter()
         .map(|d| {
             Row::new(vec![
-                Cell::from(d.name.clone()),
+                Cell::from(truncate(&d.name, name_w)),
                 Cell::from(Span::styled(format!("[{}]", d.kind.tag()), theme.dim)),
             ])
         })
         .collect();
-    // Destination absorbs the slack; Kind is a short fixed tag (topic/queue).
-    let widths = [Constraint::Min(10), Constraint::Length(8)];
     let table = Table::new(rows, widths)
         .header(Row::new(["Destination", "Kind"]).style(theme.header))
         .column_spacing(2)
@@ -613,6 +620,19 @@ fn dest_columns_shown(width: u16) -> usize {
             used <= width
         })
         .count()
+}
+
+/// The width a [`Table`] gives its first column when it lays `widths` out in
+/// `width` columns with `spacing` between them, after reserving `marker`
+/// columns for the selection marker: the room a flexing name column has, so
+/// its text can be cut with an ellipsis rather than clipped.
+fn first_column_width(width: u16, marker: u16, widths: &[Constraint], spacing: u16) -> usize {
+    let area = Rect::new(0, 0, width.saturating_sub(marker), 1);
+    Layout::horizontal(widths.iter().copied())
+        .spacing(spacing)
+        .split(area)
+        .first()
+        .map_or(0, |r| r.width as usize)
 }
 
 /// RabbitMQ's left pane: the queues and exchanges its management API listed,
@@ -712,10 +732,22 @@ fn rabbitmq_destination_pane(
     let selected = conn.destinations.table.selected();
     let offset = visible_offset(conn.destinations.table.offset(), selected, viewport, total);
     let end = offset.saturating_add(viewport).min(total);
+    let mut widths = vec![Constraint::Min(DEST_NAME_MIN)];
+    let mut header = vec![Cell::from("Name")];
+    for (i, (title, width)) in DEST_STAT_COLUMNS.iter().enumerate().take(shown) {
+        widths.push(Constraint::Length(*width));
+        header.push(stat_cell(title.to_string(), i > 0));
+    }
+    let name_w = first_column_width(
+        table_area.width,
+        HIGHLIGHT_SYMBOL_WIDTH,
+        &widths,
+        DEST_COLUMN_SPACING,
+    );
     let rows: Vec<Row> = items[offset..end]
         .iter()
         .map(|d| {
-            let mut cells = vec![Cell::from(d.name.clone())];
+            let mut cells = vec![Cell::from(truncate(&d.name, name_w))];
             for (i, value) in dest_stat_cells(d).into_iter().enumerate().take(shown) {
                 cells.push(stat_cell(value, i > 0));
             }
@@ -727,12 +759,6 @@ fn rabbitmq_destination_pane(
             }
         })
         .collect();
-    let mut widths = vec![Constraint::Min(DEST_NAME_MIN)];
-    let mut header = vec![Cell::from("Name")];
-    for (i, (title, width)) in DEST_STAT_COLUMNS.iter().enumerate().take(shown) {
-        widths.push(Constraint::Length(*width));
-        header.push(stat_cell(title.to_string(), i > 0));
-    }
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(theme.header))
         .column_spacing(DEST_COLUMN_SPACING)

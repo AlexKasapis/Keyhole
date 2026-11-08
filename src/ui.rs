@@ -2351,6 +2351,60 @@ mod tests {
         assert!(text.contains("keyhole.demo"), "the rows stay: {text}");
     }
 
+    /// The first rendered pane row (not a title) that holds `prefix`.
+    fn row_with<'a>(text: &'a str, prefix: &str) -> &'a str {
+        text.lines()
+            .find(|l| l.starts_with('│') && l.contains(prefix))
+            .unwrap_or_else(|| panic!("no row holds {prefix:?}: {text}"))
+    }
+
+    #[tokio::test]
+    async fn rabbitmq_list_marks_a_cut_off_name_with_an_ellipsis() {
+        // A name wider than the Name column ends in `…` at the column's edge
+        // and the columns beside it stay put, whether the terminal is wide,
+        // narrow enough to drop most stat columns, or too narrow for any.
+        let long = "orders.priority.eu-west-1.fulfilment.retry.dead-letter";
+        let mut list = mock::sample_destinations();
+        list.items.insert(
+            0,
+            mock::queue_row(long, crate::broker::QueueType::Classic, 7),
+        );
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(list))).await;
+        insta::assert_snapshot!("browser_rabbitmq_long_name", render_lines(&mut app, 90, 16));
+        for (width, cut) in [
+            (
+                160,
+                "│▶ orders.priority.eu-we…  queue          7            7/0",
+            ),
+            (90, "│▶ orders.priority.eu-wes…  queue          7│"),
+            (60, "│▶ orders.priority.eu-west-1…│"),
+        ] {
+            let text = render_lines(&mut app, width, 12);
+            let row = row_with(&text, "orders.priority");
+            assert!(row.contains(cut), "at {width} columns: {row:?}");
+        }
+        // A name that fits is left whole.
+        let text = render_lines(&mut app, 160, 12);
+        assert!(row_with(&text, "1960/20").contains("  orders  "), "{text}");
+    }
+
+    #[tokio::test]
+    async fn amqp_list_marks_a_cut_off_name_with_an_ellipsis() {
+        use crate::app::Destination;
+        let (mut app, _rx) = app_with_amqp_connection().await;
+        app.screen = Screen::Browser;
+        let long = "orders.priority.eu-west-1.fulfilment.retry.dead-letter";
+        app.connections[0].add_destination(Destination::new(long, DestKind::Queue));
+        for (width, cut) in [
+            (90, "│▶ orders.priority.eu-west-1.fulf…  [queue] │"),
+            (60, "│▶ orders.priority…  [queue] │"),
+        ] {
+            let text = render_lines(&mut app, width, 24);
+            let row = row_with(&text, "orders.priority");
+            assert!(row.contains(cut), "at {width} columns: {row:?}");
+        }
+    }
+
     /// RabbitMQ stats like the 3.13 fixtures': an administrator's view of a
     /// one-node cluster with live rates.
     fn sample_rabbitmq_stats() -> RabbitmqStats {
