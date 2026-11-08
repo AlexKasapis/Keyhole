@@ -157,9 +157,9 @@ value_preview_bytes = 65536`;
       you only type the body.
     </li>
     <li>
-      <strong>A direct or topic exchange</strong> first asks for the routing key, filled in with the
-      last one you used on it this session; <kbd>Enter</kbd> moves on to the body, and an empty key
-      is a valid one.
+      <strong>An exchange</strong> first asks for the routing key, unless it's fanout or headers:
+      direct, topic and plugin types all do. The key is filled in with the last one you used on the
+      exchange this session; <kbd>Enter</kbd> moves on to the body, and an empty key is a valid one.
     </li>
     <li>
       <strong>A fanout or headers exchange</strong> skips the key. A headers exchange routes on

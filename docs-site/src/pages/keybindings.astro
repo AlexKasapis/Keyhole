@@ -41,11 +41,18 @@ import { KEYBINDINGS } from '../lib/keybindings';
                     <a href={b.more.href}>{b.more.label}</a>
                   </span>
                 )}
-                {b.brokers?.map((broker) => (
-                  <span class="kb-tag" data-broker={broker}>
-                    {broker}
+                {b.brokers && (
+                  <span class="kb-tags">
+                    {b.brokers.map((broker) => (
+                      <Fragment>
+                        <span class="sr-only">, </span>
+                        <span class="kb-tag" data-broker={broker}>
+                          {broker}
+                        </span>
+                      </Fragment>
+                    ))}
                   </span>
-                ))}
+                )}
               </div>
             </div>
           ))}
@@ -120,16 +127,20 @@ import { KEYBINDINGS } from '../lib/keybindings';
     color: var(--sec2);
     font-size: 14px;
   }
-  .kb-tag {
-    display: inline-block;
+  /* A row's pills wrap to the next line together, never one at a time. */
+  .kb-tags {
+    display: inline-flex;
+    gap: 6px;
     margin-left: 8px;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+  .kb-tag {
     padding: 0 6px;
     border: 1px solid currentColor;
     border-radius: 5px;
     font-family: var(--mono);
     font-size: 11px;
-    white-space: nowrap;
-    vertical-align: 1px;
   }
   /* The broker colours of the Connect a broker and Realtime tails pages. */
   .kb-tag[data-broker='AMQP 1.0'] {
@@ -137,6 +148,19 @@ import { KEYBINDINGS } from '../lib/keybindings';
   }
   .kb-tag[data-broker='RabbitMQ'] {
     color: var(--orange);
+  }
+  /* Read by screen readers only: keeps the pills from running into the
+     description and into each other. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   .kb-empty {
     padding: 24px;

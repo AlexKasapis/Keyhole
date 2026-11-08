@@ -45,6 +45,7 @@ describe('keybinding data', () => {
   });
 
   it('links only to sections the docs have', () => {
+    // nav.ts's TOCs are checked against the pages' real anchors in nav.test.ts.
     const anchors = PAGES.flatMap((p) => p.toc.map(([slug]) => `${p.href}#${slug}`));
     for (const b of KEYBINDINGS.flatMap((g) => g.bindings)) {
       if (b.more) expect(anchors).toContain(b.more.href);
@@ -78,6 +79,14 @@ describe('filterKeybindings', () => {
 
   it('returns nothing when no binding matches', () => {
     expect(filterKeybindings('zzz')).toEqual([]);
+  });
+
+  it("matches a link's label, and each broker tag on its own", () => {
+    const viaLink = filterKeybindings('peek modes').flatMap((g) => g.bindings);
+    expect(viaLink.length).toBeGreaterThan(0);
+    expect(viaLink.every((b) => b.more?.label.toLowerCase() === 'peek modes')).toBe(true);
+    // A shared row's tags are "AMQP 1.0" and "RabbitMQ", not one string.
+    expect(filterKeybindings('1.0 rabbit')).toEqual([]);
   });
 
   it('matches on broker tags, keeping the rows shared by both brokers', () => {

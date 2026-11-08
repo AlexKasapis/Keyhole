@@ -6,8 +6,8 @@
 // below reflects that. Each group's `slug` matches its `data-toc` anchor (and
 // the page TOC). `filterKeybindings` powers the live filter input: a binding
 // matches when the query is a substring of its description, of its
-// space-joined keycaps OR of its broker tags; groups with no surviving rows drop
-// out. Pure, so it runs in the client filter handler and is unit-tested. The
+// space-joined keycaps, of its link's label OR of one of its broker tags; groups
+// with no surviving rows drop out. Pure, so it runs in the client filter handler and is unit-tested. The
 // page tells rows apart by description, so a group's descriptions are unique.
 
 /** A broker a destination-browser binding applies to, shown as a tag. */
@@ -109,7 +109,7 @@ export const KEYBINDINGS: readonly KeybindingGroup[] = [
       { keys: ['P'], desc: 'Publish a message to the selected topic or queue', brokers: [AMQP] },
       {
         keys: ['P'],
-        desc: 'Publish; exchanges other than fanout and headers ask for a key',
+        desc: 'Publish; exchanges other than fanout and headers ask for a routing key',
         brokers: [RABBITMQ],
       },
       { keys: ['a'], desc: 'Add a topic or queue to the list', brokers: [AMQP] },
@@ -177,7 +177,8 @@ export function filterKeybindings(query: string): KeybindingGroup[] {
         !q ||
         b.desc.toLowerCase().includes(q) ||
         b.keys.join(' ').toLowerCase().includes(q) ||
-        (b.brokers ?? []).join(' ').toLowerCase().includes(q),
+        (b.more?.label.toLowerCase().includes(q) ?? false) ||
+        (b.brokers ?? []).some((br) => br.toLowerCase().includes(q)),
     ),
   })).filter((g) => g.bindings.length > 0);
 }
