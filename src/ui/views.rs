@@ -1765,9 +1765,12 @@ fn anchor_input(
     } else {
         ""
     };
+    let label = format!("{label}: ");
+    // Text wider than the field shows its end, where the cursor is.
+    let field = usize::from(prompt_area.width).saturating_sub(display_width(&label) + 1);
     let line = Line::from(vec![
-        Span::styled(format!("{label}: "), theme.dim),
-        Span::raw(prompt.buf.to_string()),
+        Span::styled(label, theme.dim),
+        Span::raw(truncate_start(prompt.buf, field)),
         Span::styled(cursor, theme.accent),
     ]);
     frame.render_widget(Paragraph::new(line), prompt_area);
@@ -3581,8 +3584,31 @@ fn payload_preview(payload: &Payload, max: usize) -> String {
 /// The columns `s` takes on screen, measured per grapheme cluster as ratatui
 /// draws it: an emoji with a variation selector (`⚠️`) takes two, though its
 /// base character alone is one wide.
-fn display_width(s: &str) -> usize {
+pub(super) fn display_width(s: &str) -> usize {
     s.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
+/// The end of `s` that fits in `max` columns, after an ellipsis when cut: the
+/// mirror of [`truncate`], for text being typed, whose end (and the cursor
+/// after it) must stay in view. Measured and cut like [`truncate`].
+pub(super) fn truncate_start(s: &str, max: usize) -> String {
+    if display_width(s) <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    // The cut leaves one column for the ellipsis.
+    let budget = max - 1;
+    let (mut width, mut start) = (0, s.len());
+    for (i, g) in s.grapheme_indices(true).rev() {
+        width += UnicodeWidthStr::width(g);
+        if width > budget {
+            break;
+        }
+        start = i;
+    }
+    format!("…{}", &s[start..])
 }
 
 /// Truncate to a display width of `max` columns, appending an ellipsis when
@@ -3828,6 +3854,24 @@ mod tests {
         assert_eq!(truncate("hello", 3), "he…");
         // Counts characters, not bytes, so multibyte text is handled safely.
         assert_eq!(truncate("héllo", 3), "hé…");
+    }
+
+    #[test]
+    fn truncate_start_keeps_the_end_in_view() {
+        assert_eq!(truncate_start("hello", 10), "hello");
+        assert_eq!(truncate_start("hello", 5), "hello", "exactly at the cap");
+        assert_eq!(truncate_start("hello", 3), "…lo");
+        assert_eq!(truncate_start("hello", 1), "…");
+        assert_eq!(truncate_start("hello", 0), "");
+        // Multibyte chars are one column each.
+        assert_eq!(truncate_start("ééééé", 3), "…éé");
+        // A wide char that would straddle the cut is left out, so the result
+        // never overflows: here 5 columns of a 6-column cap.
+        let cut = truncate_start("日本語テキスト", 6);
+        assert_eq!(cut, "…スト");
+        assert_eq!(display_width(&cut), 5);
+        // Grapheme clusters stay whole: an emoji with its variation selector.
+        assert_eq!(truncate_start("ab⚠️", 3), "…⚠️");
     }
 
     #[test]

@@ -90,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   machine instead. A `.` or `..` vhost also connected to the empty vhost
   instead of the one named, and a host containing `/` fails to connect
   instead of crashing.
+- **Text too long for its prompt shows its end**, where the cursor is, in the
+  Tail tab and the footer's prompts (routing key, message, filters, rename),
+  after a `…`, instead of running off the edge.
 
 ## [0.1.2] - 2026-06-26
 

@@ -82,15 +82,26 @@ pub(crate) fn fit_status(message: &str) -> String {
     views::truncate(message, usize::from(STATUS_WIDTH) - 1)
 }
 
+/// A footer prompt: the accented `label`, the text being typed and its cursor,
+/// then the dim `hint`. Text too wide for the row shows its end after a `…`,
+/// pushing the hint off, so what's being typed stays in view.
+fn prompt_line(label: &str, buf: &str, hint: &str, width: u16, theme: &Theme) -> Line<'static> {
+    // The cursor takes a column too.
+    let field = usize::from(width).saturating_sub(views::display_width(label) + 1);
+    Line::from(vec![
+        Span::styled(label.to_string(), theme.accent),
+        Span::raw(format!("{}▏", views::truncate_start(buf, field))),
+        Span::styled(hint.to_string(), theme.dim),
+    ])
+}
+
 fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let prompt = |label: &str, buf: &str, hint: &str| {
+        Paragraph::new(prompt_line(label, buf, hint, area.width, theme)).style(theme.status_bar)
+    };
     match app.mode {
         InputMode::Filter => {
-            let line = Line::from(vec![
-                Span::styled(" filter ", theme.accent),
-                Span::raw(format!("{}▏", app.filter)),
-                Span::styled("   Enter apply", theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            frame.render_widget(prompt(" filter ", &app.filter, "   Enter apply"), area);
         }
         InputMode::Form => {
             frame.render_widget(
@@ -103,12 +114,7 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             );
         }
         InputMode::Rename => {
-            let line = Line::from(vec![
-                Span::styled(" rename ", theme.accent),
-                Span::raw(format!("{}▏", app.rename_buf)),
-                Span::styled("   Enter save", theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            frame.render_widget(prompt(" rename ", &app.rename_buf, "   Enter save"), area);
         }
         InputMode::Subscribe => {
             // The accepted source specs depend on the active broker, so the
@@ -118,20 +124,18 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 .active_conn()
                 .map(|c| c.caps.r#type.sub_spec_hint())
                 .unwrap_or_else(|| BrokerType::Redis.sub_spec_hint());
-            let line = Line::from(vec![
-                Span::styled(" subscribe ", theme.accent),
-                Span::raw(format!("{}▏", app.subscribe_buf)),
-                Span::styled(format!("   {hint}   Enter start · Tab nav"), theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            let hint = format!("   {hint}   Enter start · Tab nav");
+            frame.render_widget(prompt(" subscribe ", &app.subscribe_buf, &hint), area);
         }
         InputMode::AddDestination => {
-            let line = Line::from(vec![
-                Span::styled(" add destination ", theme.accent),
-                Span::raw(format!("{}▏", app.subscribe_buf)),
-                Span::styled("   topic:name · queue:name   Enter add", theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            frame.render_widget(
+                prompt(
+                    " add destination ",
+                    &app.subscribe_buf,
+                    "   topic:name · queue:name   Enter add",
+                ),
+                area,
+            );
         }
         InputMode::PublishKey => {
             let exchange = app
@@ -139,35 +143,19 @@ fn render_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
                 .as_ref()
                 .map(|d| d.dest.name.as_str())
                 .unwrap_or_default();
-            let line = Line::from(vec![
-                Span::styled(" routing key ", theme.accent),
-                Span::raw(format!("{}▏", app.publish_buf)),
-                Span::styled(
-                    format!("   publish to {exchange} · Enter next · Esc cancel"),
-                    theme.dim,
-                ),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            let hint = format!("   publish to {exchange} · Enter next · Esc cancel");
+            frame.render_widget(prompt(" routing key ", &app.publish_buf, &hint), area);
         }
         InputMode::Publish => {
-            let line = Line::from(vec![
-                Span::styled(" publish ", theme.accent),
-                Span::raw(format!("{}▏", app.publish_buf)),
-                Span::styled(format!("{}   Enter send", publish_target(app)), theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            let hint = format!("{}   Enter send", publish_target(app));
+            frame.render_widget(prompt(" publish ", &app.publish_buf, &hint), area);
         }
         InputMode::PeekFilter => {
             let filter = app
                 .active_conn()
                 .map(|c| c.peek.filter.clone())
                 .unwrap_or_default();
-            let line = Line::from(vec![
-                Span::styled(" filter messages ", theme.accent),
-                Span::raw(format!("{filter}▏")),
-                Span::styled("   Enter apply", theme.dim),
-            ]);
-            frame.render_widget(Paragraph::new(line).style(theme.status_bar), area);
+            frame.render_widget(prompt(" filter messages ", &filter, "   Enter apply"), area);
         }
         // The console tab has its own input prompt inside the panel, so command
         // mode keeps the keybind row rather than echoing the input a second time.
@@ -2296,6 +2284,84 @@ mod tests {
                 .any(|l| l.contains("Enter taps it")),
             "the hint stays:\n{text}"
         );
+    }
+
+    /// `line` without spaces, which drops the blank cell after each wide char.
+    fn cells(line: &str) -> String {
+        line.chars().filter(|c| *c != ' ').collect()
+    }
+
+    #[tokio::test]
+    async fn a_spec_too_wide_for_the_tail_anchor_shows_its_end() {
+        // ASCII, then multibyte chars of one and two columns.
+        for end in ["kkkk-the-end", "ééé-ünd-日本語"] {
+            let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+            app.connections[0].focus = PaneFocus::Bottom;
+            app.mode = InputMode::Subscribe;
+            app.subscribe_buf = format!("exchange:ex/{}{end}", "é".repeat(300));
+            let text = render_lines(&mut app, 160, 30);
+            let anchor = text
+                .lines()
+                .find(|l| l.contains("exchange:name or exchange:name/binding-key:"))
+                .expect("the Tail anchor's prompt");
+            let anchor = cells(anchor);
+            assert!(
+                anchor.contains("binding-key:…éé"),
+                "cut at the start:\n{anchor}"
+            );
+            assert!(
+                anchor.ends_with(&format!("é{end}▏│")),
+                "the end and the cursor, inside the border:\n{anchor}"
+            );
+            // The footer echoes the same prompt.
+            let footer = text.lines().last().unwrap();
+            assert!(
+                cells(footer).ends_with(&format!("{end}▏")),
+                "footer:\n{footer}"
+            );
+            assert!(footer.starts_with(" subscribe …"), "{footer}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_routing_key_too_wide_for_the_footer_shows_its_end() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        let conn = app.connections[0].id;
+        let dest = app.connections[0]
+            .destinations
+            .items
+            .iter()
+            .find(|d| d.name == "keyhole.demo")
+            .unwrap()
+            .clone();
+        app.publish_draft = Some(crate::app::PublishDraft {
+            conn,
+            dest,
+            routing_key: String::new(),
+        });
+        app.mode = InputMode::PublishKey;
+        // A short key leaves room for the hint.
+        app.publish_buf = "order.created".into();
+        let footer = render_lines(&mut app, 100, 30)
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(
+            footer.starts_with(" routing key order.created▏   publish to keyhole.demo"),
+            "{footer}"
+        );
+        // A long one, as the prompt offers again after it was refused, shows
+        // its end and the cursor instead.
+        app.publish_buf = format!("{}.€-end", "k".repeat(300));
+        let footer = render_lines(&mut app, 100, 30)
+            .lines()
+            .last()
+            .unwrap()
+            .to_string();
+        assert!(footer.starts_with(" routing key …kkk"), "{footer}");
+        assert!(footer.ends_with("kkk.€-end▏"), "{footer}");
+        assert_eq!(footer.chars().count(), 100, "fills the row exactly");
     }
 
     #[tokio::test]
