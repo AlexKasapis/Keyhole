@@ -1041,7 +1041,7 @@ async fn open_exchange_tap(
         .context("declaring the spy queue")?;
     let queue_name = queue.name().as_str().to_owned();
     // Noted before the bind or consume can fail, so the queue a failed tap
-    // leaves behind stays hidden until the broker deletes it too.
+    // leaves behind is hidden too, for the same retention after the failure.
     let spy_queue = spy_queues.register(&queue_name);
 
     // Bind the spy queue: the broker now routes a COPY of every matching message
@@ -1403,7 +1403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_listing_leaves_out_this_processs_tap_queues() {
+    async fn the_listing_leaves_out_this_sessions_tap_queues() {
         let queues =
             r#"{"items":[{"name":"amq.gen-ours"},{"name":"amq.gen-theirs"}],"page_count":1}"#;
         let (mut conn, server) = listing_conn(

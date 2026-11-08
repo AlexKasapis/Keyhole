@@ -27,7 +27,9 @@ use std::time::{Duration, Instant};
 use crate::broker::{DestKind, DestinationList};
 
 /// How long a closed tap's queue stays hidden: well past the broker deleting
-/// it, even after reaping a connection that died without closing.
+/// it, even after reaping a connection that died without closing. A broker
+/// with heartbeats off may keep a dead tap's queue longer, and then it shows
+/// in the list again; it really is still there.
 const RETENTION: Duration = Duration::from_secs(10 * 60);
 
 /// The spy queues of this session's taps, by name.
@@ -71,6 +73,13 @@ impl TapQueues {
             .retain(|d| d.kind != DestKind::Queue || !queues.contains_key(&d.name));
     }
 
+    /// Mark `name`'s tap closed at `now`, which its retention counts from.
+    fn close_at(&self, name: &str, now: Instant) {
+        if let Some(closed) = self.lock().get_mut(name) {
+            *closed = Some(now);
+        }
+    }
+
     /// The spy queues noted, open or not.
     #[cfg(test)]
     pub(super) fn names(&self) -> Vec<String> {
@@ -98,9 +107,7 @@ pub(super) struct TapQueueGuard {
 
 impl Drop for TapQueueGuard {
     fn drop(&mut self) {
-        if let Some(closed) = self.queues.lock().get_mut(&self.name) {
-            *closed = Some(Instant::now());
-        }
+        self.queues.close_at(&self.name, Instant::now());
     }
 }
 
@@ -166,6 +173,23 @@ mod tests {
             ["amq.gen-ours", "amq.topic"]
         );
         assert!(taps.names().is_empty());
+    }
+
+    #[test]
+    fn retention_counts_from_the_close_not_the_open() {
+        let taps = TapQueues::default();
+        let opened = Instant::now();
+        taps.note_at("amq.gen-ours", opened);
+        // Open for longer than the retention, then closed.
+        let closed = opened + 2 * RETENTION;
+        taps.close_at("amq.gen-ours", closed);
+        let almost = closed + RETENTION - Duration::from_secs(1);
+        assert_eq!(shown_at(&taps, &["amq.gen-ours"], almost), ["amq.topic"]);
+        let expired = closed + RETENTION;
+        assert_eq!(
+            shown_at(&taps, &["amq.gen-ours"], expired),
+            ["amq.gen-ours", "amq.topic"]
+        );
     }
 
     #[test]
