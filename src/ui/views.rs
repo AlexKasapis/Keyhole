@@ -3318,6 +3318,13 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(block, rect);
 
     let theme_name = crate::theme::THEME_BASES[crate::theme::theme_base_index(app.theme_base())];
+    // The values line up two columns past the longest label.
+    let label_w = rows
+        .iter()
+        .map(|r| UnicodeWidthStr::width(r.label()))
+        .max()
+        .unwrap_or_default()
+        + 2;
     let mut lines = vec![Line::from("")];
     for (i, row) in rows.iter().enumerate() {
         let value = match row {
@@ -3334,7 +3341,10 @@ pub fn settings(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             ("  ", theme.dim)
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{marker}{:<14}", row.label()), label_style),
+            Span::styled(
+                format!("{marker}{}", pad_end(row.label(), label_w)),
+                label_style,
+            ),
             Span::styled("‹ ", theme.dim),
             Span::raw(value),
             Span::styled(" ›", theme.dim),

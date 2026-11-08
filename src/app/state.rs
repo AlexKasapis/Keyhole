@@ -107,7 +107,7 @@ impl SettingsRow {
         match self {
             SettingsRow::Theme => "Theme",
             SettingsRow::Animations => "Animations",
-            SettingsRow::PeekMode => "AMQP peek mode",
+            SettingsRow::PeekMode => "Queue peek mode",
         }
     }
 }

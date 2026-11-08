@@ -7,9 +7,9 @@ expression: "render_lines(&mut app, 90, 16)"
 │                                  No saved connections.                                 │
 │                   ┌ Settings ──────────────────────────────────────┐                   │
 │                   │                                                │                   │
-│                   │▶ Theme         ‹ gruvbox ›                     │                   │
-│                   │  Animations    ‹ on ›                          │                   │
-│                   │  AMQP peek mode‹ browse ›                      │                   │
+│                   │▶ Theme            ‹ gruvbox ›                  │                   │
+│                   │  Animations       ‹ on ›                       │                   │
+│                   │  Queue peek mode  ‹ browse ›                   │                   │
 │                   │                                                │                   │
 │                   │  ↑/↓ row · ←/→ change · Enter/Esc close        │                   │
 │                   │                                                │                   │

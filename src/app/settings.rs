@@ -146,10 +146,11 @@ impl App {
         }
     }
 
-    /// Step the AMQP queue-peek mode through [`config::PeekMode::ALL`] by `delta`
-    /// (wrapping). Takes effect on the next peek and is persisted to the config
-    /// file. Like the other cyclers, persisting is best-effort: a write failure is
-    /// surfaced as a footer status but the in-memory setting still changes.
+    /// Step the queue peek mode (AMQP 1.0 and RabbitMQ) through
+    /// [`config::PeekMode::ALL`] by `delta` (wrapping). Takes effect on the next
+    /// peek and is persisted to the config file. Like the other cyclers,
+    /// persisting is best-effort: a write failure is surfaced as a footer status
+    /// but the in-memory setting still changes.
     pub(super) fn cycle_peek_mode(&mut self, delta: i32) {
         let all = config::PeekMode::ALL;
         let cur = all
@@ -161,9 +162,9 @@ impl App {
         self.config.settings.peek_mode = mode;
         let label = mode.label();
         match config::save(&self.config_path, &self.config) {
-            Ok(()) => self.set_status(format!("AMQP peek mode: {label}"), false),
+            Ok(()) => self.set_status(format!("Queue peek mode: {label}"), false),
             Err(e) => self.set_status(
-                format!("AMQP peek mode set to {label}, but could not save: {e}"),
+                format!("Queue peek mode set to {label}, but could not save: {e}"),
                 true,
             ),
         }
@@ -309,7 +310,7 @@ mod tests {
         app.handle_key(key(KeyCode::Left));
         assert_eq!(app.animation_speed(), crate::config::AnimationSpeed::On);
 
-        // ↓ moves to the third row (AMQP peek mode); a further ↓ clamps there
+        // ↓ moves to the third row (Queue peek mode); a further ↓ clamps there
         // rather than wrapping.
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.settings.unwrap().selected, 2);
@@ -328,7 +329,7 @@ mod tests {
         // Default peek mode is the non-destructive browse.
         assert_eq!(app.peek_mode(), crate::config::PeekMode::Browse);
 
-        // Navigate to the third row (AMQP peek mode).
+        // Navigate to the third row (Queue peek mode).
         app.handle_key(key(KeyCode::Down));
         app.handle_key(key(KeyCode::Down));
         assert_eq!(app.settings.unwrap().selected, 2);

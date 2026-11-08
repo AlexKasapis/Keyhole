@@ -287,7 +287,7 @@ impl App {
         self.config.settings.animation
     }
 
-    /// The configured AMQP queue-peek mode — read when issuing a peek and by the
+    /// The configured queue peek mode — read when issuing a peek and by the
     /// settings overlay to show and step the current selection.
     pub(crate) fn peek_mode(&self) -> config::PeekMode {
         self.config.settings.peek_mode

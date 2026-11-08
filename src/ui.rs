@@ -1140,12 +1140,12 @@ mod tests {
         // The animation option renders alongside it, at its default (on).
         assert!(text.contains("Animations"), "the animation option renders");
         assert!(text.contains("‹ on ›"), "current animation setting shown");
-        // The AMQP peek-mode option renders at its default (browse).
+        // The queue peek mode option renders at its default (browse), its
+        // value clear of the label.
         assert!(
-            text.contains("AMQP peek mode"),
-            "the peek-mode option renders"
+            text.contains("Queue peek mode  ‹ browse ›"),
+            "the peek mode option renders"
         );
-        assert!(text.contains("‹ browse ›"), "current peek mode shown");
     }
 
     #[test]
