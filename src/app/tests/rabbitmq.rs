@@ -686,7 +686,7 @@ async fn rabbitmq_tail_anchor_refuses_an_overlong_binding_key_where_it_was_typed
     assert_eq!(app.mode, InputMode::Subscribe);
     assert_eq!(
         app.subscribe_error.as_deref(),
-        Some("binding key too long: 257 bytes, max 255")
+        Some("binding key too long, max 255 bytes")
     );
     assert_eq!(app.subscribe_buf, spec);
 
@@ -711,7 +711,7 @@ async fn rabbitmq_a_refusal_at_the_tail_anchor_clears_when_the_focus_leaves_it()
     submit_on_tail_anchor(&mut app, &format!("exchange:{}", "x".repeat(256)));
     assert_eq!(
         app.subscribe_error.as_deref(),
-        Some("exchange name too long: 256 bytes, max 255")
+        Some("exchange name too long, max 255 bytes")
     );
     app.handle_key(ctrl_key(KeyCode::Up));
     assert_ne!(app.active_conn().unwrap().focus, PaneFocus::Bottom);
@@ -1165,7 +1165,7 @@ async fn reply(rx: &mut Receiver<AppEvent>) -> AppEvent {
 async fn rabbitmq_a_listed_exchange_past_the_limit_is_refused_by_the_broker_layer() {
     let (mut app, mut rx) = undialled_app().await;
     let long = overlong_exchange();
-    let refusal = "exchange name too long: 256 bytes, max 255";
+    let refusal = "exchange name too long, max 255 bytes";
 
     // `t` sends the tap; the broker layer refuses it and the tab ends saying
     // why.
@@ -1209,7 +1209,7 @@ async fn rabbitmq_an_overlong_routing_key_is_refused_by_the_broker_layer_in_the_
     app.handle_key(key(KeyCode::Enter));
     let published = reply(&mut rx).await;
     app.handle_event(published);
-    let refusal = "routing key too long: 300 bytes, max 255";
+    let refusal = "routing key too long, max 255 bytes";
     let status = app.status.as_ref().unwrap();
     assert!(status.is_error);
     assert_eq!(status.message, refusal, "the whole reason fits the footer");

@@ -2276,7 +2276,7 @@ mod tests {
         let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
         app.connections[0].focus = PaneFocus::Bottom;
         app.mode = InputMode::Subscribe;
-        let refusal = "binding key too long: 256 bytes, max 255";
+        let refusal = "binding key too long, max 255 bytes";
         assert!(!render_lines(&mut app, 160, 30).contains(refusal));
 
         app.subscribe_error = Some(refusal.into());

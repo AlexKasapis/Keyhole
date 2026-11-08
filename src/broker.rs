@@ -1341,16 +1341,16 @@ mod tests {
         let long = "x".repeat(256);
         assert_eq!(
             error(&format!("exchange:{long}")),
-            "exchange name too long: 256 bytes, max 255"
+            "exchange name too long, max 255 bytes"
         );
         assert_eq!(
             error(&format!("exchange:ex/{long}")),
-            "binding key too long: 256 bytes, max 255"
+            "binding key too long, max 255 bytes"
         );
         // Bytes count, not characters: 128 two-byte chars are 256 bytes.
         assert_eq!(
             error(&format!("exchange:ex/{}", "é".repeat(128))),
-            "binding key too long: 256 bytes, max 255"
+            "binding key too long, max 255 bytes"
         );
         // Exactly the cap is allowed.
         let max = "x".repeat(255);

@@ -208,7 +208,7 @@ mod tests {
         };
         // Refused before dialling, which would fail with another error.
         let err = open(&p, None).await.unwrap_err();
-        assert_eq!(format!("{err:#}"), "vhost too long: 256 bytes, max 255");
+        assert_eq!(format!("{err:#}"), "vhost too long, max 255 bytes");
     }
 }
 

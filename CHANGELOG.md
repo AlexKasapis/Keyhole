@@ -81,9 +81,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a panic message, keys echoed on screen, and the connection, still
   shown as connected, did nothing more (a connect never finished). Now the
   publish fails in the footer, the tap's tab ends, or the connect fails, each
-  saying how long it was and that the limit is 255 bytes, and an open
-  connection stays up. The Tail tab also shows why it refused a typed spec,
-  under its prompt, where the footer couldn't, and keeps the spec to fix.
+  saying the limit is 255 bytes, and an open connection stays up. The Tail
+  tab also shows why it refused a typed spec, under its prompt, where the
+  footer couldn't, and keeps the spec to fix.
 - **RabbitMQ profiles with an IPv6 host connect to that host.** An address
   such as `2001:db8::1` was read as `localhost`, so Keyhole connected, and
   logged in with the profile's username and password, to a broker on this

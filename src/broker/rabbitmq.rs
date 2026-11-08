@@ -88,16 +88,13 @@ const PUBLISH_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const PERSISTENT: u8 = 2;
 
 /// `value` as an AMQP short string, or an error naming `what` it is (e.g.
-/// "routing key"), its length in bytes and the 255-byte limit. lapin's
-/// `From<&str>` panics past the limit, so every name, key or vhost from the
-/// user, the config or the broker reaches lapin through here.
+/// "routing key") and the 255-byte limit, short enough for the footer's
+/// status column. lapin's `From<&str>` panics past the limit, so every name,
+/// key or vhost from the user, the config or the broker reaches lapin through
+/// here.
 pub(crate) fn short_string(what: &str, value: &str) -> anyhow::Result<ShortString> {
-    ShortString::try_new(value).map_err(|_| {
-        anyhow::anyhow!(
-            "{what} too long: {} bytes, max {MAX_SHORT_STRING_LENGTH}",
-            value.len()
-        )
-    })
+    ShortString::try_new(value)
+        .map_err(|_| anyhow::anyhow!("{what} too long, max {MAX_SHORT_STRING_LENGTH} bytes"))
 }
 
 /// Where lapin connects for `profile`, logging in with `password`. Built as
@@ -1318,14 +1315,14 @@ mod tests {
     fn short_string_takes_up_to_255_bytes() {
         let ok = |s: &str| short_string("routing key", s).map(|s| s.as_str().to_owned());
         let err = |s: &str| short_string("routing key", s).unwrap_err().to_string();
-        let too_long = "routing key too long: 256 bytes, max 255";
+        let too_long = "routing key too long, max 255 bytes";
         assert_eq!(ok("").unwrap(), "");
         let max = "k".repeat(255);
         assert_eq!(ok(&max).unwrap(), max);
         assert_eq!(err(&"k".repeat(256)), too_long);
 
         // The limit counts bytes, not characters. 128 two-byte chars are
-        // under 255 characters but 256 bytes, which the message says.
+        // under 255 characters but 256 bytes.
         let wide = "é".repeat(128);
         assert!(wide.chars().count() < 255);
         assert_eq!(err(&wide), too_long);
@@ -1344,7 +1341,7 @@ mod tests {
             short_string("vhost", &max.repeat(2))
                 .unwrap_err()
                 .to_string(),
-            "vhost too long: 510 bytes, max 255"
+            "vhost too long, max 255 bytes"
         );
     }
 
@@ -1356,12 +1353,12 @@ mod tests {
         // came first.
         let mut conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
         let err = conn.connect().await.unwrap_err();
-        assert_eq!(format!("{err:#}"), "vhost too long: 256 bytes, max 255");
+        assert_eq!(format!("{err:#}"), "vhost too long, max 255 bytes");
         let err = match conn.subscribe(tap_spec("ex", "#")).await {
             Ok(_) => panic!("a tap on the vhost can't open"),
             Err(e) => e,
         };
-        assert_eq!(format!("{err:#}"), "vhost too long: 256 bytes, max 255");
+        assert_eq!(format!("{err:#}"), "vhost too long, max 255 bytes");
     }
 
     fn tap_spec(exchange: &str, binding_key: &str) -> SubSpec {
@@ -1380,12 +1377,9 @@ mod tests {
         for (spec, expected) in [
             (
                 tap_spec(&long, "#"),
-                "exchange name too long: 256 bytes, max 255",
+                "exchange name too long, max 255 bytes",
             ),
-            (
-                tap_spec("ex", &long),
-                "binding key too long: 256 bytes, max 255",
-            ),
+            (tap_spec("ex", &long), "binding key too long, max 255 bytes"),
         ] {
             let err = match conn.subscribe(spec).await {
                 Ok(_) => panic!("{expected}: the tap can't open"),
@@ -1409,15 +1403,15 @@ mod tests {
         for (req, expected) in [
             (
                 publish(tap_spec("ex", "#"), &long),
-                "routing key too long: 256 bytes, max 255",
+                "routing key too long, max 255 bytes",
             ),
             (
                 publish(tap_spec(&long, "#"), "k"),
-                "exchange name too long: 256 bytes, max 255",
+                "exchange name too long, max 255 bytes",
             ),
             (
                 publish(SubSpec::Queue(long.clone()), &long),
-                "queue name too long: 256 bytes, max 255",
+                "queue name too long, max 255 bytes",
             ),
         ] {
             let err = conn.publish(req).await.unwrap_err();
@@ -3145,14 +3139,8 @@ mod integration_tests {
         let mut conn = connected().await;
         let long = "k".repeat(256);
         for (spec, expected) in [
-            (
-                tap(&exchange, &long),
-                "binding key too long: 256 bytes, max 255",
-            ),
-            (
-                tap(&long, "#"),
-                "exchange name too long: 256 bytes, max 255",
-            ),
+            (tap(&exchange, &long), "binding key too long, max 255 bytes"),
+            (tap(&long, "#"), "exchange name too long, max 255 bytes"),
         ] {
             let err = match conn.subscribe(spec).await {
                 Ok(_) => panic!("{expected}: the tap can't open"),
@@ -3163,10 +3151,7 @@ mod integration_tests {
         let err = publish_via(&mut conn, tap(&exchange, "#"), &long, "lost")
             .await
             .unwrap_err();
-        assert_eq!(
-            format!("{err:#}"),
-            "routing key too long: 256 bytes, max 255"
-        );
+        assert_eq!(format!("{err:#}"), "routing key too long, max 255 bytes");
 
         // The same connection still answers, taps and publishes, with a key
         // of exactly 255 bytes that ends in a multibyte char.
