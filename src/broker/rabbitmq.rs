@@ -46,7 +46,6 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use futures_util::{stream, StreamExt};
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -56,6 +55,7 @@ use lapin::options::{
     QueueBindOptions, QueueDeclareOptions,
 };
 use lapin::types::{FieldTable, ShortString, MAX_SHORT_STRING_LENGTH};
+use lapin::uri::{AMQPAuthority, AMQPScheme, AMQPUri, AMQPUserInfo};
 use lapin::{
     BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, Consumer,
     ExchangeKind,
@@ -74,7 +74,7 @@ use super::{
 };
 use crate::config::{PeekMode, RabbitmqProfile};
 
-/// The username and password lapin logs in with when the AMQP URL has none (the
+/// The username and password the AMQP login uses when the profile has none (the
 /// AMQP URI spec's default). The management login defaults the same way, so both
 /// channels authenticate as the same user.
 const DEFAULT_CREDENTIAL: &str = "guest";
@@ -88,12 +88,59 @@ const PUBLISH_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 const PERSISTENT: u8 = 2;
 
 /// `value` as an AMQP short string, or an error naming `what` it is (e.g.
-/// "routing key") and the 255-byte limit. lapin's `From<&str>` panics past
-/// the limit, so every name, key or vhost from the user, the config or the
-/// broker reaches lapin through here.
+/// "routing key"), its length in bytes and the 255-byte limit. lapin's
+/// `From<&str>` panics past the limit, so every name, key or vhost from the
+/// user, the config or the broker reaches lapin through here.
 pub(crate) fn short_string(what: &str, value: &str) -> anyhow::Result<ShortString> {
-    ShortString::try_new(value)
-        .map_err(|_| anyhow::anyhow!("{what} too long (max {MAX_SHORT_STRING_LENGTH} bytes)"))
+    ShortString::try_new(value).map_err(|_| {
+        anyhow::anyhow!(
+            "{what} too long: {} bytes, max {MAX_SHORT_STRING_LENGTH}",
+            value.len()
+        )
+    })
+}
+
+/// Where lapin connects for `profile`, logging in with `password`. Built as
+/// lapin's URI struct rather than a URL string it parses back, so the host and
+/// vhost reach it as configured: in a URL a `/` in the host starts the vhost,
+/// an IPv6 host comes back as `localhost`, and a `.` or `..` vhost is dropped
+/// as a dot segment. A missing or empty username or password is `guest`, as
+/// in a URL without one. Fails on a vhost over AMQP's 255 bytes.
+pub(crate) fn amqp_uri(
+    profile: &RabbitmqProfile,
+    password: Option<&str>,
+) -> anyhow::Result<AMQPUri> {
+    // lapin makes the vhost a short string as it connects.
+    short_string("vhost", &profile.vhost)?;
+    let credential = |s: Option<&str>| {
+        s.filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_CREDENTIAL)
+            .to_string()
+    };
+    // A bare address: only a URL needs an IPv6 host in brackets.
+    let host = profile
+        .host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(&profile.host);
+    Ok(AMQPUri {
+        // `amqps` is the :5671 TLS listener.
+        scheme: if profile.tls {
+            AMQPScheme::AMQPS
+        } else {
+            AMQPScheme::AMQP
+        },
+        authority: AMQPAuthority {
+            userinfo: AMQPUserInfo {
+                username: credential(profile.username.as_deref()),
+                password: credential(password),
+            },
+            host: host.to_string(),
+            port: profile.port,
+        },
+        vhost: profile.vhost.clone(),
+        ..AMQPUri::default()
+    })
 }
 
 /// A live (or not-yet-connected) RabbitMQ (AMQP 0.9.1) connection.
@@ -163,25 +210,9 @@ impl RabbitmqConnection {
         }
     }
 
-    /// Build an `amqp[s]://[user[:pass]@]host:port/vhost` URL with
-    /// percent-encoded credentials and vhost. `tls` selects `amqps://` (the
-    /// :5671 TLS listener). Fails on a vhost lapin can't connect to.
-    fn url(&self) -> anyhow::Result<String> {
-        // lapin makes the vhost a short string as it connects.
-        short_string("vhost", &self.profile.vhost)?;
-        let mut url = super::amqp_base_url(
-            self.profile.tls,
-            &self.profile.host,
-            self.profile.port,
-            self.profile.username.as_deref(),
-            self.password.as_deref(),
-        );
-        // The vhost is a single percent-encoded path segment. The default "/"
-        // must encode to "%2F" — a bare trailing "/" is read by AMQP as the
-        // *empty* vhost, not the default one.
-        url.push('/');
-        url.push_str(&utf8_percent_encode(&self.profile.vhost, NON_ALPHANUMERIC).to_string());
-        Ok(url)
+    /// Where lapin connects: see [`amqp_uri`].
+    fn uri(&self) -> anyhow::Result<AMQPUri> {
+        amqp_uri(&self.profile, self.password.as_deref())
     }
 
     /// Connection properties carrying a recognisable name for the broker's
@@ -223,7 +254,7 @@ impl RabbitmqConnection {
 #[async_trait]
 impl BrokerConnection for RabbitmqConnection {
     async fn connect(&mut self) -> anyhow::Result<Capabilities> {
-        let conn = Connection::connect(&self.url()?, self.conn_props())
+        let conn = Connection::connect_uri(self.uri()?, self.conn_props())
             .await
             // `.context` keeps the lapin error as the source (so its reply
             // code/text survives, shown via the `{:#}` chain) rather than
@@ -261,7 +292,7 @@ impl BrokerConnection for RabbitmqConnection {
         };
         // Each tail is its own dedicated connection (and thus its own spy queue).
         open_exchange_tap(
-            &self.url()?,
+            self.uri()?,
             self.conn_props(),
             &self.tap_queues,
             exchange,
@@ -1006,7 +1037,7 @@ struct TapState {
 /// stream. Declares a temporary spy queue, notes it in `spy_queues`, binds it
 /// with `binding_key`, and consumes the copies routed to it.
 async fn open_exchange_tap(
-    url: &str,
+    uri: AMQPUri,
     props: ConnectionProperties,
     spy_queues: &Arc<TapQueues>,
     exchange: String,
@@ -1021,7 +1052,7 @@ async fn open_exchange_tap(
     // fails the tap with nothing to clean up.
     let exchange_name = short_string("exchange name", &exchange)?;
     let binding_key = short_string("binding key", &binding_key)?;
-    let connection = Connection::connect(url, props)
+    let connection = Connection::connect_uri(uri, props)
         .await
         .context("opening tap connection")?;
     let channel = connection
@@ -1179,56 +1210,122 @@ mod tests {
     }
 
     #[test]
-    fn url_includes_scheme_encoded_credentials_and_default_vhost() {
+    fn the_uri_logs_in_as_the_profile_over_its_scheme() {
         let conn = RabbitmqConnection::new(
-            profile(false),
+            profile(true),
             Some("p@ss/word".into()),
             None,
             PREVIEW,
             Arc::default(),
         );
-        // The default vhost "/" must be percent-encoded to %2F (not a bare slash,
-        // which would select the empty vhost).
-        assert_eq!(
-            conn.url().unwrap(),
-            "amqp://user:p%40ss%2Fword@rabbit.example.com:5672/%2F"
-        );
-        let tls = RabbitmqConnection::new(
-            profile(true),
-            Some("x".into()),
-            None,
-            PREVIEW,
-            Arc::default(),
-        );
-        let tls = tls.url().unwrap();
-        assert!(tls.starts_with("amqps://"));
-        assert!(tls.ends_with(":5671/%2F"));
-    }
+        let uri = conn.uri().unwrap();
+        assert_eq!(uri.scheme, AMQPScheme::AMQPS);
+        assert_eq!(uri.authority.host, "rabbit.example.com");
+        assert_eq!(uri.authority.port, 5671);
+        assert_eq!(uri.authority.userinfo.username, "user");
+        assert_eq!(uri.authority.userinfo.password, "p@ss/word");
+        assert_eq!(uri.vhost, "/");
 
-    #[test]
-    fn url_encodes_custom_vhost_and_omits_absent_userinfo() {
+        // No login at all: guest/guest.
         let mut p = profile(false);
         p.username = None;
         p.vhost = "my/host".into();
-        let conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
-        assert_eq!(
-            conn.url().unwrap(),
-            "amqp://rabbit.example.com:5672/my%2Fhost"
-        );
+        let uri = amqp_uri(&p, None).unwrap();
+        assert_eq!(uri.scheme, AMQPScheme::AMQP);
+        assert_eq!(uri.authority.userinfo.username, "guest");
+        assert_eq!(uri.authority.userinfo.password, "guest");
+        assert_eq!(uri.vhost, "my/host");
+    }
+
+    /// What lapin made of the URL string keyhole built for `p` before it
+    /// built lapin's URI struct itself.
+    fn parsed_from_url(p: &RabbitmqProfile, password: Option<&str>) -> AMQPUri {
+        use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
+        let mut url =
+            crate::broker::amqp_base_url(p.tls, &p.host, p.port, p.username.as_deref(), password);
+        url.push('/');
+        url.push_str(&utf8_percent_encode(&p.vhost, NON_ALPHANUMERIC).to_string());
+        url.parse().unwrap()
+    }
+
+    #[test]
+    fn the_uri_connects_where_and_as_whom_the_url_did_for_ordinary_profiles() {
+        let logins = [None, Some(""), Some("user"), Some("p@ss/wörd:%")];
+        for tls in [false, true] {
+            for host in [
+                "rabbit.example.com",
+                "Rabbit.Example.COM",
+                "10.0.0.5",
+                "localhost",
+            ] {
+                for vhost in ["/", "", "prod", "my/host", "café", "a b"] {
+                    for username in logins {
+                        for password in logins {
+                            let mut p = profile(tls);
+                            p.host = host.into();
+                            p.vhost = vhost.into();
+                            p.username = username.map(Into::into);
+                            assert_eq!(
+                                amqp_uri(&p, password).unwrap(),
+                                parsed_from_url(&p, password),
+                                "{host} {vhost:?} {username:?} {password:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_uri_keeps_an_ipv6_host_the_url_turned_into_localhost() {
+        for (host, address) in [
+            ("2001:db8::1", "2001:db8::1"),
+            ("::1", "::1"),
+            ("[::1]", "::1"),
+        ] {
+            let mut p = profile(false);
+            p.host = host.into();
+            assert_eq!(amqp_uri(&p, None).unwrap().authority.host, address);
+            // So the login went to a local broker instead.
+            assert_eq!(parsed_from_url(&p, None).authority.host, "localhost");
+        }
+    }
+
+    #[test]
+    fn the_uri_keeps_a_dot_vhost_the_url_dropped() {
+        for vhost in [".", ".."] {
+            let mut p = profile(false);
+            p.vhost = vhost.into();
+            assert_eq!(amqp_uri(&p, None).unwrap().vhost, vhost);
+            // As a dot segment, which left the empty vhost.
+            assert_eq!(parsed_from_url(&p, None).vhost, "");
+        }
+    }
+
+    #[test]
+    fn a_slash_in_the_host_stays_in_the_host() {
+        // In the URL, everything after the `/` became the vhost: 307 bytes
+        // here, which lapin panicked on.
+        let mut p = profile(false);
+        p.host = format!("127.0.0.1/{}", "v".repeat(300));
+        let uri = amqp_uri(&p, None).unwrap();
+        assert_eq!(uri.authority.host, p.host);
+        assert_eq!(uri.vhost, "/");
     }
 
     #[test]
     fn short_string_takes_up_to_255_bytes() {
         let ok = |s: &str| short_string("routing key", s).map(|s| s.as_str().to_owned());
         let err = |s: &str| short_string("routing key", s).unwrap_err().to_string();
-        let too_long = "routing key too long (max 255 bytes)";
+        let too_long = "routing key too long: 256 bytes, max 255";
         assert_eq!(ok("").unwrap(), "");
         let max = "k".repeat(255);
         assert_eq!(ok(&max).unwrap(), max);
         assert_eq!(err(&"k".repeat(256)), too_long);
 
         // The limit counts bytes, not characters. 128 two-byte chars are
-        // under 255 characters but 256 bytes.
+        // under 255 characters but 256 bytes, which the message says.
         let wide = "é".repeat(128);
         assert!(wide.chars().count() < 255);
         assert_eq!(err(&wide), too_long);
@@ -1247,7 +1344,7 @@ mod tests {
             short_string("vhost", &max.repeat(2))
                 .unwrap_err()
                 .to_string(),
-            "vhost too long (max 255 bytes)"
+            "vhost too long: 510 bytes, max 255"
         );
     }
 
@@ -1259,12 +1356,12 @@ mod tests {
         // came first.
         let mut conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
         let err = conn.connect().await.unwrap_err();
-        assert_eq!(format!("{err:#}"), "vhost too long (max 255 bytes)");
+        assert_eq!(format!("{err:#}"), "vhost too long: 256 bytes, max 255");
         let err = match conn.subscribe(tap_spec("ex", "#")).await {
             Ok(_) => panic!("a tap on the vhost can't open"),
             Err(e) => e,
         };
-        assert_eq!(format!("{err:#}"), "vhost too long (max 255 bytes)");
+        assert_eq!(format!("{err:#}"), "vhost too long: 256 bytes, max 255");
     }
 
     fn tap_spec(exchange: &str, binding_key: &str) -> SubSpec {
@@ -1283,11 +1380,11 @@ mod tests {
         for (spec, expected) in [
             (
                 tap_spec(&long, "#"),
-                "exchange name too long (max 255 bytes)",
+                "exchange name too long: 256 bytes, max 255",
             ),
             (
                 tap_spec("ex", &long),
-                "binding key too long (max 255 bytes)",
+                "binding key too long: 256 bytes, max 255",
             ),
         ] {
             let err = match conn.subscribe(spec).await {
@@ -1312,15 +1409,15 @@ mod tests {
         for (req, expected) in [
             (
                 publish(tap_spec("ex", "#"), &long),
-                "routing key too long (max 255 bytes)",
+                "routing key too long: 256 bytes, max 255",
             ),
             (
                 publish(tap_spec(&long, "#"), "k"),
-                "exchange name too long (max 255 bytes)",
+                "exchange name too long: 256 bytes, max 255",
             ),
             (
                 publish(SubSpec::Queue(long.clone()), &long),
-                "queue name too long (max 255 bytes)",
+                "queue name too long: 256 bytes, max 255",
             ),
         ] {
             let err = conn.publish(req).await.unwrap_err();
@@ -2745,6 +2842,7 @@ mod integration_tests {
         BasicGetOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueDeclareOptions,
     };
     use lapin::{BasicProperties, Channel, Connection, ConnectionProperties};
+    use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
     use tokio::time::timeout;
@@ -3049,9 +3147,12 @@ mod integration_tests {
         for (spec, expected) in [
             (
                 tap(&exchange, &long),
-                "binding key too long (max 255 bytes)",
+                "binding key too long: 256 bytes, max 255",
             ),
-            (tap(&long, "#"), "exchange name too long (max 255 bytes)"),
+            (
+                tap(&long, "#"),
+                "exchange name too long: 256 bytes, max 255",
+            ),
         ] {
             let err = match conn.subscribe(spec).await {
                 Ok(_) => panic!("{expected}: the tap can't open"),
@@ -3062,7 +3163,10 @@ mod integration_tests {
         let err = publish_via(&mut conn, tap(&exchange, "#"), &long, "lost")
             .await
             .unwrap_err();
-        assert_eq!(format!("{err:#}"), "routing key too long (max 255 bytes)");
+        assert_eq!(
+            format!("{err:#}"),
+            "routing key too long: 256 bytes, max 255"
+        );
 
         // The same connection still answers, taps and publishes, with a key
         // of exactly 255 bytes that ends in a multibyte char.
@@ -3129,6 +3233,62 @@ mod integration_tests {
         assert!(probe.can_monitor());
         let major = probe.major_version().expect("a version like 3.13.7");
         assert!(major >= 3, "{:?}", probe.version);
+    }
+
+    /// Connect `profile` with the test password, giving up after 5s.
+    async fn try_connect(profile: RabbitmqProfile) -> Option<anyhow::Result<Capabilities>> {
+        let mut conn = RabbitmqConnection::new(
+            profile,
+            Some("keyhole".to_string()),
+            Some("keyhole".to_string()),
+            PREVIEW,
+            Arc::default(),
+        );
+        timeout(Duration::from_secs(5), conn.connect()).await.ok()
+    }
+
+    #[tokio::test]
+    async fn an_ipv6_host_is_the_host_connected_to() {
+        // The loopback address reaches the test broker.
+        let mut profile = test_profile();
+        profile.host = "::1".into();
+        let caps = try_connect(profile).await.expect("in time");
+        assert!(caps.is_ok(), "{caps:?}");
+        // A documentation address reaches nothing. In a URL it read as
+        // `localhost`, and logged in to the test broker.
+        let mut profile = test_profile();
+        profile.host = "2001:db8::1".into();
+        let result = try_connect(profile).await;
+        assert!(
+            !matches!(result, Some(Ok(_))),
+            "connected somewhere: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_slash_in_the_host_is_a_connect_error() {
+        // In a URL the `/…` became a 307-byte vhost, which lapin panicked on.
+        let mut profile = test_profile();
+        profile.host = format!("127.0.0.1/{}", "v".repeat(300));
+        let result = try_connect(profile).await;
+        assert!(
+            !matches!(result, Some(Ok(_))),
+            "connected somewhere: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dot_vhost_is_the_vhost_asked_for() {
+        // In a URL `.` and `..` were dot segments, which left the empty vhost.
+        for vhost in [".", ".."] {
+            let mut profile = test_profile();
+            profile.vhost = vhost.into();
+            let err = match try_connect(profile).await.expect("in time") {
+                Ok(_) => panic!("no vhost `{vhost}` on the test broker"),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(&format!("vhost {vhost} not found")), "{err}");
+        }
     }
 
     #[tokio::test]

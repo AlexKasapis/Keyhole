@@ -855,13 +855,23 @@ pub(crate) mod mock {
         mock: MockBroker,
         events: mpsc::Sender<AppEvent>,
     ) -> ConnHandle {
+        spawn_conn(id, name, mock.boxed(), events).await
+    }
+
+    /// Spawn an actor around any broker client whose `connect` succeeds.
+    pub async fn spawn_conn(
+        id: u32,
+        name: &str,
+        conn: Box<dyn BrokerConnection>,
+        events: mpsc::Sender<AppEvent>,
+    ) -> ConnHandle {
         let tracker = TaskTracker::new();
         let cancel = CancellationToken::new();
         spawn_connection(SpawnParams {
             id: ConnId(id),
             name: name.to_string(),
             addr: "127.0.0.1:5672".to_string(),
-            conn: mock.boxed(),
+            conn,
             events,
             tracker: &tracker,
             parent_cancel: &cancel,

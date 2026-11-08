@@ -369,8 +369,10 @@ impl App {
                 match SubSpec::parse(&raw, 0) {
                     Ok(spec) => self.start_subscribe(spec),
                     Err(e) => {
-                        // The focus stays on the anchor, so it says why.
+                        // The focus stays on the anchor, so it says why, and
+                        // keeps the spec for the user to fix.
                         self.subscribe_error = Some(e.to_string());
+                        self.subscribe_buf = raw;
                         self.set_status(e.to_string(), true);
                     }
                 }

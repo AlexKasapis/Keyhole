@@ -612,6 +612,9 @@ impl App {
         if focus == PaneFocus::Bottom {
             // A fresh prompt on the Pub/Sub and Tail anchors when entering them.
             self.clear_subscribe_prompt();
+        } else {
+            // A refusal answers the keys just typed there; elsewhere it's stale.
+            self.subscribe_error = None;
         }
         self.sync_panel_focus();
     }

@@ -671,38 +671,32 @@ async fn rabbitmq_tail_anchor_sends_an_exchange_subscribe() {
     }
 }
 
-/// The broker layer's refusal of a `what` over AMQP's 255 bytes, as the actor
-/// reports it.
-fn too_long(what: &str, value: &str) -> String {
-    let e = crate::broker::rabbitmq::short_string(what, value).unwrap_err();
-    format!("{e:#}")
-}
-
 #[tokio::test]
 async fn rabbitmq_tail_anchor_refuses_an_overlong_binding_key_where_it_was_typed() {
     let (mut app, _rx) = test_app();
     let mut cmds = connect_capturing(&mut app);
     sent(&mut cmds);
-    let long = "k".repeat(256);
-    submit_on_tail_anchor(&mut app, &format!("exchange:ex/{long}"));
+    // 255 characters, but 257 bytes.
+    let spec = format!("exchange:ex/{}éé", "k".repeat(253));
+    submit_on_tail_anchor(&mut app, &spec);
     assert!(sent(&mut cmds).is_empty(), "nothing reaches the actor");
     assert!(app.active_conn().unwrap().subs.is_empty(), "no tap tab");
     // The keyboard stays on the anchor, whose prompt fills the footer, so the
-    // anchor says why.
+    // anchor says why, and keeps the spec to fix.
     assert_eq!(app.mode, InputMode::Subscribe);
-    let refusal = "binding key too long (max 255 bytes)";
-    assert_eq!(refusal, too_long("binding key", &long));
-    assert_eq!(app.subscribe_error.as_deref(), Some(refusal));
-    // Editing the prompt again clears it.
-    app.handle_key(ch('x'));
-    assert_eq!(app.subscribe_error, None);
-    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(
+        app.subscribe_error.as_deref(),
+        Some("binding key too long: 257 bytes, max 255")
+    );
+    assert_eq!(app.subscribe_buf, spec);
 
-    // A key that ends on exactly byte 255 with a multibyte char is tapped.
+    // Deleting the last char clears the refusal. The key then ends on exactly
+    // byte 255 with a multibyte char, and is tapped.
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(app.subscribe_error, None);
+    app.handle_key(key(KeyCode::Enter));
     let max = format!("{}é", "k".repeat(253));
     assert_eq!(max.len(), 255);
-    type_text(&mut app, &format!("exchange:ex/{max}"));
-    app.handle_key(key(KeyCode::Enter));
     match sent(&mut cmds).as_slice() {
         [ConnCommand::Subscribe { spec, .. }] => assert_eq!(*spec, exchange("ex", &max)),
         other => panic!("expected a Subscribe, got {other:?}"),
@@ -711,61 +705,56 @@ async fn rabbitmq_tail_anchor_refuses_an_overlong_binding_key_where_it_was_typed
 }
 
 #[tokio::test]
-async fn rabbitmq_a_refusal_at_the_tail_anchor_clears_when_the_focus_moves() {
+async fn rabbitmq_a_refusal_at_the_tail_anchor_clears_when_the_focus_leaves_it() {
     let (mut app, _rx) = test_app();
     let _cmds = connect_capturing(&mut app);
     submit_on_tail_anchor(&mut app, &format!("exchange:{}", "x".repeat(256)));
     assert_eq!(
         app.subscribe_error.as_deref(),
-        Some("exchange name too long (max 255 bytes)")
+        Some("exchange name too long: 256 bytes, max 255")
     );
     app.handle_key(ctrl_key(KeyCode::Up));
-    app.handle_key(key(KeyCode::Tab));
-    assert_eq!(app.mode, InputMode::Subscribe, "back on the anchor");
-    assert_eq!(app.subscribe_error, None, "a fresh prompt");
+    assert_ne!(app.active_conn().unwrap().focus, PaneFocus::Bottom);
+    assert_eq!(
+        app.subscribe_error, None,
+        "not left under the unfocused anchor"
+    );
 }
 
 #[tokio::test]
-async fn rabbitmq_a_tap_on_an_overlong_listed_exchange_ends_with_why() {
-    // RabbitMQ 3.13's management API creates exchanges past AMQP's limit.
-    let (mut app, _rx, mut cmds) = listed_app();
-    let long = "x".repeat(256);
-    let mut list = mock::sample_destinations();
-    list.items.push(mock::exchange_row(
-        &long,
-        crate::broker::ExchangeType::Topic,
-    ));
-    listed(&mut app, Ok(list));
-    select_row(&mut app, &long);
-    app.handle_key(ch('t'));
-    let sub_id = match sent(&mut cmds).as_slice() {
-        [ConnCommand::Subscribe { sub_id, spec, .. }] => {
-            assert_eq!(*spec, exchange(&long, "#"));
-            *sub_id
-        }
-        other => panic!("expected a Subscribe, got {other:?}"),
-    };
-    let reason = too_long("exchange name", &long);
-    app.handle_event(AppEvent::SubscriptionEnded {
-        id: ConnId(1),
-        sub_id,
-        reason: Some(reason.clone()),
-    });
+async fn a_refusal_at_one_connections_tail_anchor_doesnt_follow_to_the_next() {
+    let (mut app, _rx) = test_app();
+    let _cmds = connect_capturing(&mut app);
+    submit_on_tail_anchor(&mut app, &format!("exchange:ex/{}", "k".repeat(256)));
+    assert!(app.subscribe_error.is_some());
+    // Esc leaves the browser without moving the pane focus.
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.screen, Screen::Home);
+    connect_amqp(&mut app, 2, "amqp").await;
+    assert_eq!(app.active_conn().unwrap().name, "amqp");
     assert_eq!(
-        app.active_conn().unwrap().subs[0].state,
-        SubState::Ended(Some("exchange name too long (max 255 bytes)".to_string()))
+        app.subscribe_error, None,
+        "the AMQP 1.0 anchor says nothing"
     );
+    assert_eq!(app.subscribe_buf, "", "nor shows the refused spec");
+}
 
-    // The connection carries on: another exchange taps.
-    app.handle_key(ctrl_key(KeyCode::Up));
-    select_row(&mut app, "keyhole.demo");
-    app.handle_key(ch('t'));
-    match sent(&mut cmds).as_slice() {
-        [ConnCommand::Subscribe { spec, .. }] => {
-            assert_eq!(*spec, exchange("keyhole.demo", "#"))
-        }
-        other => panic!("expected a Subscribe, got {other:?}"),
-    }
+#[tokio::test]
+async fn a_refusal_at_the_tail_anchor_goes_with_its_dropped_connection() {
+    let (mut app, _rx) = test_app();
+    connect_amqp(&mut app, 2, "amqp").await;
+    let _cmds = connect_capturing(&mut app);
+    submit_on_tail_anchor(&mut app, &format!("exchange:ex/{}", "k".repeat(256)));
+    assert!(app.subscribe_error.is_some());
+    // The browser moves on to the AMQP 1.0 connection.
+    app.handle_event(AppEvent::Disconnected {
+        id: ConnId(1),
+        reason: "gone".into(),
+    });
+    assert_eq!(app.screen, Screen::Browser);
+    assert_eq!(app.active_conn().unwrap().name, "amqp");
+    assert_eq!(app.subscribe_error, None);
+    assert_eq!(app.subscribe_buf, "");
 }
 
 #[tokio::test]
@@ -1083,51 +1072,173 @@ async fn rabbitmq_a_failed_publish_fits_the_footer_and_keeps_the_detail() {
     );
 }
 
+// -- refusals from the broker layer ---------------------------------------
+
+/// A RabbitMQ connection that never dials, behind an actor that reports it
+/// connected and lists `list`. Its checks on names and keys come before any
+/// network, so their refusals reach the app as a connected one's would.
+struct Undialled {
+    conn: crate::broker::rabbitmq::RabbitmqConnection,
+    list: DestinationList,
+}
+
+#[async_trait::async_trait]
+impl crate::broker::BrokerConnection for Undialled {
+    async fn connect(&mut self) -> anyhow::Result<Capabilities> {
+        Ok(Capabilities::rabbitmq())
+    }
+
+    async fn ping(&mut self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn list_destinations(&mut self, _reprobe: bool) -> anyhow::Result<DestinationList> {
+        Ok(self.list.clone())
+    }
+
+    async fn subscribe(
+        &mut self,
+        spec: SubSpec,
+    ) -> anyhow::Result<crate::broker::BrokerEventStream> {
+        self.conn.subscribe(spec).await
+    }
+
+    async fn publish(&mut self, req: crate::broker::PublishReq) -> anyhow::Result<()> {
+        self.conn.publish(req).await
+    }
+}
+
+/// An exchange name past AMQP's limit, which RabbitMQ 3.13's management API
+/// creates and lists.
+fn overlong_exchange() -> String {
+    "x".repeat(256)
+}
+
+/// The app on an [`Undialled`] connection, showing the sample listing plus
+/// [`overlong_exchange`].
+async fn undialled_app() -> (App, Receiver<AppEvent>) {
+    let (mut app, mut rx) = test_app();
+    let profile = crate::config::RabbitmqProfile {
+        name: "rabbit".into(),
+        host: "rabbit.invalid".into(),
+        port: 5672,
+        vhost: "/".into(),
+        username: None,
+        password: None,
+        tls: false,
+        management_url: None,
+        management_username: None,
+        management_password: None,
+    };
+    let mut list = mock::sample_destinations();
+    list.items.push(mock::exchange_row(
+        &overlong_exchange(),
+        crate::broker::ExchangeType::Topic,
+    ));
+    let conn = Undialled {
+        conn: crate::broker::rabbitmq::RabbitmqConnection::new(
+            profile,
+            None,
+            None,
+            4096,
+            Default::default(),
+        ),
+        list,
+    };
+    let handle = mock::spawn_conn(1, "rabbit", Box::new(conn), app.events.clone()).await;
+    app.handle_event(AppEvent::Connected { handle });
+    let listing = reply(&mut rx).await;
+    assert!(matches!(listing, AppEvent::DestinationsListed { .. }));
+    app.handle_event(listing);
+    (app, rx)
+}
+
+/// The actor's next event.
+async fn reply(rx: &mut Receiver<AppEvent>) -> AppEvent {
+    tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("the actor replies")
+        .expect("an event")
+}
+
 #[tokio::test]
-async fn rabbitmq_an_overlong_routing_key_fails_in_the_footer_and_publishing_carries_on() {
-    let (mut app, _rx, mut cmds) = listed_app();
+async fn rabbitmq_a_listed_exchange_past_the_limit_is_refused_by_the_broker_layer() {
+    let (mut app, mut rx) = undialled_app().await;
+    let long = overlong_exchange();
+    let refusal = "exchange name too long: 256 bytes, max 255";
+
+    // `t` sends the tap; the broker layer refuses it and the tab ends saying
+    // why.
+    select_row(&mut app, &long);
+    app.handle_key(ch('t'));
+    let ended = reply(&mut rx).await;
+    assert!(
+        matches!(ended, AppEvent::SubscriptionEnded { .. }),
+        "{ended:?}"
+    );
+    app.handle_event(ended);
+    assert_eq!(
+        app.active_conn().unwrap().subs[0].state,
+        SubState::Ended(Some(refusal.to_string()))
+    );
+
+    // The actor is still there: a publish to the exchange is refused in the
+    // footer.
+    app.handle_key(ctrl_key(KeyCode::Up));
+    select_row(&mut app, &long);
+    app.handle_key(ch('P'));
+    type_text(&mut app, "k");
+    app.handle_key(key(KeyCode::Enter));
+    app.handle_key(key(KeyCode::Enter));
+    let published = reply(&mut rx).await;
+    app.handle_event(published);
+    let status = app.status.as_ref().unwrap();
+    assert!(status.is_error);
+    assert_eq!(status.message, refusal);
+}
+
+#[tokio::test]
+async fn rabbitmq_an_overlong_routing_key_is_refused_by_the_broker_layer_in_the_footer() {
+    let (mut app, mut rx) = undialled_app().await;
     select_row(&mut app, "keyhole.demo");
     app.handle_key(ch('P'));
-    let long = "k".repeat(256);
+    let long = "k".repeat(300);
     type_text(&mut app, &long);
     app.handle_key(key(KeyCode::Enter));
     type_text(&mut app, "body");
     app.handle_key(key(KeyCode::Enter));
-    // The broker layer checks the key before lapin sees it.
-    assert_eq!(
-        publishes(&sent(&mut cmds)),
-        [(
-            exchange("keyhole.demo", "#"),
-            long.clone(),
-            "body".to_string()
-        )]
-    );
-    let reason = too_long("routing key", &long);
-    published(&mut app, "exchange:keyhole.demo", Err(reason.clone()));
+    let published = reply(&mut rx).await;
+    app.handle_event(published);
+    let refusal = "routing key too long: 300 bytes, max 255";
     let status = app.status.as_ref().unwrap();
     assert!(status.is_error);
-    assert_eq!(
-        status.message, "routing key too long (max 255 bytes)",
-        "the whole reason fits the footer"
-    );
+    assert_eq!(status.message, refusal, "the whole reason fits the footer");
     assert_eq!(
         app.active_conn().unwrap().publish.last,
-        Some(("exchange:keyhole.demo".to_string(), Err(reason)))
+        Some((
+            "exchange:keyhole.demo".to_string(),
+            Err(refusal.to_string())
+        ))
     );
 
-    // The key prompt offers the key again, to shorten: at 255 bytes, ending
-    // in a multibyte char, it goes out.
+    // The key prompt offers the key again, to shorten. At 255 bytes, ending in
+    // a multibyte char, it passes the check, and fails further on only
+    // because this connection never dialled.
     app.handle_key(ch('P'));
     assert_eq!(app.publish_buf, long);
-    for _ in 0..3 {
+    for _ in 0..47 {
         app.handle_key(key(KeyCode::Backspace));
     }
     type_text(&mut app, "é");
     assert_eq!(app.publish_buf.len(), 255);
     app.handle_key(key(KeyCode::Enter));
     app.handle_key(key(KeyCode::Enter));
-    let sent_key = publishes(&sent(&mut cmds))[0].1.clone();
-    assert_eq!(sent_key, format!("{}é", "k".repeat(253)));
+    let published = reply(&mut rx).await;
+    app.handle_event(published);
+    assert_eq!(
+        app.status.as_ref().unwrap().message,
+        "connection is not established"
+    );
 }
 
 // -- stats ------------------------------------------------------------------

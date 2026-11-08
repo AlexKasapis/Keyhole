@@ -389,6 +389,7 @@ impl App {
         let Some(idx) = self.connections.iter().position(|c| c.name == name) else {
             return false;
         };
+        let shown = self.active_id();
         self.connections[idx].handle.shutdown();
         self.connections.remove(idx);
         self.active = if self.connections.is_empty() {
@@ -396,6 +397,9 @@ impl App {
         } else {
             Some(0)
         };
+        if self.active_id() != shown {
+            self.clear_subscribe_prompt();
+        }
         if self.connections.is_empty() {
             // A clean, user-initiated close: return to the home screen and read
             // as offline (not the error health a dropped link records).

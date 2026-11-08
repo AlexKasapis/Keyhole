@@ -647,3 +647,8 @@ From Phase 3 on, also check it in the running app: `just dev`, then
   preview, so a 200-message peek of 64 KiB bodies costs ~23 ms a frame; work only as far as the
   preview needs.
 - The Redis key table and the Connections list still cut long names without an ellipsis.
+- A tail tab's label isn't cut in the tab strip (`tab_spans` in `src/ui/views.rs`), so a long
+  exchange name, such as one a refused tap ended on, pushes the other tabs off.
+- A panic inside a broker call kills the connection actor silently: the header still says
+  connected, every later command is dropped, and the panic hook tears down the terminal while
+  the app keeps running.

@@ -40,8 +40,9 @@ pub(crate) fn next_conn_seq() -> u64 {
 }
 
 /// Build `amqp[s]://[user[:pass]@]host:port` with percent-encoded credentials
-/// and an IPv6-bracketed host. Shared by the AMQP 1.0 and RabbitMQ brokers
-/// (RabbitMQ appends a `/vhost` segment); `tls` selects the `amqps://` scheme.
+/// and an IPv6-bracketed host, for the AMQP 1.0 broker; `tls` selects the
+/// `amqps://` scheme. RabbitMQ hands lapin its URI struct instead (see
+/// [`rabbitmq::amqp_uri`]).
 pub(crate) fn amqp_base_url(
     tls: bool,
     host: &str,
@@ -1340,16 +1341,16 @@ mod tests {
         let long = "x".repeat(256);
         assert_eq!(
             error(&format!("exchange:{long}")),
-            "exchange name too long (max 255 bytes)"
+            "exchange name too long: 256 bytes, max 255"
         );
         assert_eq!(
             error(&format!("exchange:ex/{long}")),
-            "binding key too long (max 255 bytes)"
+            "binding key too long: 256 bytes, max 255"
         );
         // Bytes count, not characters: 128 two-byte chars are 256 bytes.
         assert_eq!(
             error(&format!("exchange:ex/{}", "é".repeat(128))),
-            "binding key too long (max 255 bytes)"
+            "binding key too long: 256 bytes, max 255"
         );
         // Exactly the cap is allowed.
         let max = "x".repeat(255);

@@ -120,7 +120,7 @@ pub struct App {
     pub(crate) subscribe_buf: String,
     /// Why the Tail anchor refused the last spec submitted on it, shown under
     /// its prompt (the footer shows the prompt instead of a status) until the
-    /// next edit or focus move.
+    /// next edit, focus move or connection switch.
     pub(crate) subscribe_error: Option<String>,
     /// The text being typed in the publish prompts: the routing key
     /// ([`InputMode::PublishKey`]), then the message body
@@ -331,11 +331,14 @@ impl App {
     }
 
     /// Reconcile a freshly-entered Browser: start with the keys pane (AMQP body)
-    /// focused and reconcile the panel mode + focus-scoped feeds. A no-op off the
-    /// Browser. Called when connecting, or when Enter re-opens an already-live
-    /// connection's browser.
+    /// focused, an empty anchor prompt, and reconcile the panel mode +
+    /// focus-scoped feeds. A no-op off the Browser. Called when connecting, or
+    /// when Enter re-opens an already-live connection's browser.
     fn enter_browser(&mut self) {
         if self.screen == Screen::Browser {
+            // The prompt is shared, so what was typed under another
+            // connection's anchor doesn't follow.
+            self.clear_subscribe_prompt();
             if let Some(conn) = self.active_conn_mut() {
                 conn.focus = PaneFocus::Keys;
             }

@@ -183,6 +183,7 @@ impl App {
     pub(super) fn on_disconnected(&mut self, id: ConnId, reason: String) {
         if let Some(idx) = self.connections.iter().position(|c| c.id == id) {
             let name = self.connections[idx].name.clone();
+            let shown = self.active_id();
             self.connections[idx].handle.shutdown();
             self.connections.remove(idx);
             self.active = if self.connections.is_empty() {
@@ -190,6 +191,9 @@ impl App {
             } else {
                 Some(0)
             };
+            if self.active_id() != shown {
+                self.clear_subscribe_prompt();
+            }
             if self.connections.is_empty() {
                 self.screen = Screen::Home;
                 // No connection left: record the error health. The footer status
