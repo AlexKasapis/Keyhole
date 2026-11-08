@@ -3255,10 +3255,11 @@ mod integration_tests {
         // In a URL the `/…` became a 307-byte vhost, which lapin panicked on.
         let mut profile = test_profile();
         profile.host = format!("127.0.0.1/{}", "v".repeat(300));
+        // The name lookup fails at once, well inside the time allowed.
         let result = try_connect(profile).await;
         assert!(
-            !matches!(result, Some(Ok(_))),
-            "connected somewhere: {result:?}"
+            matches!(result, Some(Err(_))),
+            "a prompt connect error: {result:?}"
         );
     }
 
