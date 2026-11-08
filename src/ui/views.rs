@@ -1301,11 +1301,17 @@ fn render_peek_error(frame: &mut Frame, theme: &Theme, area: Rect, name: &str, e
     frame.render_widget(para, area);
 }
 
+/// The fewest columns a long queue name keeps in the message list's title
+/// before its warning note is cut.
+const PEEK_TITLE_NAME_MIN: usize = 12;
+
 /// The message-list pane title: destination plus a message count, a `+` when the
 /// peek was truncated at the limit, or a `shown/total match "filter"` summary
 /// while a filter is active; then the warning `note`, if any, styled apart (so
 /// returned on its own). To fit a pane `width` columns wide, a long name gives
-/// way first, down to its ellipsis, and only then is the note cut.
+/// way first, down to [`PEEK_TITLE_NAME_MIN`] columns (a shorter name stays
+/// whole), and then the note is cut. A pane too narrow for that much name
+/// beside the count cuts the name down to its ellipsis.
 fn peek_list_title(
     name: &str,
     total: usize,
@@ -1327,7 +1333,9 @@ fn peek_list_title(
     let inner = usize::from(width).saturating_sub(2);
     let fixed = 2 + display_width(&count);
     let note_w = note.as_deref().map_or(0, display_width);
-    let name = truncate(name, inner.saturating_sub(fixed + note_w).max(1));
+    let floor = display_width(name).min(PEEK_TITLE_NAME_MIN);
+    let floor = if fixed + floor <= inner { floor } else { 1 };
+    let name = truncate(name, inner.saturating_sub(fixed + note_w).max(floor));
     let note = note.map(|n| truncate(&n, inner.saturating_sub(fixed + display_width(&name))));
     (format!(" {name}{count} "), note)
 }
@@ -3888,26 +3896,35 @@ mod tests {
     fn a_peek_title_cuts_the_name_before_the_warning() {
         let long = "orders.priority.eu-west-1.dead-letter";
         let note = "each peek counts toward delivery-limit 5 ";
-        // Room for all of the warning: the name gives way.
-        let (title, cut) = peek_list_title(long, 5, 5, "", false, Some(note), 70);
-        assert_eq!(title, " orders.priori… · 5 msgs ");
+        let title = |name, width| peek_list_title(name, 5, 5, "", false, Some(note), width);
+        // Room for all of the warning: the long name gives way.
+        let (head, cut) = title(long, 70);
+        assert_eq!(head, " orders.priori… · 5 msgs ");
         assert_eq!(
             cut.as_deref(),
             Some("· each peek counts toward delivery-limit 5 ")
         );
-        assert_eq!(display_width(&title) + display_width(&cut.unwrap()), 68);
-        // Too little even with the name down to its ellipsis: the warning is
-        // cut too.
-        let (title, cut) = peek_list_title(long, 5, 5, "", false, Some(note), 45);
-        assert_eq!(title, " … · 5 msgs ");
-        assert_eq!(cut.as_deref(), Some("· each peek counts toward deli…"));
-        // A short name and the whole warning fit side by side.
-        let (title, cut) = peek_list_title("payments", 5, 5, "", false, Some(note), 70);
-        assert_eq!(title, " payments · 5 msgs ");
+        assert_eq!(display_width(&head) + display_width(&cut.unwrap()), 68);
+        // Less room: the name keeps 12 columns and the warning is cut.
+        let (head, cut) = title(long, 45);
+        assert_eq!(head, " orders.prio… · 5 msgs ");
+        assert_eq!(cut.as_deref(), Some("· each peek counts …"));
+        assert_eq!(display_width(&head) + display_width(&cut.unwrap()), 43);
+        // A short name stays whole, beside all of the warning or a cut one.
+        let (head, cut) = title("payments", 70);
+        assert_eq!(head, " payments · 5 msgs ");
         assert_eq!(
             cut.as_deref(),
             Some("· each peek counts toward delivery-limit 5 ")
         );
+        let (head, cut) = title("payments", 45);
+        assert_eq!(head, " payments · 5 msgs ");
+        assert_eq!(cut.as_deref(), Some("· each peek counts towa…"));
+        // Too narrow for 12 columns of name beside the count: the name goes
+        // down to its ellipsis.
+        let (head, cut) = title(long, 20);
+        assert_eq!(head, " … · 5 msgs ");
+        assert_eq!(cut.as_deref(), Some("· eac…"));
     }
 
     #[test]

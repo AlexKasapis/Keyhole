@@ -3321,6 +3321,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_peeked_queues_short_name_stays_whole_beside_the_warning() {
+        // At 90 columns the message pane is 45 wide: payments keeps its whole
+        // name, and the delivery-limit warning is cut instead.
+        let mut app = rabbitmq_peeked_with_limit("payments", 3, Ok(vec![broker_event("m")])).await;
+        let text = render_lines(&mut app, 90, 24);
+        assert!(
+            text.contains("┌ payments · 1 msgs · each peek counts towa…┐"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_rabbitmq_limit_below_one_warns_that_each_peek_drops_what_it_reads() {
         // On 3.x a limit of 0 or less drops or dead-letters a message on its
         // first requeue, so a browse peek is as good as destructive.
