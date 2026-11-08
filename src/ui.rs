@@ -3316,7 +3316,7 @@ mod tests {
         // warning, before or after its peek.
         let mut app = rabbitmq_peeked("orders", Ok(vec![broker_event("m")])).await;
         let text = render_lines(&mut app, 200, 30);
-        assert!(text.contains("orders · 1 msgs"), "{text}");
+        assert!(text.contains(" orders · 1 msg "), "{text}");
         assert!(!text.contains("delivery-limit"), "{text}");
     }
 
@@ -3327,7 +3327,7 @@ mod tests {
         let mut app = rabbitmq_peeked_with_limit("payments", 3, Ok(vec![broker_event("m")])).await;
         let text = render_lines(&mut app, 90, 24);
         assert!(
-            text.contains("┌ payments · 1 msgs · each peek counts towa…┐"),
+            text.contains("┌ payments · 1 msg · each peek counts towar…┐"),
             "{text}"
         );
     }
@@ -3353,7 +3353,7 @@ mod tests {
                 rabbitmq_peeked_with_limit("payments", limit, Ok(vec![broker_event("m")])).await;
             let text = render_lines(&mut app, 200, 30);
             assert!(
-                text.contains("payments · 1 msgs · peeking drops or dead-letters what it reads"),
+                text.contains("payments · 1 msg · peeking drops or dead-letters what it reads"),
                 "{text}"
             );
         }

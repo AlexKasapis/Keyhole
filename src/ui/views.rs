@@ -1304,14 +1304,18 @@ fn render_peek_error(frame: &mut Frame, theme: &Theme, area: Rect, name: &str, e
 /// The fewest columns a long queue name keeps in the message list's title
 /// before its warning note is cut.
 const PEEK_TITLE_NAME_MIN: usize = 12;
+/// The fewest columns the message list's title gives its warning note; with
+/// less room it leaves the note out rather than show a stub of it.
+const PEEK_TITLE_NOTE_MIN: usize = 4;
 
 /// The message-list pane title: destination plus a message count, a `+` when the
 /// peek was truncated at the limit, or a `shown/total match "filter"` summary
 /// while a filter is active; then the warning `note`, if any, styled apart (so
-/// returned on its own). To fit a pane `width` columns wide, a long name gives
-/// way first, down to [`PEEK_TITLE_NAME_MIN`] columns (a shorter name stays
-/// whole), and then the note is cut. A pane too narrow for that much name
-/// beside the count cuts the name down to its ellipsis.
+/// returned on its own). The count reads `1 msg` for a single message. To fit
+/// a pane `width` columns wide, a long name gives way first, down to
+/// [`PEEK_TITLE_NAME_MIN`] columns (a shorter name stays whole), and then the
+/// note is cut, or left out below [`PEEK_TITLE_NOTE_MIN`] columns. A pane too
+/// narrow for that much name beside the count gives the name what is left.
 fn peek_list_title(
     name: &str,
     total: usize,
@@ -1322,8 +1326,11 @@ fn peek_list_title(
     width: u16,
 ) -> (String, Option<String>) {
     let count = if filter.is_empty() {
-        let plus = if limit_hit { "+" } else { "" };
-        format!(" · {total}{plus} msgs")
+        match (total, limit_hit) {
+            (1, false) => " · 1 msg".to_string(),
+            (_, false) => format!(" · {total} msgs"),
+            (_, true) => format!(" · {total}+ msgs"),
+        }
     } else {
         format!(" · {shown}/{total} match \"{filter}\"")
     };
@@ -1333,10 +1340,15 @@ fn peek_list_title(
     let inner = usize::from(width).saturating_sub(2);
     let fixed = 2 + display_width(&count);
     let note_w = note.as_deref().map_or(0, display_width);
-    let floor = display_width(name).min(PEEK_TITLE_NAME_MIN);
-    let floor = if fixed + floor <= inner { floor } else { 1 };
+    let floor = display_width(name)
+        .min(PEEK_TITLE_NAME_MIN)
+        .min(inner.saturating_sub(fixed))
+        .max(1);
     let name = truncate(name, inner.saturating_sub(fixed + note_w).max(floor));
-    let note = note.map(|n| truncate(&n, inner.saturating_sub(fixed + display_width(&name))));
+    let room = inner.saturating_sub(fixed + display_width(&name));
+    let note = note
+        .filter(|_| room >= PEEK_TITLE_NOTE_MIN)
+        .map(|n| truncate(&n, room));
     (format!(" {name}{count} "), note)
 }
 
@@ -3888,6 +3900,15 @@ mod tests {
             peek_list_title("orders", 12, 12, "", true, None, 30).0,
             " orders · 12+ msgs "
         );
+        // One message is singular, unless more may be left behind the limit.
+        assert_eq!(
+            peek_list_title("orders", 1, 1, "", false, None, 30).0,
+            " orders · 1 msg "
+        );
+        assert_eq!(
+            peek_list_title("orders", 1, 1, "", true, None, 30).0,
+            " orders · 1+ msgs "
+        );
         assert_eq!(pane_title("orders", "", 10), " orders ");
         assert_eq!(pane_title("orders.audit", "", 10), " order… ");
     }
@@ -3920,11 +3941,11 @@ mod tests {
         let (head, cut) = title("payments", 45);
         assert_eq!(head, " payments · 5 msgs ");
         assert_eq!(cut.as_deref(), Some("· each peek counts towa…"));
-        // Too narrow for 12 columns of name beside the count: the name goes
-        // down to its ellipsis.
-        let (head, cut) = title(long, 20);
-        assert_eq!(head, " … · 5 msgs ");
-        assert_eq!(cut.as_deref(), Some("· eac…"));
+        // Too narrow for 12 columns of name beside the count: the name gets
+        // what's left, and a warning with no room to be read is left out.
+        assert_eq!(title("payments", 20), (" paymen… · 5 msgs ".into(), None));
+        assert_eq!(title(long, 20), (" orders… · 5 msgs ".into(), None));
+        assert_eq!(title("payments", 22), (" payments · 5 msgs ".into(), None));
     }
 
     #[test]
