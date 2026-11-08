@@ -24,8 +24,10 @@ use super::fixtures;
 use crate::config::RabbitmqProfile;
 
 /// Build an `amqp[s]://[user:pass@]host:port/vhost` URL (vhost percent-encoded;
-/// the default `/` becomes `%2F`), reusing the app's base-URL builder.
-fn url(profile: &RabbitmqProfile, password: Option<&str>) -> String {
+/// the default `/` becomes `%2F`), reusing the app's base-URL builder. Fails on
+/// a vhost over AMQP's 255 bytes, which lapin would panic on.
+fn url(profile: &RabbitmqProfile, password: Option<&str>) -> anyhow::Result<String> {
+    crate::broker::rabbitmq::short_string("vhost", &profile.vhost)?;
     let mut url = crate::broker::amqp_base_url(
         profile.tls,
         &profile.host,
@@ -35,7 +37,7 @@ fn url(profile: &RabbitmqProfile, password: Option<&str>) -> String {
     );
     url.push('/');
     url.push_str(&utf8_percent_encode(&profile.vhost, NON_ALPHANUMERIC).to_string());
-    url
+    Ok(url)
 }
 
 /// Open a connection + channel and declare the demo topic exchange (durable, so
@@ -45,7 +47,7 @@ async fn open(
     profile: &RabbitmqProfile,
     password: Option<&str>,
 ) -> anyhow::Result<(Connection, Channel)> {
-    let conn = Connection::connect(&url(profile, password), ConnectionProperties::default())
+    let conn = Connection::connect(&url(profile, password)?, ConnectionProperties::default())
         .await
         .context("connecting to RabbitMQ")?;
     let mut channel = conn.create_channel().await.context("opening channel")?;
@@ -224,7 +226,7 @@ mod url_tests {
 
     #[test]
     fn default_vhost_is_percent_encoded() {
-        assert_eq!(url(&profile(), None), "amqp://localhost:5672/%2F");
+        assert_eq!(url(&profile(), None).unwrap(), "amqp://localhost:5672/%2F");
     }
 
     #[test]
@@ -233,7 +235,25 @@ mod url_tests {
             vhost: "prod".into(),
             ..profile()
         };
-        assert_eq!(url(&p, None), "amqp://localhost:5672/prod");
+        assert_eq!(url(&p, None).unwrap(), "amqp://localhost:5672/prod");
+    }
+
+    #[tokio::test]
+    async fn an_overlong_vhost_is_an_error_not_a_panic() {
+        let p = RabbitmqProfile {
+            vhost: "v".repeat(256),
+            ..profile()
+        };
+        let expected = "vhost too long (max 255 bytes)";
+        assert_eq!(url(&p, None).unwrap_err().to_string(), expected);
+        // Refused before dialling, which would fail with another error.
+        let err = open(&p, None).await.unwrap_err();
+        assert_eq!(format!("{err:#}"), expected);
+        let max = RabbitmqProfile {
+            vhost: "v".repeat(255),
+            ..profile()
+        };
+        assert!(url(&max, None).is_ok());
     }
 
     #[test]
@@ -242,7 +262,10 @@ mod url_tests {
             username: Some("u".into()),
             ..profile()
         };
-        assert_eq!(url(&p, Some("p@ss")), "amqp://u:p%40ss@localhost:5672/%2F");
+        assert_eq!(
+            url(&p, Some("p@ss")).unwrap(),
+            "amqp://u:p%40ss@localhost:5672/%2F"
+        );
     }
 
     #[test]
@@ -251,7 +274,7 @@ mod url_tests {
             tls: true,
             ..profile()
         };
-        assert!(url(&p, None).starts_with("amqps://"));
+        assert!(url(&p, None).unwrap().starts_with("amqps://"));
     }
 }
 

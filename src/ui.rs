@@ -2272,6 +2272,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_tail_anchor_shows_why_it_refused_the_last_spec() {
+        let (mut app, _rx) = rabbitmq_browser(Some(Ok(mock::sample_destinations()))).await;
+        app.connections[0].focus = PaneFocus::Bottom;
+        app.mode = InputMode::Subscribe;
+        let refusal = "binding key too long (max 255 bytes)";
+        assert!(!render_lines(&mut app, 160, 30).contains(refusal));
+
+        app.subscribe_error = Some(refusal.into());
+        let text = render_lines(&mut app, 160, 30);
+        let lines: Vec<&str> = text.lines().collect();
+        let prompt = lines
+            .iter()
+            .position(|l| l.contains("exchange:name or exchange:name/binding-key:"))
+            .expect("the Tail anchor's prompt");
+        assert!(
+            lines[prompt + 1].contains(refusal),
+            "under the prompt:\n{text}"
+        );
+        assert!(
+            lines[prompt + 2..]
+                .iter()
+                .any(|l| l.contains("Enter taps it")),
+            "the hint stays:\n{text}"
+        );
+    }
+
+    #[tokio::test]
     async fn snapshot_browser_rabbitmq_narrow() {
         // A narrow terminal drops the stat columns from the right, keeping Name,
         // Kind and Msgs; the selected topic exchange's details say how `t` taps

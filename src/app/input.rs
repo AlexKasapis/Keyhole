@@ -611,7 +611,7 @@ impl App {
         }
         if focus == PaneFocus::Bottom {
             // A fresh prompt on the Pub/Sub and Tail anchors when entering them.
-            self.subscribe_buf.clear();
+            self.clear_subscribe_prompt();
         }
         self.sync_panel_focus();
     }
@@ -850,8 +850,12 @@ impl App {
     pub(super) fn handle_subscribe_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Enter => self.submit_subscribe(),
-            KeyCode::Char(c) => self.subscribe_buf.push(c),
+            KeyCode::Char(c) => {
+                self.subscribe_error = None;
+                self.subscribe_buf.push(c);
+            }
             KeyCode::Backspace => {
+                self.subscribe_error = None;
                 self.subscribe_buf.pop();
             }
             _ => {}

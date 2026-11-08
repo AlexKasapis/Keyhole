@@ -31,11 +31,6 @@ use futures_util::Stream;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use time::OffsetDateTime;
 
-/// The AMQP short-string length cap (one length byte), shared by the AMQP 1.0
-/// and RabbitMQ brokers. Names longer than this make the AMQP client panic on
-/// conversion, so exchange specs are validated against it in [`SubSpec::parse`].
-pub(crate) const AMQP_SHORTSTR_MAX: usize = 255;
-
 /// A process-wide, monotonically increasing sequence for minting unique
 /// connection identifiers (AMQP container-ids, RabbitMQ connection names), so
 /// every broker connection is distinct even against a single broker.
@@ -701,15 +696,10 @@ impl SubSpec {
                 } else {
                     binding_key
                 };
-                // AMQP short-strings cap at 255 bytes; reject longer names/keys
-                // here so the AMQP client never panics converting them (its
-                // `ShortString::from` calls `.expect()` on the length).
-                if exchange.len() > AMQP_SHORTSTR_MAX {
-                    anyhow::bail!("exchange name exceeds {AMQP_SHORTSTR_MAX} bytes");
-                }
-                if binding_key.len() > AMQP_SHORTSTR_MAX {
-                    anyhow::bail!("binding key exceeds {AMQP_SHORTSTR_MAX} bytes");
-                }
+                // AMQP short strings cap at 255 bytes. Refuse a longer name or
+                // key here, with the error the tap itself would give.
+                rabbitmq::short_string("exchange name", exchange)?;
+                rabbitmq::short_string("binding key", binding_key)?;
                 Ok(SubSpec::Exchange {
                     exchange: exchange.to_string(),
                     binding_key: binding_key.to_string(),
@@ -1346,12 +1336,25 @@ mod tests {
     fn rejects_overlong_exchange_name_or_binding_key() {
         // Over the 255-byte AMQP short-string cap → rejected up front (so the
         // AMQP client never panics converting it).
-        let long = "x".repeat(AMQP_SHORTSTR_MAX + 1);
-        assert!(SubSpec::parse(&format!("exchange:{long}"), 0).is_err());
-        assert!(SubSpec::parse(&format!("exchange:ex/{long}"), 0).is_err());
+        let error = |spec: &str| SubSpec::parse(spec, 0).unwrap_err().to_string();
+        let long = "x".repeat(256);
+        assert_eq!(
+            error(&format!("exchange:{long}")),
+            "exchange name too long (max 255 bytes)"
+        );
+        assert_eq!(
+            error(&format!("exchange:ex/{long}")),
+            "binding key too long (max 255 bytes)"
+        );
+        // Bytes count, not characters: 128 two-byte chars are 256 bytes.
+        assert_eq!(
+            error(&format!("exchange:ex/{}", "é".repeat(128))),
+            "binding key too long (max 255 bytes)"
+        );
         // Exactly the cap is allowed.
-        let max = "x".repeat(AMQP_SHORTSTR_MAX);
+        let max = "x".repeat(255);
         assert!(SubSpec::parse(&format!("exchange:{max}"), 0).is_ok());
+        assert!(SubSpec::parse(&format!("exchange:ex/{max}"), 0).is_ok());
     }
 
     #[test]

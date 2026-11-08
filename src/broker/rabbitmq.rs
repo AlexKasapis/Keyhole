@@ -55,7 +55,7 @@ use lapin::options::{
     BasicConsumeOptions, BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions,
     QueueBindOptions, QueueDeclareOptions,
 };
-use lapin::types::FieldTable;
+use lapin::types::{FieldTable, ShortString, MAX_SHORT_STRING_LENGTH};
 use lapin::{
     BasicProperties, Channel, Confirmation, Connection, ConnectionProperties, Consumer,
     ExchangeKind,
@@ -86,6 +86,15 @@ const PUBLISH_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// AMQP 0.9.1's `delivery_mode` for a persistent message.
 const PERSISTENT: u8 = 2;
+
+/// `value` as an AMQP short string, or an error naming `what` it is (e.g.
+/// "routing key") and the 255-byte limit. lapin's `From<&str>` panics past
+/// the limit, so every name, key or vhost from the user, the config or the
+/// broker reaches lapin through here.
+pub(crate) fn short_string(what: &str, value: &str) -> anyhow::Result<ShortString> {
+    ShortString::try_new(value)
+        .map_err(|_| anyhow::anyhow!("{what} too long (max {MAX_SHORT_STRING_LENGTH} bytes)"))
+}
 
 /// A live (or not-yet-connected) RabbitMQ (AMQP 0.9.1) connection.
 pub struct RabbitmqConnection {
@@ -156,8 +165,10 @@ impl RabbitmqConnection {
 
     /// Build an `amqp[s]://[user[:pass]@]host:port/vhost` URL with
     /// percent-encoded credentials and vhost. `tls` selects `amqps://` (the
-    /// :5671 TLS listener).
-    fn url(&self) -> String {
+    /// :5671 TLS listener). Fails on a vhost lapin can't connect to.
+    fn url(&self) -> anyhow::Result<String> {
+        // lapin makes the vhost a short string as it connects.
+        short_string("vhost", &self.profile.vhost)?;
         let mut url = super::amqp_base_url(
             self.profile.tls,
             &self.profile.host,
@@ -170,7 +181,7 @@ impl RabbitmqConnection {
         // *empty* vhost, not the default one.
         url.push('/');
         url.push_str(&utf8_percent_encode(&self.profile.vhost, NON_ALPHANUMERIC).to_string());
-        url
+        Ok(url)
     }
 
     /// Connection properties carrying a recognisable name for the broker's
@@ -212,7 +223,7 @@ impl RabbitmqConnection {
 #[async_trait]
 impl BrokerConnection for RabbitmqConnection {
     async fn connect(&mut self) -> anyhow::Result<Capabilities> {
-        let conn = Connection::connect(&self.url(), self.conn_props())
+        let conn = Connection::connect(&self.url()?, self.conn_props())
             .await
             // `.context` keeps the lapin error as the source (so its reply
             // code/text survives, shown via the `{:#}` chain) rather than
@@ -250,7 +261,7 @@ impl BrokerConnection for RabbitmqConnection {
         };
         // Each tail is its own dedicated connection (and thus its own spy queue).
         open_exchange_tap(
-            &self.url(),
+            &self.url()?,
             self.conn_props(),
             &self.tap_queues,
             exchange,
@@ -449,17 +460,24 @@ impl BrokerConnection for RabbitmqConnection {
     /// ignores the flag. The body goes out as it was typed, with no content
     /// type, as AMQP 1.0's publish does.
     async fn publish(&mut self, req: PublishReq) -> anyhow::Result<()> {
-        let (exchange, target) = match &req.spec {
-            SubSpec::Queue(q) => (String::new(), format!("queue `{q}`")),
-            SubSpec::Exchange { exchange, .. } => {
-                (exchange.clone(), format!("exchange `{exchange}`"))
-            }
+        // A queue's routing key is its name.
+        let (exchange, key_name, target) = match &req.spec {
+            SubSpec::Queue(q) => (String::new(), "queue name", format!("queue `{q}`")),
+            SubSpec::Exchange { exchange, .. } => (
+                exchange.clone(),
+                "routing key",
+                format!("exchange `{exchange}`"),
+            ),
             other => anyhow::bail!("{} is not a RabbitMQ destination", other.label()),
         };
+        // Checked before the channel is touched, so an over-long name or key
+        // leaves it as it was.
+        let exchange_name = short_string("exchange name", &exchange)?;
+        let routing_key = short_string(key_name, &req.routing_key)?;
         let channel = self.publish_channel().await?;
         let sent = tokio::time::timeout(
             PUBLISH_CONFIRM_TIMEOUT,
-            publish_confirmed(&channel, &exchange, &req.routing_key, &req.body),
+            publish_confirmed(&channel, exchange_name, routing_key, &req.body),
         )
         .await;
         let confirmation = match sent {
@@ -888,14 +906,14 @@ fn management_client(profile: &RabbitmqProfile, password: Option<String>) -> Mgm
 /// for the broker's answer.
 async fn publish_confirmed(
     channel: &Channel,
-    exchange: &str,
-    routing_key: &str,
+    exchange: ShortString,
+    routing_key: ShortString,
     body: &[u8],
 ) -> lapin::Result<Confirmation> {
     channel
         .basic_publish(
-            exchange.into(),
-            routing_key.into(),
+            exchange,
+            routing_key,
             BasicPublishOptions {
                 mandatory: true,
                 ..Default::default()
@@ -998,6 +1016,11 @@ async fn open_exchange_tap(
     // keeping the lapin error as the source so its AMQP reply code (e.g.
     // NOT_FOUND vs ACCESS_REFUSED) survives in the `{:#}` chain rather than being
     // flattened — and the messages name what we were doing, not a guessed cause.
+    //
+    // Checked before the tap's connection opens, so an over-long name or key
+    // fails the tap with nothing to clean up.
+    let exchange_name = short_string("exchange name", &exchange)?;
+    let binding_key = short_string("binding key", &binding_key)?;
     let connection = Connection::connect(url, props)
         .await
         .context("opening tap connection")?;
@@ -1013,7 +1036,7 @@ async fn open_exchange_tap(
     // exchange's real type.
     channel
         .exchange_declare(
-            exchange.as_str().into(),
+            exchange_name.clone(),
             ExchangeKind::Topic,
             ExchangeDeclareOptions {
                 passive: true,
@@ -1039,19 +1062,20 @@ async fn open_exchange_tap(
         )
         .await
         .context("declaring the spy queue")?;
-    let queue_name = queue.name().as_str().to_owned();
+    // The broker's name for it, already a short string.
+    let queue_name = queue.name().clone();
     // Noted before the bind or consume can fail, so the queue a failed tap
     // leaves behind is hidden too, for the same retention after the failure.
-    let spy_queue = spy_queues.register(&queue_name);
+    let spy_queue = spy_queues.register(queue_name.as_str());
 
     // Bind the spy queue: the broker now routes a COPY of every matching message
     // to it, on top of whatever real queues are bound. Non-destructive by
     // construction — we never consume from a pre-existing queue.
     channel
         .queue_bind(
-            queue_name.as_str().into(),
-            exchange.as_str().into(),
-            binding_key.as_str().into(),
+            queue_name.clone(),
+            exchange_name,
+            binding_key.clone(),
             QueueBindOptions::default(),
             FieldTable::default(),
         )
@@ -1064,7 +1088,8 @@ async fn open_exchange_tap(
     // queue (which we drop on close anyway), so it never touches real queues.
     let consumer = channel
         .basic_consume(
-            queue_name.as_str().into(),
+            queue_name,
+            // Ours, and well under the limit.
             format!("keyhole-{}", super::next_conn_seq())
                 .as_str()
                 .into(),
@@ -1165,7 +1190,7 @@ mod tests {
         // The default vhost "/" must be percent-encoded to %2F (not a bare slash,
         // which would select the empty vhost).
         assert_eq!(
-            conn.url(),
+            conn.url().unwrap(),
             "amqp://user:p%40ss%2Fword@rabbit.example.com:5672/%2F"
         );
         let tls = RabbitmqConnection::new(
@@ -1175,8 +1200,9 @@ mod tests {
             PREVIEW,
             Arc::default(),
         );
-        assert!(tls.url().starts_with("amqps://"));
-        assert!(tls.url().ends_with(":5671/%2F"));
+        let tls = tls.url().unwrap();
+        assert!(tls.starts_with("amqps://"));
+        assert!(tls.ends_with(":5671/%2F"));
     }
 
     #[test]
@@ -1185,7 +1211,122 @@ mod tests {
         p.username = None;
         p.vhost = "my/host".into();
         let conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
-        assert_eq!(conn.url(), "amqp://rabbit.example.com:5672/my%2Fhost");
+        assert_eq!(
+            conn.url().unwrap(),
+            "amqp://rabbit.example.com:5672/my%2Fhost"
+        );
+    }
+
+    #[test]
+    fn short_string_takes_up_to_255_bytes() {
+        let ok = |s: &str| short_string("routing key", s).map(|s| s.as_str().to_owned());
+        let err = |s: &str| short_string("routing key", s).unwrap_err().to_string();
+        let too_long = "routing key too long (max 255 bytes)";
+        assert_eq!(ok("").unwrap(), "");
+        let max = "k".repeat(255);
+        assert_eq!(ok(&max).unwrap(), max);
+        assert_eq!(err(&"k".repeat(256)), too_long);
+
+        // The limit counts bytes, not characters. 128 two-byte chars are
+        // under 255 characters but 256 bytes.
+        let wide = "é".repeat(128);
+        assert!(wide.chars().count() < 255);
+        assert_eq!(err(&wide), too_long);
+        // A multibyte char that ends exactly on byte 255 fits; one more byte
+        // doesn't.
+        for last in ["é", "€", "🦀"] {
+            let fits = format!("{}{last}", "k".repeat(255 - last.len()));
+            assert_eq!(fits.len(), 255);
+            assert_eq!(ok(&fits).unwrap(), fits, "{last}");
+            let over = format!("k{fits}");
+            assert_eq!(err(&over), too_long, "{last}");
+        }
+
+        // The message names what was too long.
+        assert_eq!(
+            short_string("vhost", &max.repeat(2))
+                .unwrap_err()
+                .to_string(),
+            "vhost too long (max 255 bytes)"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_overlong_vhost_fails_the_connect_without_dialling() {
+        let mut p = profile(false);
+        p.vhost = "v".repeat(256);
+        // The host doesn't resolve, so getting this error proves the check
+        // came first.
+        let mut conn = RabbitmqConnection::new(p, None, None, PREVIEW, Arc::default());
+        let err = conn.connect().await.unwrap_err();
+        assert_eq!(format!("{err:#}"), "vhost too long (max 255 bytes)");
+        let err = match conn.subscribe(tap_spec("ex", "#")).await {
+            Ok(_) => panic!("a tap on the vhost can't open"),
+            Err(e) => e,
+        };
+        assert_eq!(format!("{err:#}"), "vhost too long (max 255 bytes)");
+    }
+
+    fn tap_spec(exchange: &str, binding_key: &str) -> SubSpec {
+        SubSpec::Exchange {
+            exchange: exchange.into(),
+            binding_key: binding_key.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overlong_tap_exchange_or_binding_key_fails_before_connecting() {
+        // Not connected, and the host doesn't resolve: the tap fails on the
+        // name or key before it dials.
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
+        let long = "x".repeat(256);
+        for (spec, expected) in [
+            (
+                tap_spec(&long, "#"),
+                "exchange name too long (max 255 bytes)",
+            ),
+            (
+                tap_spec("ex", &long),
+                "binding key too long (max 255 bytes)",
+            ),
+        ] {
+            let err = match conn.subscribe(spec).await {
+                Ok(_) => panic!("{expected}: the tap can't open"),
+                Err(e) => e,
+            };
+            assert_eq!(format!("{err:#}"), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overlong_publish_name_or_key_fails_before_the_channel() {
+        // Not connected, so a check that came after the channel would fail
+        // with "connection is not established" instead.
+        let mut conn = RabbitmqConnection::new(profile(false), None, None, PREVIEW, Arc::default());
+        let long = "x".repeat(256);
+        let publish = |spec: SubSpec, routing_key: &str| PublishReq {
+            spec,
+            routing_key: routing_key.into(),
+            body: b"m".to_vec(),
+        };
+        for (req, expected) in [
+            (
+                publish(tap_spec("ex", "#"), &long),
+                "routing key too long (max 255 bytes)",
+            ),
+            (
+                publish(tap_spec(&long, "#"), "k"),
+                "exchange name too long (max 255 bytes)",
+            ),
+            (
+                publish(SubSpec::Queue(long.clone()), &long),
+                "queue name too long (max 255 bytes)",
+            ),
+        ] {
+            let err = conn.publish(req).await.unwrap_err();
+            assert_eq!(format!("{err:#}"), expected);
+        }
+        assert!(conn.publish_channel.is_none());
     }
 
     #[test]
@@ -2891,6 +3032,56 @@ mod integration_tests {
         );
 
         setup.close(200, "bye".into()).await.ok();
+    }
+
+    #[tokio::test]
+    async fn an_overlong_name_or_key_is_refused_and_the_connection_carries_on() {
+        let exchange = unique("keyhole.it.long");
+        let _cleanup = Cleanup::exchanges(&[&exchange]);
+        declare_topic_exchange(&exchange).await;
+        let tap = |exchange: &str, key: &str| SubSpec::Exchange {
+            exchange: exchange.into(),
+            binding_key: key.into(),
+        };
+
+        let mut conn = connected().await;
+        let long = "k".repeat(256);
+        for (spec, expected) in [
+            (
+                tap(&exchange, &long),
+                "binding key too long (max 255 bytes)",
+            ),
+            (tap(&long, "#"), "exchange name too long (max 255 bytes)"),
+        ] {
+            let err = match conn.subscribe(spec).await {
+                Ok(_) => panic!("{expected}: the tap can't open"),
+                Err(e) => e,
+            };
+            assert_eq!(format!("{err:#}"), expected);
+        }
+        let err = publish_via(&mut conn, tap(&exchange, "#"), &long, "lost")
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{err:#}"), "routing key too long (max 255 bytes)");
+
+        // The same connection still answers, taps and publishes, with a key
+        // of exactly 255 bytes that ends in a multibyte char.
+        conn.ping().await.expect("the connection is alive");
+        let max = format!("{}é", "k".repeat(253));
+        assert_eq!(max.len(), 255);
+        let mut stream = conn
+            .subscribe(tap(&exchange, &max))
+            .await
+            .expect("exchange tap");
+        publish_via(&mut conn, tap(&exchange, "#"), &max, "made it")
+            .await
+            .expect("confirmed: the tap's queue takes it");
+        let ev = timeout(Duration::from_secs(8), stream.next())
+            .await
+            .expect("tap timed out")
+            .expect("stream ended");
+        assert_eq!(ev.payload, Payload::Utf8("made it".into()));
+        assert_eq!(ev.meta("routing_key"), Some(max.as_str()));
     }
 
     #[tokio::test]

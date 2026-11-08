@@ -643,8 +643,6 @@ From Phase 3 on, also check it in the running app: `just dev`, then
 - The `keyhole dev` RabbitMQ publisher loop exits on the first publish error.
 - Moving AMQP 1.0 Jolokia discovery behind `list_destinations`.
 - Server-side writes: purge, delete, move.
-- A tap binding key or exchange name over 255 bytes panics the connection actor (lapin's
-  `ShortString` conversion `expect`s); reject it with an error instead.
 - `payload_preview` flattens and base64-encodes each whole message body before cutting it to the
   preview, so a 200-message peek of 64 KiB bodies costs ~23 ms a frame; work only as far as the
   preview needs.

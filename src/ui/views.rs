@@ -210,6 +210,11 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     // of the active connection below.
     let mode = app.mode;
     let subscribe_buf = app.subscribe_buf.clone();
+    let subscribe_error = app.subscribe_error.clone();
+    let prompt = AnchorPrompt {
+        buf: &subscribe_buf,
+        error: subscribe_error.as_deref(),
+    };
     // The connection-health indicator now lives in the Server band, and the
     // bottom panel's height tracks the window; both are read before the `&mut`
     // borrow of the active connection below.
@@ -289,7 +294,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         amqp_destination_pane(frame, conn, focus, theme, table_area, vhost.as_deref());
         amqp_peek_pane(frame, conn, peek_mode, theme, value_area);
         if let Some(panel_area) = panel_area {
-            panel_band(frame, conn, mode, &subscribe_buf, now, theme, panel_area);
+            panel_band(frame, conn, mode, &prompt, now, theme, panel_area);
         }
         return;
     }
@@ -299,7 +304,7 @@ pub fn browser(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     keys_value_pane(frame, conn, focus, theme, body_area);
 
     if let Some(panel_area) = panel_area {
-        panel_band(frame, conn, mode, &subscribe_buf, now, theme, panel_area);
+        panel_band(frame, conn, mode, &prompt, now, theme, panel_area);
     }
 }
 
@@ -1564,7 +1569,7 @@ fn panel_band(
     frame: &mut Frame,
     conn: &Connection,
     mode: InputMode,
-    subscribe_buf: &str,
+    prompt: &AnchorPrompt,
     now: OffsetDateTime,
     theme: &Theme,
     area: Rect,
@@ -1612,7 +1617,7 @@ fn panel_band(
             theme,
             content_area,
             mode,
-            subscribe_buf,
+            prompt,
             "channel or pattern",
             "Enter subscribes · a glob (* ? [) makes it a pattern (PSUBSCRIBE)",
         ),
@@ -1622,7 +1627,7 @@ fn panel_band(
             theme,
             content_area,
             mode,
-            subscribe_buf,
+            prompt,
             "exchange:name or exchange:name/binding-key",
             "Enter taps it · non-destructive copy via a temporary queue · key defaults to #",
         ),
@@ -1632,7 +1637,7 @@ fn panel_band(
             theme,
             content_area,
             mode,
-            subscribe_buf,
+            prompt,
             "topic:name or queue:name",
             "Enter tails it · topic = live multicast · queue = non-destructive browse",
         ),
@@ -1641,7 +1646,7 @@ fn panel_band(
             theme,
             content_area,
             mode,
-            subscribe_buf,
+            prompt,
             "stream key",
             "Enter tails · leave empty to tail the selected stream key",
         ),
@@ -1729,19 +1734,28 @@ fn push_sub_marks(spans: &mut Vec<Span<'static>>, sub: &Subscription, theme: &Th
     }
 }
 
+/// What the Pub/Sub and Tail anchors show: the typed text, and why the last
+/// spec submitted was refused.
+struct AnchorPrompt<'a> {
+    buf: &'a str,
+    error: Option<&'a str>,
+}
+
 /// An input-anchor's content: the always-shown prompt echoing the typed text
-/// (with a cursor while the tab is focused) over a one-line hint.
+/// (with a cursor while the tab is focused), then why the last spec was
+/// refused, if it was, over a one-line hint.
 fn anchor_input(
     frame: &mut Frame,
     theme: &Theme,
     area: Rect,
     mode: InputMode,
-    buf: &str,
+    prompt: &AnchorPrompt,
     label: &str,
     hint: &str,
 ) {
-    let [prompt_area, _gap, hint_area] = Layout::vertical([
+    let [prompt_area, error_area, _gap, hint_area] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(u16::from(prompt.error.is_some())),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
@@ -1751,12 +1765,15 @@ fn anchor_input(
     } else {
         ""
     };
-    let prompt = Line::from(vec![
+    let line = Line::from(vec![
         Span::styled(format!("{label}: "), theme.dim),
-        Span::raw(buf.to_string()),
+        Span::raw(prompt.buf.to_string()),
         Span::styled(cursor, theme.accent),
     ]);
-    frame.render_widget(Paragraph::new(prompt), prompt_area);
+    frame.render_widget(Paragraph::new(line), prompt_area);
+    if let Some(error) = prompt.error {
+        frame.render_widget(Paragraph::new(Line::styled(error, theme.error)), error_area);
+    }
     frame.render_widget(Paragraph::new(Line::styled(hint, theme.dim)), hint_area);
 }
 

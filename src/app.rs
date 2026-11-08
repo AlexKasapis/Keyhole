@@ -118,6 +118,10 @@ pub struct App {
     pub(crate) mode: InputMode,
     pub(crate) filter: String,
     pub(crate) subscribe_buf: String,
+    /// Why the Tail anchor refused the last spec submitted on it, shown under
+    /// its prompt (the footer shows the prompt instead of a status) until the
+    /// next edit or focus move.
+    pub(crate) subscribe_error: Option<String>,
     /// The text being typed in the publish prompts: the routing key
     /// ([`InputMode::PublishKey`]), then the message body
     /// ([`InputMode::Publish`]).
@@ -214,6 +218,7 @@ impl App {
             mode: InputMode::Normal,
             filter: String::new(),
             subscribe_buf: String::new(),
+            subscribe_error: None,
             publish_buf: String::new(),
             publish_draft: None,
             form: None,

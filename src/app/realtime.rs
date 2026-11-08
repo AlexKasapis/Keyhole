@@ -158,8 +158,14 @@ impl App {
         }
         self.with_active_conn(|conn| conn.cycle_panel(delta));
         // Moving focus gives the Pub/Sub and Tail anchors a fresh prompt.
-        self.subscribe_buf.clear();
+        self.clear_subscribe_prompt();
         self.sync_panel_focus();
+    }
+
+    /// Empty the Pub/Sub and Tail anchors' prompt, and drop the last refusal.
+    pub(super) fn clear_subscribe_prompt(&mut self) {
+        self.subscribe_buf.clear();
+        self.subscribe_error = None;
     }
 
     /// Reconcile the bottom panel with the focused tab: start/stop the
@@ -350,7 +356,7 @@ impl App {
     /// focused tab, not the buffer's contents.
     pub(super) fn submit_subscribe(&mut self) {
         let raw = self.subscribe_buf.trim().to_string();
-        self.subscribe_buf.clear();
+        self.clear_subscribe_prompt();
         let (panel, db, has_destinations) = match self.active_conn() {
             Some(c) => (c.active_panel(), c.db, c.caps.has_destinations()),
             None => return,
@@ -362,7 +368,11 @@ impl App {
             if matches!(panel, PanelTab::Tail) && !raw.is_empty() {
                 match SubSpec::parse(&raw, 0) {
                     Ok(spec) => self.start_subscribe(spec),
-                    Err(e) => self.set_status(e.to_string(), true),
+                    Err(e) => {
+                        // The focus stays on the anchor, so it says why.
+                        self.subscribe_error = Some(e.to_string());
+                        self.set_status(e.to_string(), true);
+                    }
                 }
             }
             return;
